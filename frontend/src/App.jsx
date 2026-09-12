@@ -11,6 +11,7 @@ const HISTORY_STORAGE_KEY = 'setupdoctor-history'
 function App() {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [showSuccessToast, setShowSuccessToast] = useState(false)
+  const [selectedAnalysis, setSelectedAnalysis] = useState(null)
   const [repository, setRepository] = useState(null)
   const [diagnostics, setDiagnostics] = useState([])
   const [diagnosticsSummary, setDiagnosticsSummary] = useState(null)
@@ -100,6 +101,10 @@ function App() {
     setIsModalOpen(false)
     setShowSuccessToast(true)
     void runDiagnostics(repositoryData)
+  }
+
+  function handleSelectAnalysis(analysis) {
+    setSelectedAnalysis(analysis)
   }
 
   return (
@@ -220,7 +225,29 @@ function App() {
             </section>
           )}
 
-          <RecentAnalyses history={analysisHistory} />
+          {selectedAnalysis && (
+            <section className="selected-analysis" aria-labelledby="selected-analysis-title">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">History</p>
+                  <h2 id="selected-analysis-title">Selected Analysis</h2>
+                </div>
+              </div>
+              <div className="repository-details">
+                <div><span>Repository</span><strong>{selectedAnalysis.repository?.fullName || selectedAnalysis.repository?.name || 'Unknown repository'}</strong></div>
+                <div><span>Default branch</span><strong>{selectedAnalysis.repository?.defaultBranch || 'Unknown branch'}</strong></div>
+                <div><span>Health score</span><strong>{selectedAnalysis.health?.score ?? 'Unknown'}</strong></div>
+                <div><span>Health status</span><strong>{selectedAnalysis.health?.status || 'Unknown'}</strong></div>
+                <div><span>Total checks</span><strong>{selectedAnalysis.summary?.total ?? 'Unknown'}</strong></div>
+                <div><span>Passed checks</span><strong>{selectedAnalysis.summary?.pass ?? 'Unknown'}</strong></div>
+                <div><span>Warnings</span><strong>{selectedAnalysis.summary?.warning ?? 'Unknown'}</strong></div>
+                <div><span>Errors</span><strong>{selectedAnalysis.summary?.error ?? 'Unknown'}</strong></div>
+                <div><span>Analyzed</span><strong>{selectedAnalysis.analyzedAt ? new Date(selectedAnalysis.analyzedAt).toLocaleString() : 'Unknown time'}</strong></div>
+              </div>
+            </section>
+          )}
+
+          <RecentAnalyses history={analysisHistory} onSelectAnalysis={handleSelectAnalysis} />
         </main>
       </div>
       {isModalOpen && <AnalyzeRepositoryModal onClose={() => setIsModalOpen(false)} onSuccess={handleAnalysisSuccess} />}

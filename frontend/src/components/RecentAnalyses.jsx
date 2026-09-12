@@ -1,4 +1,4 @@
-function RecentAnalyses({ history }) {
+function RecentAnalyses({ history, onSelectAnalysis }) {
   const analyses = Array.isArray(history) ? history : []
 
   return (
@@ -34,7 +34,7 @@ function RecentAnalyses({ history }) {
                 </td>
                 <td><span className={`status ${status === 'Healthy' ? 'healthy' : 'issues'}`}><span />{status === 'Healthy' ? status : `${issueCount} issue${issueCount === 1 ? '' : 's'} found`}</span></td>
                 <td className="time-cell">{analyzedAt}</td>
-                <td><button className="row-action" type="button" aria-label={`Open ${repositoryName}`}>&#8594;</button></td>
+                <td><button className="row-action" type="button" aria-label={`Open ${repositoryName}`} onClick={() => onSelectAnalysis(analysis)}>&#8594;</button></td>
               </tr>
               )
             }) : (
