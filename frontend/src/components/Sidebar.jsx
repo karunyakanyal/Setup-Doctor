@@ -1,8 +1,7 @@
 const navigationItems = [
-  { label: 'Dashboard', icon: 'grid', active: true },
-  { label: 'Projects', icon: 'folder' },
-  { label: 'Analyses', icon: 'pulse' },
-  { label: 'History', icon: 'clock' },
+  { label: 'Dashboard', page: 'dashboard', icon: 'grid' },
+  { label: 'Projects', page: 'projects', icon: 'folder' },
+  { label: 'History', page: 'history', icon: 'clock' },
 ]
 
 function NavIcon({ type }) {
@@ -17,7 +16,7 @@ function NavIcon({ type }) {
   return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true">{paths[type]}</svg>
 }
 
-function Sidebar() {
+function Sidebar({ activePage, onNavigate }) {
   return (
     <aside className="sidebar">
       <div>
@@ -29,7 +28,15 @@ function Sidebar() {
         <nav className="main-nav" aria-label="Main navigation">
           <p className="nav-label">Workspace</p>
           {navigationItems.map((item) => (
-            <a className={`nav-item ${item.active ? 'active' : ''}`} href="#" key={item.label}>
+            <a
+              className={`nav-item ${activePage === item.page ? 'active' : ''}`}
+              href="#"
+              key={item.label}
+              onClick={(event) => {
+                event.preventDefault()
+                onNavigate(item.page)
+              }}
+            >
               <NavIcon type={item.icon} />
               <span>{item.label}</span>
               {item.label === 'Analyses' && <span className="nav-count">12</span>}

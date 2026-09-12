@@ -7,8 +7,10 @@ import Sidebar from './components/Sidebar'
 import StatCard from './components/StatCard'
 
 const HISTORY_STORAGE_KEY = 'setupdoctor-history'
+const PROJECTS_STORAGE_KEY = 'setupdoctor-projects'
 
 function App() {
+  const [activePage, setActivePage] = useState('dashboard')
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [showSuccessToast, setShowSuccessToast] = useState(false)
   const [selectedAnalysis, setSelectedAnalysis] = useState(null)
@@ -22,6 +24,15 @@ function App() {
       const storedHistory = window.localStorage.getItem(HISTORY_STORAGE_KEY)
       const parsedHistory = storedHistory ? JSON.parse(storedHistory) : []
       return Array.isArray(parsedHistory) ? parsedHistory : []
+    } catch {
+      return []
+    }
+  })
+  const [projects, setProjects] = useState(() => {
+    try {
+      const storedProjects = window.localStorage.getItem(PROJECTS_STORAGE_KEY)
+      const parsedProjects = storedProjects ? JSON.parse(storedProjects) : []
+      return Array.isArray(parsedProjects) ? parsedProjects : []
     } catch {
       return []
     }
@@ -89,6 +100,38 @@ function App() {
           }
           return nextHistory
         })
+        setProjects((currentProjects) => {
+          const lastAnalyzedAt = new Date().toISOString()
+          const projectIndex = currentProjects.findIndex(
+            (project) => project.repository?.fullName === repositoryData.fullName,
+          )
+          const nextProjects = projectIndex === -1
+            ? [
+                ...currentProjects,
+                {
+                  repository: repositoryData,
+                  health: responseHealth,
+                  lastAnalyzedAt,
+                  analysisCount: 1,
+                },
+              ]
+            : currentProjects.map((project, index) => (
+                index === projectIndex
+                  ? {
+                      ...project,
+                      health: responseHealth,
+                      lastAnalyzedAt,
+                      analysisCount: project.analysisCount + 1,
+                    }
+                  : project
+              ))
+          try {
+            window.localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(nextProjects))
+          } catch {
+            return nextProjects
+          }
+          return nextProjects
+        })
       }
     } catch {
       setDiagnosticsError(true)
@@ -104,16 +147,31 @@ function App() {
     void runDiagnostics(repositoryData)
   }
 
+  function handleNavigation(page) {
+    setActivePage(page)
+  }
+
   function handleSelectAnalysis(analysis) {
     setSelectedAnalysis(analysis)
   }
 
+  function handleSelectProject(project) {
+    const projectFullName = project.repository?.fullName
+    const latestAnalysis = analysisHistory.find(
+      (analysis) => analysis.repository?.fullName === projectFullName,
+    )
+    setSelectedAnalysis(latestAnalysis || null)
+    setActivePage('history')
+  }
+
   return (
     <div className="app-shell">
-      <Sidebar />
+      <Sidebar activePage={activePage} onNavigate={handleNavigation} />
       <div className="page-shell">
-        <Header />
+        <Header activePage={activePage} />
         <main className="dashboard-main">
+          {activePage === 'dashboard' ? (
+            <>
           <section className="welcome-section">
             <div>
               <p className="eyebrow">Monday, September 16, 2024</p>
@@ -273,6 +331,75 @@ function App() {
           )}
 
           <RecentAnalyses history={analysisHistory} onSelectAnalysis={handleSelectAnalysis} />
+            </>
+          ) : activePage === 'projects' ? (
+            <section>
+              <h1>Projects</h1>
+              {projects.length ? (
+                projects.map((project) => (
+                  <div
+                    className="repository-summary"
+                    key={project.repository?.fullName}
+                    onClick={() => handleSelectProject(project)}
+                  >
+                    <div className="repository-summary-heading">
+                      <div>
+                        <p className="eyebrow">Repository</p>
+                        <h2>{project.repository?.fullName || 'Unknown repository'}</h2>
+                      </div>
+                    </div>
+                    <div className="repository-details">
+                      <div><span>Default branch</span><strong>{project.repository?.defaultBranch || 'Unknown branch'}</strong></div>
+                      <div><span>Analysis count</span><strong>{project.analysisCount}</strong></div>
+                      <div><span>Last analyzed</span><strong>{project.lastAnalyzedAt ? new Date(project.lastAnalyzedAt).toLocaleString() : 'Unknown time'}</strong></div>
+                    </div>
+                    <div className="diagnostics-health">
+                      <strong>{project.health?.score ?? 'Unknown'} / 100</strong>
+                      <span className={`health-status health-${project.health?.status?.toLowerCase().replace(/\s+/g, '-') || 'unknown'}`}>{project.health?.status || 'Unknown'}</span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p>No projects analyzed yet.</p>
+              )}
+            </section>
+          ) : activePage === 'analyses' ? (
+            <section>
+              <h1>Analyses</h1>
+              <p>Repository analysis results will appear here.</p>
+            </section>
+          ) : (
+            <section>
+              <h1>History</h1>
+              {analysisHistory.length ? (
+                analysisHistory.map((analysis) => (
+                  <div className="repository-summary" key={`${analysis.repository?.fullName || 'unknown'}-${analysis.analyzedAt}`}>
+                    <div className="repository-summary-heading">
+                      <div>
+                        <p className="eyebrow">Analysis</p>
+                        <h2>{analysis.repository?.fullName || 'Unknown repository'}</h2>
+                      </div>
+                    </div>
+                    <div className="repository-details">
+                      <div><span>Default branch</span><strong>{analysis.repository?.defaultBranch || 'Unknown branch'}</strong></div>
+                      <div><span>Analyzed</span><strong>{analysis.analyzedAt ? new Date(analysis.analyzedAt).toLocaleString() : 'Unknown time'}</strong></div>
+                    </div>
+                    <div className="diagnostics-health">
+                      <strong>{analysis.health?.score ?? 'Unknown'} / 100</strong>
+                      <span className={`health-status health-${analysis.health?.status?.toLowerCase().replace(/\s+/g, '-') || 'unknown'}`}>{analysis.health?.status || 'Unknown'}</span>
+                    </div>
+                    <div className="diagnostics-summary" aria-label="Analysis summary">
+                      <span>{analysis.summary?.total ?? 'Unknown'} Checks</span>
+                      <span>{analysis.summary?.warning ?? 'Unknown'} Warnings</span>
+                      <span>{analysis.summary?.error ?? 'Unknown'} Errors</span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p>No analysis history yet.</p>
+              )}
+            </section>
+          )}
         </main>
       </div>
       {isModalOpen && <AnalyzeRepositoryModal onClose={() => setIsModalOpen(false)} onSuccess={handleAnalysisSuccess} />}

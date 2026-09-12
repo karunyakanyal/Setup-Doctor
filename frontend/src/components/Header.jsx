@@ -1,10 +1,16 @@
-function Header() {
+function Header({ activePage }) {
+  const pageLabels = {
+    dashboard: 'Dashboard',
+    projects: 'Projects',
+    history: 'History',
+  }
+
   return (
     <header className="topbar">
       <div className="breadcrumb">
         <span>Workspace</span>
         <span className="breadcrumb-separator">/</span>
-        <strong>Dashboard</strong>
+        <strong>{pageLabels[activePage] || pageLabels.dashboard}</strong>
       </div>
       <div className="profile-area">
         <button className="icon-button" type="button" aria-label="View notifications">
