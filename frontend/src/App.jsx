@@ -77,6 +77,7 @@ function App() {
           repository: repositoryData,
           health: responseHealth,
           summary: data.summary || null,
+          diagnostics: data.diagnostics || [],
           analyzedAt: new Date().toISOString(),
         }
         setAnalysisHistory((currentHistory) => {
@@ -243,6 +244,30 @@ function App() {
                 <div><span>Warnings</span><strong>{selectedAnalysis.summary?.warning ?? 'Unknown'}</strong></div>
                 <div><span>Errors</span><strong>{selectedAnalysis.summary?.error ?? 'Unknown'}</strong></div>
                 <div><span>Analyzed</span><strong>{selectedAnalysis.analyzedAt ? new Date(selectedAnalysis.analyzedAt).toLocaleString() : 'Unknown time'}</strong></div>
+              </div>
+              <h3>Diagnostic Checks</h3>
+              <div className="diagnostic-list">
+                {(Array.isArray(selectedAnalysis.diagnostics) ? selectedAnalysis.diagnostics : []).map((diagnostic) => (
+                  <div className="diagnostic-row" key={diagnostic.rule}>
+                    <span className={`diagnostic-status ${diagnostic.status}`}>
+                      <span />
+                      {diagnostic.status}
+                    </span>
+                    <div className="diagnostic-copy">
+                      <span className="diagnostic-message">{diagnostic.message}</span>
+                      {(diagnostic.status === 'warning' || diagnostic.status === 'error') && (
+                        <div className="diagnostic-details">
+                          {typeof diagnostic.why === 'string' && diagnostic.why.trim() && (
+                            <p><strong>Why?</strong> {diagnostic.why}</p>
+                          )}
+                          {typeof diagnostic.recommendation === 'string' && diagnostic.recommendation.trim() && (
+                            <p><strong>Recommendation</strong> {diagnostic.recommendation}</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             </section>
           )}
