@@ -1,8 +1,9 @@
-function Header({ activePage }) {
+function Header({ activePage, user = { name: 'Alex Kim', initials: 'AK' } }) {
   const pageLabels = {
     dashboard: 'Dashboard',
     projects: 'Projects',
     history: 'History',
+    'bug-vault': 'Bug Vault',
   }
 
   return (
@@ -19,8 +20,8 @@ function Header({ activePage }) {
         </button>
         <span className="profile-divider" />
         <div className="profile">
-          <span className="avatar">AK</span>
-          <span className="profile-name">Alex Kim</span>
+          <span className="avatar">{user.initials}</span>
+          <span className="profile-name">{user.name}</span>
           <svg className="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
         </div>
       </div>

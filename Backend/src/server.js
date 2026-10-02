@@ -241,6 +241,29 @@ app.post('/api/repository/diagnose', async (req, res) => {
 			{ name: 'TypeScript', detected: dependencyNames.has('typescript') || hasTsconfig },
 			{ name: 'ESLint', detected: dependencyNames.has('eslint') || hasEslintConfig },
 		]
+		const validPriorities = new Set(['high', 'medium', 'low'])
+		const getDiagnosticPriority = (diagnostic) => {
+			if (diagnostic.status === 'pass') {
+				return undefined
+			}
+			if (new Set(['duplicate-dependencies', 'dependency-version-validity', 'environment-file-safety']).has(diagnostic.rule)) {
+				return 'high'
+			}
+			if (new Set(['scripts', 'build-script', 'dev-script', 'dependencies', 'node-engine', 'lockfile', 'package-manager-consistency', 'react-dependencies', 'vite-dependency', 'eslint-dependency', 'typescript-dependency', 'gitignore']).has(diagnostic.rule)) {
+				return 'medium'
+			}
+			return validPriorities.has(diagnostic.priority) ? diagnostic.priority : 'low'
+		}
+		const withPriority = (diagnostic) => {
+			const nextDiagnostic = { ...diagnostic }
+			if (diagnostic.status === 'pass') {
+				delete nextDiagnostic.priority
+				return nextDiagnostic
+			}
+			const priority = getDiagnosticPriority(diagnostic)
+			nextDiagnostic.priority = validPriorities.has(priority) ? priority : 'low'
+			return nextDiagnostic
+		}
 		const diagnostics = [
 			{
 				rule: 'package-json',
@@ -295,7 +318,7 @@ app.post('/api/repository/diagnose', async (req, res) => {
 					? 'Dependency version values use valid npm version ranges.'
 					: 'One or more dependency version values are empty or use an invalid npm version range.',
 			},
-		]
+		].map(withPriority)
 
 		const reactVersion = dependencies.react || devDependencies.react
 		const reactDomVersion = dependencies['react-dom'] || devDependencies['react-dom']
@@ -303,30 +326,30 @@ app.post('/api/repository/diagnose', async (req, res) => {
 			const reactMajor = getMajorVersion(reactVersion)
 			const reactDomMajor = getMajorVersion(reactDomVersion)
 			const versionsMatch = reactMajor !== null && reactMajor === reactDomMajor
-			diagnostics.push({
+			diagnostics.push(withPriority({
 				rule: 'react-version-consistency',
 				status: versionsMatch ? 'pass' : 'warning',
 				message: versionsMatch
 					? 'React and React DOM major versions match.'
 					: 'React and React DOM major versions do not match or could not be compared.',
-			})
+			}))
 		}
 
 		if (lockfiles.length === 1) {
-			diagnostics.push({
+			diagnostics.push(withPriority({
 				rule: 'lockfile',
 				status: 'pass',
 				message: 'A package manager lockfile is present.',
-			})
+			}))
 		} else {
-			diagnostics.push({
+			diagnostics.push(withPriority({
 				rule: 'lockfile',
 				status: 'warning',
 				message: lockfiles.length ? 'Multiple package manager lockfiles were found.' : 'No package manager lockfile was found.',
-			})
+			}))
 		}
 
-		diagnostics.push({
+		diagnostics.push(withPriority({
 			rule: 'package-manager-consistency',
 			status: lockfiles.length === 1 ? 'pass' : 'warning',
 			message: lockfiles.length === 1
@@ -334,77 +357,77 @@ app.post('/api/repository/diagnose', async (req, res) => {
 				: lockfiles.length > 1
 					? `Multiple package manager lockfiles were found: ${lockfiles.join(', ')}.`
 					: 'No supported package manager lockfile was found.',
-		})
-		diagnostics.push({
+		}))
+		diagnostics.push(withPriority({
 			rule: 'readme',
 			status: readmeFiles.length ? 'pass' : 'warning',
 			message: readmeFiles.length
 				? `Repository documentation is present: ${readmeFiles.join(', ')}.`
 				: 'No README file was found.',
-		})
-		diagnostics.push({
+		}))
+		diagnostics.push(withPriority({
 			rule: 'gitignore',
 			status: hasGitignore ? 'pass' : 'warning',
 			message: hasGitignore
 				? '.gitignore is present.'
 				: '.gitignore is missing.',
-		})
+		}))
 
 		if (dependencyNames.has('react')) {
-			diagnostics.push({
+			diagnostics.push(withPriority({
 				rule: 'react-dependencies',
 				status: dependencyNames.has('react-dom') ? 'pass' : 'warning',
 				message: dependencyNames.has('react-dom')
 					? 'React and React DOM dependencies are configured.'
 					: 'React is installed but react-dom is missing.',
-			})
+			}))
 		}
 
 		if (dependencyNames.has('vite') || filePaths.has('vite.config.js') || filePaths.has('vite.config.ts')) {
-			diagnostics.push({
+			diagnostics.push(withPriority({
 				rule: 'vite-dependency',
 				status: dependencyNames.has('vite') ? 'pass' : 'warning',
 				message: dependencyNames.has('vite')
 					? 'Vite is configured as a project dependency.'
 					: 'Vite configuration was detected but the Vite package is missing.',
-			})
+			}))
 		}
 
 		if (hasEslintConfig || dependencyNames.has('eslint')) {
-			diagnostics.push({
+			diagnostics.push(withPriority({
 				rule: 'eslint-dependency',
 				status: dependencyNames.has('eslint') ? 'pass' : 'warning',
 				message: dependencyNames.has('eslint')
 					? 'ESLint is configured.'
 					: 'ESLint configuration exists but the eslint package is missing.',
-			})
+			}))
 		}
 
 		if (hasTsconfig) {
-			diagnostics.push({
+			diagnostics.push(withPriority({
 				rule: 'typescript-dependency',
 				status: dependencyNames.has('typescript') ? 'pass' : 'warning',
 				message: dependencyNames.has('typescript')
 					? 'TypeScript configuration is consistent.'
 					: 'tsconfig.json exists but the TypeScript package is missing.',
-			})
+			}))
 		}
 
-		diagnostics.push({
+		diagnostics.push(withPriority({
 			rule: 'environment-example',
 			status: hasEnvExample ? 'pass' : 'warning',
 			message: hasEnvExample
 				? '.env.example is present.'
 				: '.env.example is missing; add one if the project needs environment variables.',
-		})
-		diagnostics.push({
+		}))
+		diagnostics.push(withPriority({
 			rule: 'environment-file-safety',
 			status: hasEnvFile ? 'warning' : 'pass',
 			message: hasEnvFile
 				? 'A .env file is committed; environment files may contain secrets.'
 				: 'No committed .env file was found.',
-		})
-		diagnostics.push({
+		}))
+		diagnostics.push(withPriority({
 			rule: 'environment-documentation',
 			status: hasEnvExample ? 'pass' : hasEnvFile ? 'warning' : 'pass',
 			message: hasEnvExample
@@ -412,7 +435,7 @@ app.post('/api/repository/diagnose', async (req, res) => {
 				: hasEnvFile
 					? '.env is present without .env.example documentation.'
 					: 'No environment configuration was detected.',
-		})
+		}))
 
 		const recommendations = {
 			scripts: {
@@ -498,6 +521,16 @@ app.post('/api/repository/diagnose', async (req, res) => {
 				? { ...diagnostic, ...recommendation }
 				: diagnostic
 		})
+		const finalDiagnostics = diagnosticsWithRecommendations.map((diagnostic) => {
+			const nextDiagnostic = { ...diagnostic }
+			if (nextDiagnostic.status === 'pass') {
+				delete nextDiagnostic.priority
+				return nextDiagnostic
+			}
+			const priority = getDiagnosticPriority(nextDiagnostic)
+			nextDiagnostic.priority = validPriorities.has(priority) ? priority : 'low'
+			return nextDiagnostic
+		})
 
 		const summary = diagnosticsWithRecommendations.reduce((counts, diagnostic) => {
 			counts[diagnostic.status] += 1
@@ -526,9 +559,82 @@ app.post('/api/repository/diagnose', async (req, res) => {
 				scripts,
 			},
 			stack,
-			diagnostics: diagnosticsWithRecommendations,
+			diagnostics: finalDiagnostics,
 			summary,
 			health,
+		})
+	} catch {
+		return res.status(502).json({
+			success: false,
+			message: 'Unable to connect to the GitHub API',
+		})
+	}
+})
+
+app.post('/api/repository/build-check', async (req, res) => {
+	const { owner, repo, branch } = req.body
+
+	if (!owner || !repo || !branch) {
+		return res.status(400).json({
+			success: false,
+			message: 'owner, repo, and branch are required',
+		})
+	}
+
+	try {
+		const githubResponse = await fetch(
+			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/package.json?ref=${encodeURIComponent(branch)}`,
+			{
+				headers: {
+					Accept: 'application/vnd.github+json',
+					'User-Agent': 'SetupDoctor',
+				},
+			},
+		)
+
+		if (githubResponse.status === 404) {
+			return res.status(404).json({
+				success: false,
+				message: 'package.json not found',
+			})
+		}
+
+		if (!githubResponse.ok) {
+			return res.status(502).json({
+				success: false,
+				message: 'GitHub API request failed',
+			})
+		}
+
+		const githubFile = await githubResponse.json()
+		const packageContent = Buffer.from(githubFile.content, 'base64').toString('utf8')
+		let packageJson
+
+		try {
+			packageJson = JSON.parse(packageContent)
+		} catch {
+			return res.status(422).json({
+				success: false,
+				message: 'package.json contains invalid JSON',
+			})
+		}
+
+		if (packageJson.scripts && packageJson.scripts.build) {
+			return res.json({
+				success: true,
+				build: {
+					status: 'ready',
+					command: 'npm run build',
+				},
+			})
+		}
+
+		return res.json({
+			success: true,
+			build: {
+				status: 'unavailable',
+				message: 'No build script is configured in package.json.',
+			},
 		})
 	} catch {
 		return res.status(502).json({
