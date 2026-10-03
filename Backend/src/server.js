@@ -1,29 +1,60 @@
 const cors = require('cors')
 const dotenv = require('dotenv')
 const express = require('express')
+const { runDiagnostics } = require('./rules')
 
 dotenv.config()
 
 const app = express()
 const port = process.env.PORT || 5000
 
-const getMajorVersion = (version) => {
-	const match = typeof version === 'string' ? version.trim().match(/^[~^<>=\s]*v?(\d+)/) : null
-	return match ? Number(match[1]) : null
+const defaultAllowedOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173']
+const configuredOrigins = process.env.ALLOWED_ORIGINS
+	? process.env.ALLOWED_ORIGINS.split(',').map((origin) => origin.trim()).filter(Boolean)
+	: []
+const allowedOrigins = configuredOrigins.length > 0 ? configuredOrigins : defaultAllowedOrigins
+
+app.use(cors({ origin: allowedOrigins }))
+app.use(express.json())
+
+const identifierPattern = /^[\w.-]{1,100}$/
+const isValidIdentifier = (value) => typeof value === 'string' && identifierPattern.test(value)
+
+const allowedFileNames = new Set([
+	'package.json',
+	'tsconfig.json',
+	'README.md',
+	'.gitignore',
+	'.env.example',
+	'eslint.config.js',
+	'vite.config.js',
+])
+
+const getGithubHeaders = () => {
+	const headers = {
+		Accept: 'application/vnd.github+json',
+		'User-Agent': 'SetupDoctor',
+	}
+	if (process.env.GITHUB_TOKEN) {
+		headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`
+	}
+	return headers
 }
 
-const isValidDependencyVersion = (version) => {
-	if (typeof version !== 'string' || !version.trim()) {
-		return false
+const ghFetch = async (url) => {
+	const response = await fetch(url, {
+		headers: getGithubHeaders(),
+		signal: AbortSignal.timeout(8000),
+	})
+
+	if (response.status === 429 || (response.status === 403 && response.headers.get('x-ratelimit-remaining') === '0')) {
+		const error = new Error('GitHub API rate limit exceeded. Set GITHUB_TOKEN.')
+		error.status = 429
+		throw error
 	}
 
-	const versionPart = '(?:\\d+|[xX*])(?:\\.(?:\\d+|[xX*])){0,2}(?:-[0-9A-Za-z.-]+)?'
-	const versionPattern = new RegExp(`^(?:[~^<>=]*\\s*)?${versionPart}(?:\\s*(?:\\|\\||-)\\s*(?:[~^<>=]*\\s*)?${versionPart})*$`)
-	return versionPattern.test(version.trim())
+	return response
 }
-
-app.use(cors())
-app.use(express.json())
 
 app.get('/api/health', (req, res) => {
 	res.json({
@@ -42,15 +73,16 @@ app.get('/api/repository/tree', async (req, res) => {
 		})
 	}
 
+	if (!isValidIdentifier(owner) || !isValidIdentifier(repo) || !isValidIdentifier(branch)) {
+		return res.status(400).json({
+			success: false,
+			message: 'owner, repo, and branch must be valid identifiers',
+		})
+	}
+
 	try {
-		const githubResponse = await fetch(
+		const githubResponse = await ghFetch(
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-			{
-				headers: {
-					Accept: 'application/vnd.github+json',
-					'User-Agent': 'SetupDoctor',
-				},
-			},
 		)
 
 		if (githubResponse.status === 404) {
@@ -76,7 +108,13 @@ app.get('/api/repository/tree', async (req, res) => {
 				type: item.type,
 			})),
 		})
-	} catch {
+	} catch (error) {
+		if (error && error.status === 429) {
+			return res.status(429).json({
+				success: false,
+				message: error.message || 'GitHub API rate limit exceeded. Set GITHUB_TOKEN.',
+			})
+		}
 		return res.status(502).json({
 			success: false,
 			message: 'Unable to connect to the GitHub API',
@@ -93,23 +131,32 @@ app.get('/api/repository/file', async (req, res) => {
 			message: 'owner, repo, branch, and path are required',
 		})
 	}
-	const fileName = path.split('/').pop()
-	if (fileName === '.env' || (fileName.startsWith('.env.') && fileName !== '.env.example')) {
+
+	if (!isValidIdentifier(owner) || !isValidIdentifier(repo) || !isValidIdentifier(branch)) {
+		return res.status(400).json({
+			success: false,
+			message: 'owner, repo, and branch must be valid identifiers',
+		})
+	}
+
+	if (typeof path !== 'string' || path.includes('..')) {
 		return res.status(403).json({
 			success: false,
-			message: 'Environment file contents cannot be retrieved',
+			message: 'Access to the requested file is forbidden',
+		})
+	}
+
+	const fileName = path.split('/').pop()
+	if (!allowedFileNames.has(fileName)) {
+		return res.status(403).json({
+			success: false,
+			message: 'Access to the requested file is forbidden',
 		})
 	}
 
 	try {
-		const githubResponse = await fetch(
+		const githubResponse = await ghFetch(
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(branch)}`,
-			{
-				headers: {
-					Accept: 'application/vnd.github+json',
-					'User-Agent': 'SetupDoctor',
-				},
-			},
 		)
 
 		if (githubResponse.status === 404) {
@@ -134,7 +181,13 @@ app.get('/api/repository/file', async (req, res) => {
 			path,
 			content,
 		})
-	} catch {
+	} catch (error) {
+		if (error && error.status === 429) {
+			return res.status(429).json({
+				success: false,
+				message: error.message || 'GitHub API rate limit exceeded. Set GITHUB_TOKEN.',
+			})
+		}
 		return res.status(502).json({
 			success: false,
 			message: 'Unable to connect to the GitHub API',
@@ -143,7 +196,7 @@ app.get('/api/repository/file', async (req, res) => {
 })
 
 app.post('/api/repository/diagnose', async (req, res) => {
-	const { owner, repo, branch } = req.body
+	const { owner, repo, branch } = req.body || {}
 
 	if (!owner || !repo || !branch) {
 		return res.status(400).json({
@@ -152,15 +205,16 @@ app.post('/api/repository/diagnose', async (req, res) => {
 		})
 	}
 
+	if (!isValidIdentifier(owner) || !isValidIdentifier(repo) || !isValidIdentifier(branch)) {
+		return res.status(400).json({
+			success: false,
+			message: 'owner, repo, and branch must be valid identifiers',
+		})
+	}
+
 	try {
-		const githubResponse = await fetch(
+		const githubResponse = await ghFetch(
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/package.json?ref=${encodeURIComponent(branch)}`,
-			{
-				headers: {
-					Accept: 'application/vnd.github+json',
-					'User-Agent': 'SetupDoctor',
-				},
-			},
 		)
 
 		if (githubResponse.status === 404) {
@@ -193,18 +247,9 @@ app.post('/api/repository/diagnose', async (req, res) => {
 		const scripts = packageJson.scripts && typeof packageJson.scripts === 'object' ? packageJson.scripts : {}
 		const dependencies = packageJson.dependencies && typeof packageJson.dependencies === 'object' ? packageJson.dependencies : {}
 		const devDependencies = packageJson.devDependencies && typeof packageJson.devDependencies === 'object' ? packageJson.devDependencies : {}
-		const engines = packageJson.engines && typeof packageJson.engines === 'object' ? packageJson.engines : {}
-		const dependencyNames = new Set([...Object.keys(dependencies), ...Object.keys(devDependencies)])
-		const duplicateDependencies = Object.keys(dependencies).filter((name) => Object.prototype.hasOwnProperty.call(devDependencies, name))
-		const allDependencyEntries = [...Object.entries(dependencies), ...Object.entries(devDependencies)]
-		const treeResponse = await fetch(
+
+		const treeResponse = await ghFetch(
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-			{
-				headers: {
-					Accept: 'application/vnd.github+json',
-					'User-Agent': 'SetupDoctor',
-				},
-			},
 		)
 
 		if (!treeResponse.ok) {
@@ -215,340 +260,7 @@ app.post('/api/repository/diagnose', async (req, res) => {
 		}
 
 		const treeData = await treeResponse.json()
-		const filePaths = new Set(
-			Array.isArray(treeData.tree)
-				? treeData.tree.filter((item) => item.type === 'blob').map((item) => item.path)
-				: [],
-		)
-		const hasEslintConfig = [...filePaths].some((path) =>
-			/(^|\/)(eslint\.config\.[^/]+|\.eslintrc(?:\.[^/]+)?|\.eslintrc)$/.test(path),
-		)
-		const hasEnvExample = [...filePaths].some((path) => path.split('/').pop() === '.env.example')
-		const hasEnvFile = [...filePaths].some((path) => path.split('/').pop() === '.env')
-		const lockfiles = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'].filter((fileName) => filePaths.has(fileName))
-		const readmeFiles = ['README.md', 'README', 'README.txt'].filter((fileName) => filePaths.has(fileName))
-		const hasGitignore = filePaths.has('.gitignore')
-		const packageManagers = lockfiles.map((fileName) => ({
-			'package-lock.json': 'npm',
-			'yarn.lock': 'Yarn',
-			'pnpm-lock.yaml': 'pnpm',
-		}[fileName]))
-		const hasTsconfig = filePaths.has('tsconfig.json')
-		const stack = [
-			{ name: 'React', detected: dependencyNames.has('react') },
-			{ name: 'Vite', detected: dependencyNames.has('vite') },
-			{ name: 'Express', detected: dependencyNames.has('express') },
-			{ name: 'TypeScript', detected: dependencyNames.has('typescript') || hasTsconfig },
-			{ name: 'ESLint', detected: dependencyNames.has('eslint') || hasEslintConfig },
-		]
-		const validPriorities = new Set(['high', 'medium', 'low'])
-		const getDiagnosticPriority = (diagnostic) => {
-			if (diagnostic.status === 'pass') {
-				return undefined
-			}
-			if (new Set(['duplicate-dependencies', 'dependency-version-validity', 'environment-file-safety']).has(diagnostic.rule)) {
-				return 'high'
-			}
-			if (new Set(['scripts', 'build-script', 'dev-script', 'dependencies', 'node-engine', 'lockfile', 'package-manager-consistency', 'react-dependencies', 'vite-dependency', 'eslint-dependency', 'typescript-dependency', 'gitignore']).has(diagnostic.rule)) {
-				return 'medium'
-			}
-			return validPriorities.has(diagnostic.priority) ? diagnostic.priority : 'low'
-		}
-		const withPriority = (diagnostic) => {
-			const nextDiagnostic = { ...diagnostic }
-			if (diagnostic.status === 'pass') {
-				delete nextDiagnostic.priority
-				return nextDiagnostic
-			}
-			const priority = getDiagnosticPriority(diagnostic)
-			nextDiagnostic.priority = validPriorities.has(priority) ? priority : 'low'
-			return nextDiagnostic
-		}
-		const diagnostics = [
-			{
-				rule: 'package-json',
-				status: 'pass',
-				message: 'package.json exists.',
-			},
-			{
-				rule: 'scripts',
-				status: Object.keys(scripts).length ? 'pass' : 'warning',
-				message: Object.keys(scripts).length ? 'Scripts section is configured.' : 'Scripts section is missing.',
-			},
-			{
-				rule: 'build-script',
-				status: scripts.build ? 'pass' : 'warning',
-				message: scripts.build ? 'Build script is configured.' : 'Build script is missing.',
-			},
-			{
-				rule: 'dev-script',
-				status: scripts.dev ? 'pass' : 'warning',
-				message: scripts.dev ? 'Dev script is configured.' : 'Dev script is missing.',
-			},
-			{
-				rule: 'dependencies',
-				status: Object.keys(dependencies).length || Object.keys(devDependencies).length ? 'pass' : 'warning',
-				message: Object.keys(dependencies).length || Object.keys(devDependencies).length
-					? 'Dependencies are configured.'
-					: 'No dependencies or devDependencies are configured.',
-			},
-			{
-				rule: 'node-engine',
-				status: Object.prototype.hasOwnProperty.call(engines, 'node') ? 'pass' : 'warning',
-				message: Object.prototype.hasOwnProperty.call(engines, 'node')
-					? `Node.js requirement is configured as ${engines.node}.`
-					: 'The project does not specify a Node.js version requirement.',
-			},
-			{
-				rule: 'dependency-count',
-				status: 'pass',
-				message: `${Object.keys(dependencies).length} production dependencies and ${Object.keys(devDependencies).length} development dependencies are configured.`,
-			},
-			{
-				rule: 'duplicate-dependencies',
-				status: duplicateDependencies.length ? 'warning' : 'pass',
-				message: duplicateDependencies.length
-					? `These dependencies are declared in both sections: ${duplicateDependencies.join(', ')}.`
-					: 'No dependencies are duplicated between dependencies and devDependencies.',
-			},
-			{
-				rule: 'dependency-version-validity',
-				status: allDependencyEntries.every(([, version]) => isValidDependencyVersion(version)) ? 'pass' : 'warning',
-				message: allDependencyEntries.every(([, version]) => isValidDependencyVersion(version))
-					? 'Dependency version values use valid npm version ranges.'
-					: 'One or more dependency version values are empty or use an invalid npm version range.',
-			},
-		].map(withPriority)
-
-		const reactVersion = dependencies.react || devDependencies.react
-		const reactDomVersion = dependencies['react-dom'] || devDependencies['react-dom']
-		if (reactVersion && reactDomVersion) {
-			const reactMajor = getMajorVersion(reactVersion)
-			const reactDomMajor = getMajorVersion(reactDomVersion)
-			const versionsMatch = reactMajor !== null && reactMajor === reactDomMajor
-			diagnostics.push(withPriority({
-				rule: 'react-version-consistency',
-				status: versionsMatch ? 'pass' : 'warning',
-				message: versionsMatch
-					? 'React and React DOM major versions match.'
-					: 'React and React DOM major versions do not match or could not be compared.',
-			}))
-		}
-
-		if (lockfiles.length === 1) {
-			diagnostics.push(withPriority({
-				rule: 'lockfile',
-				status: 'pass',
-				message: 'A package manager lockfile is present.',
-			}))
-		} else {
-			diagnostics.push(withPriority({
-				rule: 'lockfile',
-				status: 'warning',
-				message: lockfiles.length ? 'Multiple package manager lockfiles were found.' : 'No package manager lockfile was found.',
-			}))
-		}
-
-		diagnostics.push(withPriority({
-			rule: 'package-manager-consistency',
-			status: lockfiles.length === 1 ? 'pass' : 'warning',
-			message: lockfiles.length === 1
-				? `${packageManagers[0]} package manager lockfile is present.`
-				: lockfiles.length > 1
-					? `Multiple package manager lockfiles were found: ${lockfiles.join(', ')}.`
-					: 'No supported package manager lockfile was found.',
-		}))
-		diagnostics.push(withPriority({
-			rule: 'readme',
-			status: readmeFiles.length ? 'pass' : 'warning',
-			message: readmeFiles.length
-				? `Repository documentation is present: ${readmeFiles.join(', ')}.`
-				: 'No README file was found.',
-		}))
-		diagnostics.push(withPriority({
-			rule: 'gitignore',
-			status: hasGitignore ? 'pass' : 'warning',
-			message: hasGitignore
-				? '.gitignore is present.'
-				: '.gitignore is missing.',
-		}))
-
-		if (dependencyNames.has('react')) {
-			diagnostics.push(withPriority({
-				rule: 'react-dependencies',
-				status: dependencyNames.has('react-dom') ? 'pass' : 'warning',
-				message: dependencyNames.has('react-dom')
-					? 'React and React DOM dependencies are configured.'
-					: 'React is installed but react-dom is missing.',
-			}))
-		}
-
-		if (dependencyNames.has('vite') || filePaths.has('vite.config.js') || filePaths.has('vite.config.ts')) {
-			diagnostics.push(withPriority({
-				rule: 'vite-dependency',
-				status: dependencyNames.has('vite') ? 'pass' : 'warning',
-				message: dependencyNames.has('vite')
-					? 'Vite is configured as a project dependency.'
-					: 'Vite configuration was detected but the Vite package is missing.',
-			}))
-		}
-
-		if (hasEslintConfig || dependencyNames.has('eslint')) {
-			diagnostics.push(withPriority({
-				rule: 'eslint-dependency',
-				status: dependencyNames.has('eslint') ? 'pass' : 'warning',
-				message: dependencyNames.has('eslint')
-					? 'ESLint is configured.'
-					: 'ESLint configuration exists but the eslint package is missing.',
-			}))
-		}
-
-		if (hasTsconfig) {
-			diagnostics.push(withPriority({
-				rule: 'typescript-dependency',
-				status: dependencyNames.has('typescript') ? 'pass' : 'warning',
-				message: dependencyNames.has('typescript')
-					? 'TypeScript configuration is consistent.'
-					: 'tsconfig.json exists but the TypeScript package is missing.',
-			}))
-		}
-
-		diagnostics.push(withPriority({
-			rule: 'environment-example',
-			status: hasEnvExample ? 'pass' : 'warning',
-			message: hasEnvExample
-				? '.env.example is present.'
-				: '.env.example is missing; add one if the project needs environment variables.',
-		}))
-		diagnostics.push(withPriority({
-			rule: 'environment-file-safety',
-			status: hasEnvFile ? 'warning' : 'pass',
-			message: hasEnvFile
-				? 'A .env file is committed; environment files may contain secrets.'
-				: 'No committed .env file was found.',
-		}))
-		diagnostics.push(withPriority({
-			rule: 'environment-documentation',
-			status: hasEnvExample ? 'pass' : hasEnvFile ? 'warning' : 'pass',
-			message: hasEnvExample
-				? '.env.example documents the environment configuration.'
-				: hasEnvFile
-					? '.env is present without .env.example documentation.'
-					: 'No environment configuration was detected.',
-		}))
-
-		const recommendations = {
-			scripts: {
-				why: 'Developers need clear commands to build, run, and work on the project.',
-				recommendation: 'Add the required development and build scripts to package.json.',
-			},
-			'build-script': {
-				why: 'Without a build command, developers may not know how to prepare the project for deployment.',
-				recommendation: 'Add a build script to package.json for the detected project tooling.',
-			},
-			'dev-script': {
-				why: 'Without a development command, developers may not know how to start the project locally.',
-				recommendation: 'Add a dev script to package.json for the project\'s local development command.',
-			},
-			dependencies: {
-				why: 'The project cannot install or run its required packages without declared dependencies.',
-				recommendation: 'Add the project\'s required packages to dependencies or devDependencies in package.json.',
-			},
-			'node-engine': {
-				why: 'Different developers may use different Node.js versions.',
-				recommendation: 'Add an engines.node field to package.json.',
-			},
-			'duplicate-dependencies': {
-				why: 'Declaring the same package in both dependency sections can create confusing installation behavior.',
-				recommendation: 'Keep each dependency in only one of dependencies or devDependencies.',
-			},
-			'dependency-version-validity': {
-				why: 'Invalid dependency versions can prevent npm from installing the project.',
-				recommendation: 'Update invalid dependency version values to valid npm version ranges.',
-			},
-			'react-version-consistency': {
-				why: 'Mismatched React package versions can cause runtime or build problems.',
-				recommendation: 'Use matching major versions for react and react-dom.',
-			},
-			lockfile: {
-				why: 'Without one consistent lockfile, dependency versions may vary between installations.',
-				recommendation: 'Generate and commit the lockfile for the package manager the project uses.',
-			},
-			'package-manager-consistency': {
-				why: 'Multiple package managers can create inconsistent dependency installations.',
-				recommendation: 'Keep only the lockfile for the package manager the project uses.',
-			},
-			readme: {
-				why: 'Developers may not know how to install or run the project.',
-				recommendation: 'Add a README.md containing project setup and run instructions.',
-			},
-			gitignore: {
-				why: 'Without a .gitignore, unwanted files such as node_modules or environment files may be committed.',
-				recommendation: 'Add a .gitignore appropriate for the detected technology stack.',
-			},
-			'react-dependencies': {
-				why: 'React projects need react-dom for browser rendering.',
-				recommendation: 'Add react-dom to the project dependencies.',
-			},
-			'vite-dependency': {
-				why: 'A Vite configuration cannot run reliably when the Vite package is missing.',
-				recommendation: 'Add vite to devDependencies in package.json.',
-			},
-			'eslint-dependency': {
-				why: 'An ESLint configuration needs the ESLint package to run checks.',
-				recommendation: 'Add eslint to devDependencies in package.json.',
-			},
-			'typescript-dependency': {
-				why: 'A TypeScript configuration needs the TypeScript package to compile the project.',
-				recommendation: 'Add typescript to devDependencies in package.json.',
-			},
-			'environment-example': {
-				why: 'Developers need a safe list of environment variable names to configure the project.',
-				recommendation: 'Create a .env.example containing variable names but never include real secret values.',
-			},
-			'environment-file-safety': {
-				why: 'A committed .env file may expose secret environment values.',
-				recommendation: 'Remove .env from version control, add it to .gitignore, and use .env.example for variable names.',
-			},
-			'environment-documentation': {
-				why: 'Developers may not know which environment variables are required.',
-				recommendation: 'Create a .env.example containing variable names but never include real secret values.',
-			},
-		}
-		const diagnosticsWithRecommendations = diagnostics.map((diagnostic) => {
-			const recommendation = recommendations[diagnostic.rule]
-			return recommendation && diagnostic.status !== 'pass'
-				? { ...diagnostic, ...recommendation }
-				: diagnostic
-		})
-		const finalDiagnostics = diagnosticsWithRecommendations.map((diagnostic) => {
-			const nextDiagnostic = { ...diagnostic }
-			if (nextDiagnostic.status === 'pass') {
-				delete nextDiagnostic.priority
-				return nextDiagnostic
-			}
-			const priority = getDiagnosticPriority(nextDiagnostic)
-			nextDiagnostic.priority = validPriorities.has(priority) ? priority : 'low'
-			return nextDiagnostic
-		})
-
-		const summary = diagnosticsWithRecommendations.reduce((counts, diagnostic) => {
-			counts[diagnostic.status] += 1
-			return counts
-		}, { total: diagnostics.length, pass: 0, warning: 0, error: 0 })
-		const informationalRules = new Set(['dependency-count', 'environment-documentation'])
-		const scoredDiagnostics = diagnosticsWithRecommendations.filter((diagnostic) => diagnostic.rule !== 'dependency-count' && !(informationalRules.has(diagnostic.rule) && diagnostic.message === 'No environment configuration was detected.'))
-		const scoredSummary = scoredDiagnostics.reduce((counts, diagnostic) => {
-			counts[diagnostic.status] += 1
-			return counts
-		}, { total: scoredDiagnostics.length, pass: 0, warning: 0, error: 0 })
-		const score = scoredSummary.total === 0
-			? 0
-			: Math.round(((scoredSummary.pass * 100) + (scoredSummary.warning * 50)) / scoredSummary.total)
-		const health = {
-			score,
-			status: score >= 90 ? 'Healthy' : score >= 70 ? 'Needs Attention' : 'Critical',
-		}
+		const { stack, diagnostics, summary, health } = runDiagnostics({ packageJson, treeData })
 
 		return res.json({
 			success: true,
@@ -559,11 +271,17 @@ app.post('/api/repository/diagnose', async (req, res) => {
 				scripts,
 			},
 			stack,
-			diagnostics: finalDiagnostics,
+			diagnostics,
 			summary,
 			health,
 		})
-	} catch {
+	} catch (error) {
+		if (error && error.status === 429) {
+			return res.status(429).json({
+				success: false,
+				message: error.message || 'GitHub API rate limit exceeded. Set GITHUB_TOKEN.',
+			})
+		}
 		return res.status(502).json({
 			success: false,
 			message: 'Unable to connect to the GitHub API',
@@ -572,7 +290,7 @@ app.post('/api/repository/diagnose', async (req, res) => {
 })
 
 app.post('/api/repository/build-check', async (req, res) => {
-	const { owner, repo, branch } = req.body
+	const { owner, repo, branch } = req.body || {}
 
 	if (!owner || !repo || !branch) {
 		return res.status(400).json({
@@ -581,15 +299,16 @@ app.post('/api/repository/build-check', async (req, res) => {
 		})
 	}
 
+	if (!isValidIdentifier(owner) || !isValidIdentifier(repo) || !isValidIdentifier(branch)) {
+		return res.status(400).json({
+			success: false,
+			message: 'owner, repo, and branch must be valid identifiers',
+		})
+	}
+
 	try {
-		const githubResponse = await fetch(
+		const githubResponse = await ghFetch(
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/package.json?ref=${encodeURIComponent(branch)}`,
-			{
-				headers: {
-					Accept: 'application/vnd.github+json',
-					'User-Agent': 'SetupDoctor',
-				},
-			},
 		)
 
 		if (githubResponse.status === 404) {
@@ -636,7 +355,13 @@ app.post('/api/repository/build-check', async (req, res) => {
 				message: 'No build script is configured in package.json.',
 			},
 		})
-	} catch {
+	} catch (error) {
+		if (error && error.status === 429) {
+			return res.status(429).json({
+				success: false,
+				message: error.message || 'GitHub API rate limit exceeded. Set GITHUB_TOKEN.',
+			})
+		}
 		return res.status(502).json({
 			success: false,
 			message: 'Unable to connect to the GitHub API',
@@ -676,13 +401,17 @@ app.post('/api/analyze', async (req, res) => {
 
 	const [owner, repo] = pathParts
 
-	try {
-		const githubResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
-			headers: {
-				Accept: 'application/vnd.github+json',
-				'User-Agent': 'SetupDoctor',
-			},
+	if (!isValidIdentifier(owner) || !isValidIdentifier(repo)) {
+		return res.status(400).json({
+			success: false,
+			message: 'owner and repo must be valid identifiers',
 		})
+	}
+
+	try {
+		const githubResponse = await ghFetch(
+			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+		)
 
 		if (githubResponse.status === 404) {
 			return res.status(404).json({
@@ -710,7 +439,13 @@ app.post('/api/analyze', async (req, res) => {
 			description: repository.description,
 			stars: repository.stargazers_count,
 		})
-	} catch {
+	} catch (error) {
+		if (error && error.status === 429) {
+			return res.status(429).json({
+				success: false,
+				message: error.message || 'GitHub API rate limit exceeded. Set GITHUB_TOKEN.',
+			})
+		}
 		return res.status(502).json({
 			success: false,
 			message: 'Unable to connect to the GitHub API',
@@ -718,6 +453,11 @@ app.post('/api/analyze', async (req, res) => {
 	}
 })
 
-app.listen(port, () => {
-	console.log(`SetupDoctor backend listening on port ${port}`)
-})
+if (require.main === module) {
+	app.listen(port, () => {
+		console.log(`SetupDoctor backend listening on port ${port}`)
+	})
+}
+
+module.exports = app
+module.exports.app = app

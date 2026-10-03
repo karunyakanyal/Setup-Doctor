@@ -1,0 +1,14 @@
+{
+  "name": "setup-doctor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Repository Diagnostics & Bug Vault",
+  "scripts": {
+    "dev": "concurrently \"npm --prefix Backend run dev\" \"npm --prefix frontend run dev\"",
+    "test": "npm --prefix Backend test && npm --prefix frontend test",
+    "lint": "npm --prefix frontend run lint"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
