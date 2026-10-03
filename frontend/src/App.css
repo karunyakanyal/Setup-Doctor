@@ -1021,3 +1021,42 @@ h2 { margin-bottom: 0; color: var(--ink); font-size: 20px; letter-spacing: -0.02
     padding: 16px 20px 20px;
   }
 }
+
+.bug-vault-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bug-vault-transfer-btn {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+}
+
+.bug-vault-transfer-message {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 14px 0 0;
+  padding: 10px 14px;
+  border: 1px solid #b8e6d2;
+  border-radius: 7px;
+  color: #287b5b;
+  background: #effbf5;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bug-vault-transfer-dismiss {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0 4px;
+  line-height: 1;
+}
+

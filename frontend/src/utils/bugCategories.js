@@ -10,6 +10,8 @@ export const SYSTEM_CATEGORIES = [
   'Other',
 ]
 
+import { safeLoad, safeSave } from './storage.js'
+
 export const BUG_CATEGORIES_STORAGE_KEY = 'setupdoctor-bug-categories'
 
 export function normalizeCategoryName(value) {
@@ -85,28 +87,20 @@ export function addCustomCategory(categories, value) {
   }
 }
 
-export function loadCustomCategories(storage = globalThis.localStorage) {
-  try {
-    const storedCategories = storage.getItem(BUG_CATEGORIES_STORAGE_KEY)
-    return normalizeCustomCategories(
-      storedCategories ? JSON.parse(storedCategories) : [],
-    )
-  } catch {
-    return []
-  }
+export function loadCustomCategories(storage) {
+  const loaded = safeLoad(
+    BUG_CATEGORIES_STORAGE_KEY,
+    [],
+    Array.isArray,
+    storage,
+  )
+  return normalizeCustomCategories(loaded)
 }
 
-export function saveCustomCategories(
-  categories,
-  storage = globalThis.localStorage,
-) {
-  try {
-    storage.setItem(
-      BUG_CATEGORIES_STORAGE_KEY,
-      JSON.stringify(normalizeCustomCategories(categories)),
-    )
-    return true
-  } catch {
-    return false
-  }
+export function saveCustomCategories(categories, storage) {
+  return safeSave(
+    BUG_CATEGORIES_STORAGE_KEY,
+    normalizeCustomCategories(categories),
+    storage,
+  )
 }

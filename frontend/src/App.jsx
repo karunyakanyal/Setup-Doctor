@@ -28,10 +28,19 @@ import {
   updateBugDraftStatus,
   validateBugDraft,
 } from './utils/bugVaultData'
+import {
+  safeLoad,
+  safeSave,
+  BUG_VAULT_STORAGE_KEY,
+  HISTORY_STORAGE_KEY,
+  PROJECTS_STORAGE_KEY,
+} from './utils/storage'
+import {
+  exportBugVault,
+  parseBugVaultImport,
+  mergeBugs,
+} from './utils/bugVaultTransfer'
 
-const HISTORY_STORAGE_KEY = 'setupdoctor-history'
-const PROJECTS_STORAGE_KEY = 'setupdoctor-projects'
-const BUG_VAULT_STORAGE_KEY = 'setupdoctor-bug-vault'
 const CREATE_CUSTOM_CATEGORY = '__create_custom_category__'
 
 function highlightBugMatches(value, query) {
@@ -87,60 +96,22 @@ function App() {
   const [health, setHealth] = useState(null)
   const [stack, setStack] = useState([])
 
-  const [analysisHistory, setAnalysisHistory] = useState(() => {
-    try {
-      const storedHistory =
-        window.localStorage.getItem(HISTORY_STORAGE_KEY)
+  const [analysisHistory, setAnalysisHistory] = useState(() =>
+    safeLoad(HISTORY_STORAGE_KEY, [], Array.isArray),
+  )
 
-      const parsedHistory = storedHistory
-        ? JSON.parse(storedHistory)
-        : []
+  const [projects, setProjects] = useState(() =>
+    safeLoad(PROJECTS_STORAGE_KEY, [], Array.isArray),
+  )
 
-      return Array.isArray(parsedHistory)
-        ? parsedHistory
-        : []
-    } catch {
-      return []
-    }
-  })
-
-  const [projects, setProjects] = useState(() => {
-    try {
-      const storedProjects =
-        window.localStorage.getItem(PROJECTS_STORAGE_KEY)
-
-      const parsedProjects = storedProjects
-        ? JSON.parse(storedProjects)
-        : []
-
-      return Array.isArray(parsedProjects)
-        ? parsedProjects
-        : []
-    } catch {
-      return []
-    }
-  })
-
-  const [bugs, setBugs] = useState(() => {
-    try {
-      const storedBugs =
-        window.localStorage.getItem(BUG_VAULT_STORAGE_KEY)
-
-      const parsedBugs = storedBugs
-        ? JSON.parse(storedBugs)
-        : []
-
-      return Array.isArray(parsedBugs)
-        ? parsedBugs
-        : []
-    } catch {
-      return []
-    }
-  })
+  const [bugs, setBugs] = useState(() =>
+    safeLoad(BUG_VAULT_STORAGE_KEY, [], Array.isArray),
+  )
 
   const [customCategories, setCustomCategories] = useState(
     loadCustomCategories,
   )
+  const [transferMessage, setTransferMessage] = useState('')
   const [isBugFormOpen, setIsBugFormOpen] = useState(false)
   const [editingBugId, setEditingBugId] = useState(null)
   const [bugPendingDeletionId, setBugPendingDeletionId] = useState(null)
@@ -308,14 +279,7 @@ function App() {
             ...currentHistory,
           ].slice(0, 5)
 
-          try {
-            window.localStorage.setItem(
-              HISTORY_STORAGE_KEY,
-              JSON.stringify(nextHistory),
-            )
-          } catch {
-            return nextHistory
-          }
+          safeSave(HISTORY_STORAGE_KEY, nextHistory)
 
           return nextHistory
         })
@@ -355,14 +319,7 @@ function App() {
                       : project,
                 )
 
-          try {
-            window.localStorage.setItem(
-              PROJECTS_STORAGE_KEY,
-              JSON.stringify(nextProjects),
-            )
-          } catch {
-            return nextProjects
-          }
+          safeSave(PROJECTS_STORAGE_KEY, nextProjects)
 
           return nextProjects
         })
@@ -468,14 +425,7 @@ function App() {
               : bug,
           )
 
-      try {
-        window.localStorage.setItem(
-          BUG_VAULT_STORAGE_KEY,
-          JSON.stringify(nextBugs),
-        )
-      } catch {
-        // Keep the bug in the current session.
-      }
+      safeSave(BUG_VAULT_STORAGE_KEY, nextBugs)
 
       return nextBugs
     })
@@ -552,14 +502,7 @@ function App() {
       const nextBugs = currentBugs.filter((bug) => bug.id !== deletedBugId)
 
       if (nextBugs.length !== currentBugs.length) {
-        try {
-          window.localStorage.setItem(
-            BUG_VAULT_STORAGE_KEY,
-            JSON.stringify(nextBugs),
-          )
-        } catch {
-          // Keep the deletion in the current session.
-        }
+        safeSave(BUG_VAULT_STORAGE_KEY, nextBugs)
       }
 
       return nextBugs
@@ -607,6 +550,55 @@ function App() {
     setNewCategoryName('')
     setCategoryMessage('')
     setIsCategoryMessageError(false)
+  }
+
+  function handleExportBugVault() {
+    const jsonString = exportBugVault(bugs, customCategories)
+    const dateStr = new Date().toISOString().slice(0, 10)
+    const blob = new Blob([jsonString], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `setupdoctor-bug-vault-${dateStr}.json`
+    document.body.appendChild(anchor)
+    anchor.click()
+    document.body.removeChild(anchor)
+    URL.revokeObjectURL(url)
+  }
+
+  function handleImportBugVault(event) {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const text = e.target?.result
+        const { bugs: incomingBugs, categories: incomingCategories, skipped } = parseBugVaultImport(text)
+
+        setBugs((currentBugs) => {
+          const nextBugs = mergeBugs(currentBugs, incomingBugs)
+          safeSave(BUG_VAULT_STORAGE_KEY, nextBugs)
+          return nextBugs
+        })
+
+        if (incomingCategories.length > 0) {
+          setCustomCategories((currentCategories) => {
+            const nextCategories = [...new Set([...currentCategories, ...incomingCategories])]
+            saveCustomCategories(nextCategories)
+            return nextCategories
+          })
+        }
+
+        const importedCount = incomingBugs.length
+        setTransferMessage(`Imported ${importedCount}, skipped ${skipped}`)
+      } catch {
+        setTransferMessage('Import failed. Invalid file format.')
+      } finally {
+        event.target.value = ''
+      }
+    }
+    reader.readAsText(file)
   }
 
   /* Start Bug Vault with diagnostic details, keeping recommendations unverified. */
@@ -1295,17 +1287,49 @@ function App() {
                   </p>
                 </div>
 
-                <button
-                  className="primary-button"
-                  type="button"
-                  aria-expanded={isBugFormOpen}
-                  aria-controls="bug-vault-form"
-                  onClick={handleToggleBugForm}
-                >
-                  {!isBugFormOpen && <span>+</span>}
-                  {isBugFormOpen ? 'Close form' : 'Save Bug'}
-                </button>
+                <div className="bug-vault-header-actions">
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={handleExportBugVault}
+                  >
+                    Export
+                  </button>
+                  <label className="secondary-button bug-vault-transfer-btn">
+                    Import
+                    <input
+                      type="file"
+                      accept=".json"
+                      style={{ display: 'none' }}
+                      onChange={handleImportBugVault}
+                    />
+                  </label>
+                  <button
+                    className="primary-button"
+                    type="button"
+                    aria-expanded={isBugFormOpen}
+                    aria-controls="bug-vault-form"
+                    onClick={handleToggleBugForm}
+                  >
+                    {!isBugFormOpen && <span>+</span>}
+                    {isBugFormOpen ? 'Close form' : 'Save Bug'}
+                  </button>
+                </div>
               </div>
+
+              {transferMessage && (
+                <div className="bug-vault-transfer-message" role="status">
+                  <span>{transferMessage}</span>
+                  <button
+                    className="bug-vault-transfer-dismiss"
+                    type="button"
+                    aria-label="Dismiss message"
+                    onClick={() => setTransferMessage('')}
+                  >
+                    &times;
+                  </button>
+                </div>
+              )}
 
               <div className="bug-vault-search">
                 <div className="bug-search-field">
