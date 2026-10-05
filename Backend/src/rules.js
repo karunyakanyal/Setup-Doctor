@@ -1,16 +1,22 @@
+const semver = require('semver')
+
 const getMajorVersion = (version) => {
-	const match = typeof version === 'string' ? version.trim().match(/^[~^<>=\s]*v?(\d+)/) : null
-	return match ? Number(match[1]) : null
+	if (typeof version !== 'string' || !version.trim()) {
+		return null
+	}
+	const min = semver.minVersion(version.trim())
+	if (min) {
+		return min.major
+	}
+	const coerced = semver.coerce(version.trim())
+	return coerced ? coerced.major : null
 }
 
 const isValidDependencyVersion = (version) => {
 	if (typeof version !== 'string' || !version.trim()) {
 		return false
 	}
-
-	const versionPart = '(?:\\d+|[xX*])(?:\\.(?:\\d+|[xX*])){0,2}(?:-[0-9A-Za-z.-]+)?'
-	const versionPattern = new RegExp(`^(?:[~^<>=]*\\s*)?${versionPart}(?:\\s*(?:\\|\\||-)\\s*(?:[~^<>=]*\\s*)?${versionPart})*$`)
-	return versionPattern.test(version.trim())
+	return semver.validRange(version.trim()) !== null
 }
 
 const validPriorities = new Set(['high', 'medium', 'low'])
