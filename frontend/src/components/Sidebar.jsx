@@ -1,8 +1,10 @@
+import { NavLink } from 'react-router-dom'
+
 const navigationItems = [
-  { label: 'Dashboard', page: 'dashboard', icon: 'grid' },
-  { label: 'Projects', page: 'projects', icon: 'folder' },
-  { label: 'History', page: 'history', icon: 'clock' },
-  { label: 'Bug Vault', page: 'bug-vault', icon: 'bug' },
+  { label: 'Dashboard', icon: 'grid', to: '/', end: true },
+  { label: 'Projects', icon: 'folder', to: '/projects' },
+  { label: 'History', icon: 'clock', to: '/history' },
+  { label: 'Bug Vault', icon: 'bug', to: '/bug-vault' },
 ]
 
 function NavIcon({ type }) {
@@ -58,7 +60,7 @@ function NavIcon({ type }) {
   )
 }
 
-function Sidebar({ activePage, onNavigate }) {
+function Sidebar() {
   return (
     <aside className="sidebar">
       <div>
@@ -73,20 +75,17 @@ function Sidebar({ activePage, onNavigate }) {
           <p className="nav-label">Workspace</p>
 
           {navigationItems.map((item) => (
-            <a
-              className={`nav-item ${
-                activePage === item.page ? 'active' : ''
-              }`}
-              href="#"
+            <NavLink
+              to={item.to}
+              end={item.end}
               key={item.label}
-              onClick={(event) => {
-                event.preventDefault()
-                onNavigate(item.page)
-              }}
+              className={({ isActive }) =>
+                `nav-item ${isActive ? 'active' : ''}`
+              }
             >
               <NavIcon type={item.icon} />
               <span>{item.label}</span>
-            </a>
+            </NavLink>
           ))}
         </nav>
       </div>

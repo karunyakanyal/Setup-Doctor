@@ -1,19 +1,40 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 function AnalyzeRepositoryModal({ onClose, onSuccess }) {
   const [repositoryUrl, setRepositoryUrl] = useState('')
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const modalRef = useRef(null)
 
   useEffect(() => {
-    function handleEscape(event) {
+    function handleKeyDown(event) {
       if (event.key === 'Escape') {
         onClose()
+        return
+      }
+
+      if (event.key === 'Tab') {
+        if (!modalRef.current) return
+        const focusableElements = modalRef.current.querySelectorAll(
+          'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        )
+        if (focusableElements.length === 0) return
+
+        const firstElement = focusableElements[0]
+        const lastElement = focusableElements[focusableElements.length - 1]
+
+        if (event.shiftKey && document.activeElement === firstElement) {
+          event.preventDefault()
+          lastElement.focus()
+        } else if (!event.shiftKey && document.activeElement === lastElement) {
+          event.preventDefault()
+          firstElement.focus()
+        }
       }
     }
 
-    document.addEventListener('keydown', handleEscape)
-    return () => document.removeEventListener('keydown', handleEscape)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
   }, [onClose])
 
   function validateRepositoryUrl(value) {
@@ -67,7 +88,13 @@ function AnalyzeRepositoryModal({ onClose, onSuccess }) {
 
   return (
     <div className="modal-backdrop" onMouseDown={handleBackdropClick}>
-      <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="analyze-modal-title">
+      <section
+        ref={modalRef}
+        className="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="analyze-modal-title"
+      >
         <div className="modal-header">
           <div>
             <p className="eyebrow">New analysis</p>

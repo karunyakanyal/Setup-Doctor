@@ -1,17 +1,38 @@
+import { useLocation } from 'react-router-dom'
+
 function Header({ activePage, user = { name: 'Alex Kim', initials: 'AK' } }) {
-  const pageLabels = {
-    dashboard: 'Dashboard',
-    projects: 'Projects',
-    history: 'History',
-    'bug-vault': 'Bug Vault',
+  let location
+  try {
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    location = useLocation()
+  } catch {
+    location = { pathname: '/' }
   }
+
+  const getPageLabel = () => {
+    const pathname = location?.pathname || ''
+    if (pathname === '/' || pathname === '') return 'Dashboard'
+    if (pathname.startsWith('/projects')) return 'Projects'
+    if (pathname.startsWith('/history')) return 'History'
+    if (pathname.startsWith('/bug-vault')) return 'Bug Vault'
+
+    const pageLabels = {
+      dashboard: 'Dashboard',
+      projects: 'Projects',
+      history: 'History',
+      'bug-vault': 'Bug Vault',
+    }
+    return pageLabels[activePage] || 'Not Found'
+  }
+
+  const currentLabel = getPageLabel()
 
   return (
     <header className="topbar">
       <div className="breadcrumb">
         <span>Workspace</span>
         <span className="breadcrumb-separator">/</span>
-        <strong>{pageLabels[activePage] || pageLabels.dashboard}</strong>
+        <strong>{currentLabel}</strong>
       </div>
       <div className="profile-area">
         <button className="icon-button" type="button" aria-label="View notifications">
