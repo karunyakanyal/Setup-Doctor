@@ -2,11 +2,15 @@ import { useEffect, useRef } from 'react'
 
 function DeleteBugModal({ bug, isOpen, onConfirm, onCancel }) {
   const dialogRef = useRef(null)
+  const triggerRef = useRef(null)
 
   useEffect(() => {
     if (!isOpen || !bug) {
+      triggerRef.current = typeof document !== 'undefined' ? document.activeElement : null
       return undefined
     }
+
+    const previousElement = triggerRef.current || (typeof document !== 'undefined' ? document.activeElement : null)
 
     function handleKeyDown(event) {
       if (event.key === 'Escape') {
@@ -36,7 +40,16 @@ function DeleteBugModal({ bug, isOpen, onConfirm, onCancel }) {
     }
 
     document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      if (
+        previousElement &&
+        typeof previousElement.focus === 'function' &&
+        document.body.contains(previousElement)
+      ) {
+        previousElement.focus()
+      }
+    }
   }, [isOpen, bug, onCancel])
 
   if (!isOpen || !bug) {

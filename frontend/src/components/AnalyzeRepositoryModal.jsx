@@ -5,10 +5,14 @@ function AnalyzeRepositoryModal({ onClose, onSuccess }) {
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const modalRef = useRef(null)
+  const triggerRef = useRef(typeof document !== 'undefined' ? document.activeElement : null)
 
   useEffect(() => {
+    const triggerElement = triggerRef.current
+
     function handleKeyDown(event) {
       if (event.key === 'Escape') {
+        event.preventDefault()
         onClose()
         return
       }
@@ -34,7 +38,16 @@ function AnalyzeRepositoryModal({ onClose, onSuccess }) {
     }
 
     document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      if (
+        triggerElement &&
+        typeof triggerElement.focus === 'function' &&
+        document.body.contains(triggerElement)
+      ) {
+        triggerElement.focus()
+      }
+    }
   }, [onClose])
 
   function validateRepositoryUrl(value) {
