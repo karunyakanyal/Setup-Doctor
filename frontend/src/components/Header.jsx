@@ -1,6 +1,6 @@
 import { useLocation } from 'react-router-dom'
 
-function Header({ activePage, user = { name: 'Alex Kim', initials: 'AK' } }) {
+function Header({ activePage, user = { name: 'Developer', initials: 'D' } }) {
   let location
   try {
     // eslint-disable-next-line react-hooks/rules-of-hooks

@@ -6,7 +6,7 @@ import StatCard from '../components/StatCard'
 import { useHistory } from '../hooks/useHistory'
 import { useProjects } from '../hooks/useProjects'
 
-function DashboardView({ user = { name: 'Alex Kim', initials: 'AK' } }) {
+function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
   const navigate = useNavigate()
   const { projects, recordProjectAnalysis } = useProjects()
   const {

@@ -12,7 +12,7 @@ import HistoryView from './views/HistoryView'
 import NotFoundView from './views/NotFoundView'
 import ProjectsView from './views/ProjectsView'
 
-const user = { name: 'Alex Kim', initials: 'AK' }
+const user = { name: 'Developer', initials: 'D' }
 
 function App() {
   const location = useLocation()
