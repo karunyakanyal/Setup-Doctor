@@ -3,6 +3,40 @@ import { safeLoad, safeSave, HISTORY_STORAGE_KEY } from '../utils/storage.js'
 
 const HistoryContext = createContext(null)
 
+export function countSuccessfulSetups(analysisHistory = []) {
+  if (!Array.isArray(analysisHistory)) return 0
+
+  const latestByProject = new Map()
+
+  for (const analysis of analysisHistory) {
+    const repoKey =
+      analysis?.repository?.fullName ||
+      analysis?.repository?.name ||
+      (typeof analysis?.repository === 'string' ? analysis.repository : null)
+    if (!repoKey) continue
+
+    if (!latestByProject.has(repoKey)) {
+      latestByProject.set(repoKey, analysis)
+    } else {
+      const existing = latestByProject.get(repoKey)
+      const existingTime = existing?.analyzedAt ? new Date(existing.analyzedAt).getTime() : 0
+      const currentTime = analysis?.analyzedAt ? new Date(analysis.analyzedAt).getTime() : 0
+      if (currentTime > existingTime) {
+        latestByProject.set(repoKey, analysis)
+      }
+    }
+  }
+
+  let count = 0
+  for (const analysis of latestByProject.values()) {
+    if (typeof analysis?.health?.score === 'number' && analysis.health.score >= 90) {
+      count += 1
+    }
+  }
+
+  return count
+}
+
 export function HistoryProvider({ children, initialHistory }) {
   const [analysisHistory, setAnalysisHistory] = useState(() => {
     if (initialHistory !== undefined) {
@@ -53,9 +87,7 @@ export function HistoryProvider({ children, initialHistory }) {
   }, [analysisHistory])
 
   const successfulSetups = useMemo(() => {
-    return analysisHistory.filter(
-      (analysis) => typeof analysis.health?.score === 'number' && analysis.health.score >= 90,
-    ).length
+    return countSuccessfulSetups(analysisHistory)
   }, [analysisHistory])
 
   const value = {
@@ -130,9 +162,7 @@ export function useHistory() {
 
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const successfulSetups = useMemo(() => {
-    return analysisHistory.filter(
-      (analysis) => typeof analysis.health?.score === 'number' && analysis.health.score >= 90,
-    ).length
+    return countSuccessfulSetups(analysisHistory)
   }, [analysisHistory])
 
   return {

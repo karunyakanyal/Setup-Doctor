@@ -162,6 +162,46 @@ test('useHistory: caps history entries at 5', () => {
   assert.equal(hook.current.analysisHistory[0].repository.fullName, 'owner/repo-7')
 })
 
+test('useHistory: successfulSetups counts unique projects whose latest analysis is >= 90', () => {
+  const hook = renderHook(() => useHistory())
+
+  // First analysis for repo1: score 95 (successful)
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/repo1' },
+    { score: 95, status: 'Healthy' },
+    null,
+    [],
+  )
+  assert.equal(hook.current.successfulSetups, 1)
+
+  // Second analysis for repo1: score 98 (still successful, but must count once, not twice)
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/repo1' },
+    { score: 98, status: 'Healthy' },
+    null,
+    [],
+  )
+  assert.equal(hook.current.successfulSetups, 1)
+
+  // First analysis for repo2: score 92 (successful, now 2 unique projects)
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/repo2' },
+    { score: 92, status: 'Healthy' },
+    null,
+    [],
+  )
+  assert.equal(hook.current.successfulSetups, 2)
+
+  // Third analysis for repo1: score drops to 70 (latest is now < 90, so repo1 is no longer successful)
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/repo1' },
+    { score: 70, status: 'Needs Attention' },
+    null,
+    [],
+  )
+  assert.equal(hook.current.successfulSetups, 1)
+})
+
 test('useBugVault: saves, updates, deletes bugs and creates custom categories', () => {
   const hook = renderHook(() => useBugVault())
   assert.equal(hook.current.bugs.length, 0)

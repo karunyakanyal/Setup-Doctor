@@ -1,14 +1,31 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import AnalyzeRepositoryModal from '../components/AnalyzeRepositoryModal'
 import RecentAnalyses from '../components/RecentAnalyses'
 import StatCard from '../components/StatCard'
+import { useBugVault } from '../hooks/useBugVault'
 import { useHistory } from '../hooks/useHistory'
 import { useProjects } from '../hooks/useProjects'
+import DiagnosticsHealthSummary from '../components/diagnostics/DiagnosticsHealthSummary'
+import ScoreBreakdown from '../components/diagnostics/ScoreBreakdown'
+import DiagnosticCard from '../components/diagnostics/DiagnosticCard'
+import DiagnosticsFilterTabs from '../components/diagnostics/DiagnosticsFilterTabs'
+import DiagnosticsEmptyState from '../components/diagnostics/DiagnosticsEmptyState'
+import DiagnosticsLoadingSkeleton from '../components/diagnostics/DiagnosticsLoadingSkeleton'
+import DiagnosticsErrorState from '../components/diagnostics/DiagnosticsErrorState'
+import {
+  filterDiagnostics,
+  groupDiagnosticsByCategory,
+  getFilterCounts,
+  getGrade,
+  normalizeStatus,
+} from '../utils/diagnosisFormatters'
+import { getBugRepositoryName } from '../utils/bugVaultData'
 
 function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
   const navigate = useNavigate()
   const { projects, recordProjectAnalysis } = useProjects()
+  const { bugs } = useBugVault()
   const {
     analysisHistory,
     addAnalysisEntry,
@@ -21,11 +38,16 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
   const [showSuccessToast, setShowSuccessToast] = useState(false)
   const [repository, setRepository] = useState(null)
   const [diagnostics, setDiagnostics] = useState([])
-  const [diagnosticsSummary, setDiagnosticsSummary] = useState(null)
   const [health, setHealth] = useState(null)
+  const [framework, setFramework] = useState(null)
+  const [monorepo, setMonorepo] = useState(false)
   const [stack, setStack] = useState([])
   const [isDiagnosticsLoading, setIsDiagnosticsLoading] = useState(false)
   const [diagnosticsError, setDiagnosticsError] = useState(false)
+
+  // Filter & passing toggle state
+  const [activeFilter, setActiveFilter] = useState('all')
+  const [showPassed, setShowPassed] = useState(false)
 
   useEffect(() => {
     if (!showSuccessToast) {
@@ -42,8 +64,9 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
 
   async function runDiagnostics(repositoryData) {
     setDiagnostics([])
-    setDiagnosticsSummary(null)
     setHealth(null)
+    setFramework(null)
+    setMonorepo(false)
     setStack([])
     setDiagnosticsError(false)
     setIsDiagnosticsLoading(true)
@@ -68,7 +91,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
       }
 
       setDiagnostics(Array.isArray(data.diagnostics) ? data.diagnostics : [])
-      setDiagnosticsSummary(data.summary || null)
+      setFramework(data.framework || null)
+      setMonorepo(Boolean(data.monorepo))
 
       const responseHealth = data.health
       if (
@@ -105,9 +129,96 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
 
   function handleSaveDiagnosticToVault(diagnostic) {
     navigate('/bug-vault', {
-      state: { fromDiagnostic: diagnostic, repositoryName: repository?.fullName || null },
+      state: {
+        fromDiagnostic: {
+          ...diagnostic,
+          framework,
+        },
+        repositoryName: repository?.fullName || null,
+      },
     })
   }
+
+  function handleViewDiagnosticInVault(diagnostic) {
+    const targetRule = diagnostic.ruleId || diagnostic.rule
+    const existing = bugs.find((b) => {
+      const bugRepo = getBugRepositoryName(b)
+      if (repository?.fullName && bugRepo && bugRepo !== repository.fullName) return false
+      const bugRule = b.ruleId || b.source?.ruleId || b.source?.diagnosticRule
+      return bugRule === targetRule
+    })
+
+    if (existing?.id) {
+      navigate(`/bug-vault/${existing.id}`)
+    } else {
+      navigate('/bug-vault')
+    }
+  }
+
+  // Repository card analysis status text
+  const repoAnalysisStatus = useMemo(() => {
+    if (!repository?.fullName) {
+      return 'Ready for analysis'
+    }
+
+    const historyMatch = analysisHistory.find(
+      (entry) =>
+        entry.repository?.fullName === repository.fullName ||
+        entry.repository?.name === repository.name,
+    )
+
+    const activeHealth = health || historyMatch?.health
+    const timestamp = historyMatch?.analyzedAt
+
+    if (!activeHealth) {
+      return 'Ready for analysis'
+    }
+
+    const grade = getGrade(activeHealth)
+    let timeStr = ''
+
+    if (timestamp) {
+      try {
+        const date = new Date(timestamp)
+        if (!Number.isNaN(date.getTime())) {
+          timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+      } catch {
+        timeStr = ''
+      }
+    }
+
+    if (timeStr && grade && grade !== 'N/A') {
+      return `Analyzed at ${timeStr} • Grade ${grade}`
+    }
+    if (timeStr) {
+      return `Analyzed at ${timeStr}`
+    }
+    if (grade && grade !== 'N/A') {
+      return `Grade ${grade}`
+    }
+
+    return 'Ready for analysis'
+  }, [repository, health, analysisHistory])
+
+  // Filter calculations
+  const filterCounts = useMemo(() => {
+    return getFilterCounts(diagnostics)
+  }, [diagnostics])
+
+  const visibleDiagnostics = useMemo(() => {
+    const filtered = filterDiagnostics(diagnostics, activeFilter)
+
+    if (activeFilter === 'all' && !showPassed) {
+      return filtered.filter((d) => normalizeStatus(d.status) !== 'pass')
+    }
+
+    return filtered
+  }, [diagnostics, activeFilter, showPassed])
+
+  const groupedDiagnostics = useMemo(() => {
+    return groupDiagnosticsByCategory(visibleDiagnostics)
+  }, [visibleDiagnostics])
 
   return (
     <>
@@ -166,10 +277,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
       </section>
 
       {isDiagnosticsLoading && (
-        <section className="repository-summary" aria-live="polite">
-          <p className="diagnostics-message">
-            Running diagnostics... Checking configuration and dependencies.
-          </p>
+        <section className="repository-loading-wrap" aria-live="polite">
+          <DiagnosticsLoadingSkeleton />
         </section>
       )}
 
@@ -180,7 +289,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
               <p className="eyebrow">Latest repository</p>
               <h2 id="repository-summary-title">{repository.fullName}</h2>
             </div>
-            <span className="repository-ready">Ready for analysis</span>
+            <span className="repository-ready">{repoAnalysisStatus}</span>
           </div>
 
           <div className="repository-details">
@@ -225,73 +334,73 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
           </div>
 
           {diagnosticsError && (
-            <p className="diagnostics-message diagnostics-error">
-              Unable to run diagnostics.
-            </p>
+            <DiagnosticsErrorState
+              onRetry={() => repository && runDiagnostics(repository)}
+            />
           )}
 
           {!isDiagnosticsLoading && !diagnosticsError && (
             <div>
               {health && (
-                <div className="diagnostics-health">
-                  <strong>{health.score} / 100</strong>
-                  <span
-                    className={`health-status health-${health.status
-                      .toLowerCase()
-                      .replace(/\s+/g, '-')}`}
-                  >
-                    {health.status}
-                  </span>
-                </div>
+                <DiagnosticsHealthSummary
+                  health={health}
+                  framework={framework}
+                  monorepo={monorepo}
+                  diagnostics={diagnostics}
+                />
               )}
 
-              {diagnosticsSummary && (
-                <div className="diagnostics-summary" aria-label="Diagnostic summary">
-                  <span>{diagnosticsSummary.total} Checks</span>
-                  <span>{diagnosticsSummary.pass} Passed</span>
-                  <span>{diagnosticsSummary.warning} Warnings</span>
-                  <span>{diagnosticsSummary.error} Errors</span>
-                </div>
+              {diagnostics.length > 0 && (
+                <ScoreBreakdown
+                  diagnostics={diagnostics}
+                  reportedScore={health?.score}
+                />
               )}
 
-              <div className="diagnostics-list">
-                {diagnostics.map((diagnostic) => (
-                  <div className="diagnostic-row" key={diagnostic.rule}>
-                    <span className={`diagnostic-status ${diagnostic.status}`}>
-                      <span />
-                      {diagnostic.status}
-                    </span>
+              {diagnostics.length > 0 && (
+                <div className="diagnostics-checks-area">
+                  <DiagnosticsFilterTabs
+                    counts={filterCounts}
+                    activeFilter={activeFilter}
+                    onSelectFilter={setActiveFilter}
+                    showPassed={showPassed}
+                    onToggleShowPassed={() => setShowPassed((prev) => !prev)}
+                  />
 
-                    <div className="diagnostic-copy">
-                      <span className="diagnostic-message">{diagnostic.message}</span>
+                  {visibleDiagnostics.length === 0 ? (
+                    <DiagnosticsEmptyState
+                      activeFilter={activeFilter}
+                      onResetFilter={setActiveFilter}
+                    />
+                  ) : (
+                    <div className="diagnostics-grouped-container" id="passing-diagnostics-group">
+                      {groupedDiagnostics.map((group) => (
+                        <div key={group.key} className="diagnostic-category-group">
+                          <div className="category-group-header">
+                            <h3 className="category-group-title">{group.label}</h3>
+                            <span className="category-group-count">
+                              {group.items.length} {group.items.length === 1 ? 'check' : 'checks'}
+                            </span>
+                          </div>
 
-                      {(diagnostic.status === 'warning' || diagnostic.status === 'error') && (
-                        <div className="diagnostic-details">
-                          {typeof diagnostic.why === 'string' && diagnostic.why.trim() && (
-                            <p>
-                              <strong>Why?</strong> {diagnostic.why}
-                            </p>
-                          )}
-
-                          {typeof diagnostic.recommendation === 'string' && diagnostic.recommendation.trim() && (
-                            <p>
-                              <strong>Recommendation</strong> {diagnostic.recommendation}
-                            </p>
-                          )}
-
-                          <button
-                            type="button"
-                            className="diagnostic-save-button"
-                            onClick={() => handleSaveDiagnosticToVault(diagnostic)}
-                          >
-                            Save to Bug Vault
-                          </button>
+                          <div className="category-group-cards">
+                            {group.items.map((diagnostic) => (
+                              <DiagnosticCard
+                                key={diagnostic.ruleId || diagnostic.rule}
+                                diagnostic={diagnostic}
+                                repositoryName={repository?.fullName}
+                                bugs={bugs}
+                                onSaveToVault={handleSaveDiagnosticToVault}
+                                onViewInVault={handleViewDiagnosticInVault}
+                              />
+                            ))}
+                          </div>
                         </div>
-                      )}
+                      ))}
                     </div>
-                  </div>
-                ))}
-              </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </section>

@@ -38,7 +38,20 @@ function storedSolutionValue(bug = {}) {
 
 function normalizeSource(source) {
   if (source && typeof source === 'object' && !Array.isArray(source)) {
-    return { ...source, type: textValue(source.type) || 'unknown' }
+    const normalized = { ...source, type: textValue(source.type) || 'unknown' }
+    if (source.ruleId || source.diagnosticRule) {
+      normalized.ruleId = textValue(source.ruleId || source.diagnosticRule)
+    }
+    if (source.category) {
+      normalized.category = textValue(source.category)
+    }
+    if (source.framework) {
+      normalized.framework = textValue(source.framework)
+    }
+    if (source.fix && typeof source.fix === 'object') {
+      normalized.fix = source.fix
+    }
+    return normalized
   }
 
   return { type: 'unknown' }
@@ -183,21 +196,52 @@ export function createBugRecord(values = {}, metadata = {}) {
 }
 
 export function createBugDraftFromDiagnostic(diagnostic = {}) {
+  const ruleId = textValue(diagnostic.ruleId || diagnostic.rule) || null
+  const category = diagnostic.category ? textValue(diagnostic.category) : null
+  const framework = diagnostic.framework ? textValue(diagnostic.framework) : null
+  const fix = diagnostic.fix && typeof diagnostic.fix === 'object' ? diagnostic.fix : null
+  const suggestedFix = fix && (fix.command || fix.snippet || fix.description)
+    ? textValue(fix.command || fix.snippet || fix.description)
+    : textValue(diagnostic.recommendation)
+
   return {
-    problem: getDiagnosticProblemTitle(diagnostic.rule) || textValue(diagnostic.message),
+    problem: getDiagnosticProblemTitle(ruleId) || textValue(diagnostic.title || diagnostic.message),
     error: textValue(diagnostic.message),
     cause: '',
-    suggestedFix: textValue(diagnostic.recommendation),
+    suggestedFix: textValue(suggestedFix || diagnostic.recommendation),
     status: BUG_STATUS_UNRESOLVED,
+    category: category,
+    ruleId,
+    framework,
+    fix,
     whatITried: '',
     verifiedSolution: '',
     source: {
       type: 'setupdoctor',
-      diagnosticRule: textValue(diagnostic.rule) || null,
+      diagnosticRule: ruleId,
+      ruleId,
+      category,
+      framework,
+      fix,
       diagnosticPriority: diagnostic.priority ?? null,
       diagnosticWhy: textValue(diagnostic.why) || null,
     },
   }
+}
+
+export function isDiagnosticSavedInVault(bugs = [], repositoryName = null, diagnostic = {}) {
+  if (!Array.isArray(bugs) || !diagnostic) return false
+  const ruleId = textValue(diagnostic.ruleId || diagnostic.rule).trim()
+  if (!ruleId) return false
+
+  return bugs.some((bug) => {
+    const bugRepo = getBugRepositoryName(bug)
+    if (repositoryName && bugRepo && bugRepo !== repositoryName) {
+      return false
+    }
+    const bugRule = textValue(bug.ruleId || bug.source?.ruleId || bug.source?.diagnosticRule).trim()
+    return bugRule === ruleId
+  })
 }
 
 export function createBugDraftFromSavedBug(bug = {}) {
