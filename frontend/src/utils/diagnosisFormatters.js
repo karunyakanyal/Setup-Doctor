@@ -312,3 +312,107 @@ export function calculateScoreBreakdown(diagnostics = [], reportedScore = null) 
     reconciled: Math.abs(calculatedScore - effectiveScore) <= 1,
   }
 }
+
+/**
+ * Resolves the latest relevant analysis from history or active selection.
+ * Handles missing optional fields and older legacy records safely.
+ */
+export function resolveLatestAnalysis(analysisHistory = [], selectedAnalysis = null) {
+  if (selectedAnalysis && typeof selectedAnalysis === 'object' && selectedAnalysis.repository) {
+    return selectedAnalysis
+  }
+
+  if (Array.isArray(analysisHistory) && analysisHistory.length > 0) {
+    const latest = analysisHistory[0]
+    if (latest && typeof latest === 'object' && latest.repository) {
+      return latest
+    }
+  }
+
+  return null
+}
+
+/**
+ * Normalizes detected technology stack items and maps framework into the detected stack.
+ * Reuses existing stack data and framework detection from the analysis response without inventing technologies.
+ */
+export function normalizeTechnologyStack(stack = [], framework = null) {
+  const result = []
+  const seen = new Set()
+
+  if (Array.isArray(stack)) {
+    for (const item of stack) {
+      if (typeof item === 'string' && item.trim()) {
+        const name = item.trim()
+        const lower = name.toLowerCase()
+        if (!seen.has(lower)) {
+          seen.add(lower)
+          result.push({ name, detected: true })
+        }
+      } else if (item && typeof item === 'object' && item.name) {
+        const name = String(item.name).trim()
+        const lower = name.toLowerCase()
+        const detected = Boolean(item.detected)
+        if (!seen.has(lower)) {
+          seen.add(lower)
+          result.push({ name, detected })
+        } else if (detected) {
+          const existing = result.find((t) => t.name.toLowerCase() === lower)
+          if (existing) existing.detected = true
+        }
+      }
+    }
+  }
+
+  // If a known framework was detected by the existing analysis response, ensure it appears in the detected stack
+  if (framework && typeof framework === 'string') {
+    const fwLower = framework.trim().toLowerCase()
+    if (fwLower && fwLower !== 'node') {
+      const frameworkDisplayMap = {
+        next: 'Next.js',
+        vue: 'Vue',
+        react: 'React',
+        express: 'Express',
+        vite: 'Vite',
+      }
+      const fwName = frameworkDisplayMap[fwLower] || (framework.charAt(0).toUpperCase() + framework.slice(1))
+      const existing = result.find((t) => t.name.toLowerCase() === fwName.toLowerCase())
+      if (existing) {
+        existing.detected = true
+      } else {
+        result.unshift({ name: fwName, detected: true })
+      }
+    }
+  }
+
+  return result
+}
+
+/**
+ * Extracts and normalizes analysis state from an analysis record for Dashboard view restoration.
+ * Safely falls back on legacy records missing optional fields.
+ */
+export function extractAnalysisState(analysis) {
+  if (!analysis || typeof analysis !== 'object' || !analysis.repository) {
+    return {
+      repository: null,
+      diagnostics: [],
+      health: null,
+      framework: null,
+      monorepo: false,
+      stack: [],
+    }
+  }
+
+  const framework = typeof analysis.framework === 'string' ? analysis.framework : null
+  const stack = normalizeTechnologyStack(analysis.stack, framework)
+
+  return {
+    repository: analysis.repository,
+    diagnostics: Array.isArray(analysis.diagnostics) ? analysis.diagnostics : [],
+    health: analysis.health && typeof analysis.health === 'object' ? analysis.health : null,
+    framework,
+    monorepo: Boolean(analysis.monorepo),
+    stack,
+  }
+}

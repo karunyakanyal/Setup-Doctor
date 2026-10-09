@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import BugForm, { CREATE_CUSTOM_CATEGORY } from '../components/BugForm'
 import DeleteBugModal from '../components/DeleteBugModal'
@@ -137,6 +137,11 @@ function BugVaultView() {
     }
   })
 
+  const formRef = useRef(null)
+  const headingRef = useRef(null)
+  const shouldScrollRef = useRef(Boolean(location.state?.fromDiagnostic))
+  const lastScrolledKeyRef = useRef(null)
+
   // Debounce search query by 250ms
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -145,6 +150,30 @@ function BugVaultView() {
 
     return () => clearTimeout(timer)
   }, [bugSearchQuery])
+
+  // Automatically scroll the "Save a Problem" form into view and focus heading without extra scroll jumps
+  useEffect(() => {
+    const isFromDiag = Boolean(location.state?.fromDiagnostic)
+    const isNewNav = isFromDiag && lastScrolledKeyRef.current !== location.key
+
+    if (isBugFormOpen && formRef.current && (isNewNav || shouldScrollRef.current)) {
+      if (isNewNav) {
+        lastScrolledKeyRef.current = location.key
+      }
+      shouldScrollRef.current = false
+      if (typeof formRef.current.scrollIntoView === 'function') {
+        formRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }
+      if (headingRef.current && typeof headingRef.current.focus === 'function') {
+        headingRef.current.focus({ preventScroll: true })
+      } else {
+        const firstInput = formRef.current.querySelector('textarea, input, select')
+        if (firstInput && typeof firstInput.focus === 'function') {
+          firstInput.focus({ preventScroll: true })
+        }
+      }
+    }
+  }, [isBugFormOpen, location.state, location.key])
 
   const normalizedBugSearch = useMemo(() => {
     return debouncedSearchQuery.trim().replace(/\s+/g, ' ').toLowerCase()
@@ -212,6 +241,7 @@ function BugVaultView() {
     setIsCategoryMessageError(false)
     setBugFormMessage('')
     setSimilarBugs([])
+    shouldScrollRef.current = true
     setIsBugFormOpen(true)
   }
 
@@ -392,6 +422,8 @@ function BugVaultView() {
 
       {isBugFormOpen && (
         <BugForm
+          formRef={formRef}
+          headingRef={headingRef}
           newBug={newBug}
           setNewBug={setNewBug}
           editingBugId={editingBugId}

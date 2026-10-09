@@ -162,6 +162,46 @@ test('useHistory: caps history entries at 5', () => {
   assert.equal(hook.current.analysisHistory[0].repository.fullName, 'owner/repo-7')
 })
 
+test('useHistory: stores and persists meta (framework, monorepo, stack) with backward compatibility', () => {
+  const hook = renderHook(() => useHistory())
+
+  // Add analysis with metadata
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/modern-app' },
+    { score: 92, status: 'Healthy' },
+    { total: 10, pass: 9, warning: 1, error: 0 },
+    [{ rule: 'pkg', status: 'pass' }],
+    {
+      framework: 'Next.js',
+      monorepo: true,
+      stack: [{ name: 'React', detected: true }, { name: 'TypeScript', detected: true }],
+    },
+  )
+
+  assert.equal(hook.current.analysisHistory[0].framework, 'Next.js')
+  assert.equal(hook.current.analysisHistory[0].monorepo, true)
+  assert.equal(hook.current.analysisHistory[0].stack.length, 2)
+
+  // Verify stored shape
+  const stored = JSON.parse(mockStorage.getItem(HISTORY_STORAGE_KEY))
+  assert.equal(stored.data[0].framework, 'Next.js')
+  assert.equal(stored.data[0].monorepo, true)
+  assert.deepEqual(stored.data[0].stack, [
+    { name: 'React', detected: true },
+    { name: 'TypeScript', detected: true },
+  ])
+
+  // Backward compatibility: add entry without meta
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/legacy-app' },
+    { score: 70, status: 'Needs Attention' },
+  )
+
+  assert.equal(hook.current.analysisHistory[0].framework, null)
+  assert.equal(hook.current.analysisHistory[0].monorepo, false)
+  assert.deepEqual(hook.current.analysisHistory[0].stack, [])
+})
+
 test('useHistory: successfulSetups counts unique projects whose latest analysis is >= 90', () => {
   const hook = renderHook(() => useHistory())
 

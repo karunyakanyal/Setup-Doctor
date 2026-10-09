@@ -47,13 +47,18 @@ export function HistoryProvider({ children, initialHistory }) {
 
   const [selectedAnalysis, setSelectedAnalysis] = useState(null)
 
-  const addAnalysisEntry = useCallback((repositoryData, responseHealth, summary, diagnostics) => {
+  const addAnalysisEntry = useCallback((repositoryData, responseHealth, summary, diagnostics, meta = {}) => {
     const historyEntry = {
       repository: repositoryData,
       health: responseHealth,
       summary: summary || null,
       diagnostics: diagnostics || [],
       analyzedAt: new Date().toISOString(),
+      ...(meta && typeof meta === 'object' ? {
+        framework: meta.framework || null,
+        monorepo: Boolean(meta.monorepo),
+        stack: Array.isArray(meta.stack) ? meta.stack : [],
+      } : {}),
     }
 
     setAnalysisHistory((currentHistory) => {
@@ -119,13 +124,18 @@ export function useHistory() {
   const [selectedAnalysis, setSelectedAnalysis] = useState(null)
 
   // eslint-disable-next-line react-hooks/rules-of-hooks
-  const addAnalysisEntry = useCallback((repositoryData, responseHealth, summary, diagnostics) => {
+  const addAnalysisEntry = useCallback((repositoryData, responseHealth, summary, diagnostics, meta = {}) => {
     const historyEntry = {
       repository: repositoryData,
       health: responseHealth,
       summary: summary || null,
       diagnostics: diagnostics || [],
       analyzedAt: new Date().toISOString(),
+      ...(meta && typeof meta === 'object' ? {
+        framework: meta.framework || null,
+        monorepo: Boolean(meta.monorepo),
+        stack: Array.isArray(meta.stack) ? meta.stack : [],
+      } : {}),
     }
 
     setAnalysisHistory((currentHistory) => {

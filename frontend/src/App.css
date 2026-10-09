@@ -410,6 +410,7 @@ h2 { margin-bottom: 0; color: var(--ink); font-size: 20px; letter-spacing: -0.02
 .similar-bugs {
   margin-top: 28px;
   padding: 28px 32px;
+  scroll-margin-top: 100px;
 }
 
 .similar-bugs h2 {
@@ -449,6 +450,7 @@ h2 { margin-bottom: 0; color: var(--ink); font-size: 20px; letter-spacing: -0.02
   margin-top: 28px;
   padding: 32px;
   box-sizing: border-box;
+  scroll-margin-top: 100px;
 }
 
 .bug-vault-form h2 {
@@ -456,6 +458,15 @@ h2 { margin-bottom: 0; color: var(--ink); font-size: 20px; letter-spacing: -0.02
   color: var(--ink);
   font-size: 24px;
   font-weight: 700;
+}
+
+.bug-vault-form h2:focus {
+  outline: none;
+}
+
+.bug-vault-form h2:focus-visible {
+  outline: 2px solid rgba(101, 180, 158, 0.6);
+  outline-offset: 2px;
 }
 
 /* Form fields */

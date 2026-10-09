@@ -19,6 +19,9 @@ import {
   getFilterCounts,
   getGrade,
   normalizeStatus,
+  resolveLatestAnalysis,
+  extractAnalysisState,
+  normalizeTechnologyStack,
 } from '../utils/diagnosisFormatters'
 import { getBugRepositoryName } from '../utils/bugVaultData'
 
@@ -29,6 +32,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
   const {
     analysisHistory,
     addAnalysisEntry,
+    selectedAnalysis,
     selectAnalysis,
     issuesFound,
     successfulSetups,
@@ -36,12 +40,30 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
 
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [showSuccessToast, setShowSuccessToast] = useState(false)
-  const [repository, setRepository] = useState(null)
-  const [diagnostics, setDiagnostics] = useState([])
-  const [health, setHealth] = useState(null)
-  const [framework, setFramework] = useState(null)
-  const [monorepo, setMonorepo] = useState(false)
-  const [stack, setStack] = useState([])
+  const [repository, setRepository] = useState(() => {
+    const active = resolveLatestAnalysis(analysisHistory, selectedAnalysis)
+    return extractAnalysisState(active).repository
+  })
+  const [diagnostics, setDiagnostics] = useState(() => {
+    const active = resolveLatestAnalysis(analysisHistory, selectedAnalysis)
+    return extractAnalysisState(active).diagnostics
+  })
+  const [health, setHealth] = useState(() => {
+    const active = resolveLatestAnalysis(analysisHistory, selectedAnalysis)
+    return extractAnalysisState(active).health
+  })
+  const [framework, setFramework] = useState(() => {
+    const active = resolveLatestAnalysis(analysisHistory, selectedAnalysis)
+    return extractAnalysisState(active).framework
+  })
+  const [monorepo, setMonorepo] = useState(() => {
+    const active = resolveLatestAnalysis(analysisHistory, selectedAnalysis)
+    return extractAnalysisState(active).monorepo
+  })
+  const [stack, setStack] = useState(() => {
+    const active = resolveLatestAnalysis(analysisHistory, selectedAnalysis)
+    return extractAnalysisState(active).stack
+  })
   const [isDiagnosticsLoading, setIsDiagnosticsLoading] = useState(false)
   const [diagnosticsError, setDiagnosticsError] = useState(false)
 
@@ -70,6 +92,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     setStack([])
     setDiagnosticsError(false)
     setIsDiagnosticsLoading(true)
+    setActiveFilter('all')
+    setShowPassed(false)
 
     try {
       const response = await fetch('/api/repository/diagnose', {
@@ -94,6 +118,9 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
       setFramework(data.framework || null)
       setMonorepo(Boolean(data.monorepo))
 
+      const normalizedStack = normalizeTechnologyStack(data.stack, data.framework)
+      setStack(normalizedStack)
+
       const responseHealth = data.health
       if (
         responseHealth &&
@@ -101,13 +128,15 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
         typeof responseHealth.status === 'string'
       ) {
         setHealth(responseHealth)
-        addAnalysisEntry(repositoryData, responseHealth, data.summary, data.diagnostics)
+        addAnalysisEntry(repositoryData, responseHealth, data.summary, data.diagnostics, {
+          framework: data.framework || null,
+          monorepo: Boolean(data.monorepo),
+          stack: normalizedStack,
+        })
         recordProjectAnalysis(repositoryData, responseHealth)
       } else {
         setHealth(null)
       }
-
-      setStack(Array.isArray(data.stack) ? data.stack : [])
     } catch {
       setDiagnosticsError(true)
     } finally {
@@ -116,6 +145,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
   }
 
   function handleAnalysisSuccess(repositoryData) {
+    selectAnalysis(null)
     setRepository(repositoryData)
     setIsModalOpen(false)
     setShowSuccessToast(true)
@@ -416,15 +446,18 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
           </div>
 
           {!isDiagnosticsLoading && !diagnosticsError && (
-            stack.some((tech) => tech.detected) ? (
+            stack.some((tech) => (typeof tech === 'string' ? true : Boolean(tech?.detected))) ? (
               <div className="technology-list">
                 {stack
-                  .filter((tech) => tech.detected)
-                  .map((tech) => (
-                    <span className="technology-item" key={tech.name}>
-                      {tech.name}
-                    </span>
-                  ))}
+                  .filter((tech) => (typeof tech === 'string' ? true : Boolean(tech?.detected)))
+                  .map((tech) => {
+                    const techName = typeof tech === 'string' ? tech : tech.name
+                    return (
+                      <span className="technology-item" key={techName}>
+                        {techName}
+                      </span>
+                    )
+                  })}
               </div>
             ) : (
               <p className="diagnostics-message">No known technologies detected.</p>

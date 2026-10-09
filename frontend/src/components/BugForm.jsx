@@ -12,6 +12,8 @@ import {
 const CREATE_CUSTOM_CATEGORY = '__create_custom_category__'
 
 function BugForm({
+  formRef,
+  headingRef,
   newBug,
   setNewBug,
   editingBugId,
@@ -68,11 +70,12 @@ function BugForm({
 
       <form
         id="bug-vault-form"
+        ref={formRef}
         className="repository-summary bug-vault-form"
         onSubmit={onSubmit}
         aria-label={editingBugId === null ? 'Save a Problem' : 'Edit Saved Problem'}
       >
-        <h2>
+        <h2 tabIndex={-1} ref={headingRef}>
           {editingBugId === null ? 'Save a Problem' : 'Edit Saved Problem'}
         </h2>
 
