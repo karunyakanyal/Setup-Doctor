@@ -170,6 +170,38 @@ function normalizeContext(ctx = {}) {
 	}
 }
 
+function hasEnvironmentUsage(ctx) {
+	const { filePaths, dependencies, devDependencies, scripts } = normalizeContext(ctx)
+
+	// 1. Real .env at root or depth <= 2 (not ignored)
+	const hasEnvFile = [...filePaths].some((path) => isCandidateEnvFile(path))
+	if (hasEnvFile) {
+		return true
+	}
+
+	// 2. Dependencies like dotenv, cross-env
+	const allDeps = { ...dependencies, ...devDependencies }
+	const hasEnvDep = Object.keys(allDeps).some((name) =>
+		/dotenv|cross-env/i.test(name),
+	)
+	if (hasEnvDep) {
+		return true
+	}
+
+	// 3. Env-reading scripts
+	const hasEnvScript = Object.values(scripts).some((script) =>
+		typeof script === 'string' &&
+		(/dotenv|cross-env|--env-file/i.test(script) ||
+		 /\b(NODE_ENV|PORT|ENV)\s*=/i.test(script) ||
+		 /\.env\b/i.test(script)),
+	)
+	if (hasEnvScript) {
+		return true
+	}
+
+	return false
+}
+
 module.exports = {
 	IGNORED_PATH_SEGMENTS,
 	isIgnoredPath,
@@ -178,4 +210,5 @@ module.exports = {
 	getMajorVersion,
 	isValidDependencyVersion,
 	normalizeContext,
+	hasEnvironmentUsage,
 }

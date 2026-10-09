@@ -1,4 +1,4 @@
-const { normalizeContext, isIgnoredPath, isCandidateEnvFile } = require('./utils')
+const { normalizeContext, isIgnoredPath, isCandidateEnvFile, hasEnvironmentUsage } = require('./utils')
 
 const rule = {
 	id: 'environment-documentation',
@@ -8,7 +8,9 @@ const rule = {
 	category: 'docs',
 	check(ctx) {
 		const { filePaths } = normalizeContext(ctx)
-		const hasEnvExample = [...filePaths].some((path) => typeof path === 'string' && path.split('/').pop() === '.env.example' && !isIgnoredPath(path))
+		const hasEnvExample = [...filePaths].some(
+			(path) => typeof path === 'string' && path.split('/').pop() === '.env.example' && !isIgnoredPath(path),
+		)
 		const hasEnvFile = [...filePaths].some((path) => isCandidateEnvFile(path))
 
 		if (hasEnvExample) {
@@ -23,6 +25,17 @@ const rule = {
 			return {
 				status: 'warn',
 				message: '.env is present without .env.example documentation.',
+				fix: {
+					description: 'Create a .env.example containing environment variable templates.',
+					snippet: 'PORT=5000\nNODE_ENV=development',
+				},
+			}
+		}
+
+		if (hasEnvironmentUsage(ctx)) {
+			return {
+				status: 'warn',
+				message: 'Environment configuration detected without .env.example documentation.',
 				fix: {
 					description: 'Create a .env.example containing environment variable templates.',
 					snippet: 'PORT=5000\nNODE_ENV=development',

@@ -6,6 +6,7 @@ const {
 	isCandidateEnvFile,
 	formatList,
 	IGNORED_PATH_SEGMENTS,
+	hasEnvironmentUsage,
 } = require('./utils')
 const { detectFramework } = require('./framework')
 
@@ -459,7 +460,7 @@ const runDiagnostics = ({ packageJson = {}, treeData = {} }) => {
 
 	const diagnosticsWithRecommendations = rawDiagnostics.map((diagnostic) => {
 		const rec = recommendations[diagnostic.rule]
-		return rec && diagnostic.status !== 'pass'
+		return rec && diagnostic.status !== 'pass' && diagnostic.status !== 'info'
 			? { ...diagnostic, ...rec }
 			: diagnostic
 	})
@@ -498,6 +499,7 @@ module.exports = {
 	isCandidateEnvFile,
 	formatList,
 	IGNORED_PATH_SEGMENTS,
+	hasEnvironmentUsage,
 	validPriorities,
 	getDiagnosticPriority,
 	withPriority,

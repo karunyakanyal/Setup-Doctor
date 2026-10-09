@@ -369,9 +369,14 @@ test('rule: environment-example evaluates passing and failing cases', () => {
 	assert.equal(pass.status, 'pass')
 	assert.equal(pass.fix, null)
 
-	const fail = rule.check({ filePaths: [] })
+	const fail = rule.check({ filePaths: ['.env'] })
 	assert.equal(fail.status, 'warn')
 	assert.ok(fail.fix)
+
+	const info = rule.check({ filePaths: [] })
+	assert.equal(info.status, 'info')
+	assert.equal(info.message, '.env.example not needed; no environment usage detected.')
+	assert.equal(info.fix, null)
 })
 
 // 21. environment-file-safety
@@ -701,15 +706,16 @@ test('monorepo detection: pnpm-workspace.yaml, lerna.json, and workspaces trigge
 	// Single repo check
 	assert.equal(monorepoRule.check({ filePaths: ['package.json'] }).status, 'pass')
 
-	// Dependency count: informs about root package.json only when in monorepo
+	// Dependency count: does not contain monorepo sentence
 	const monorepoCount = depCountRule.check({
 		dependencies: { react: '^18.0.0' },
 		devDependencies: { vite: '^5.0.0' },
 		filePaths: ['pnpm-workspace.yaml'],
 	})
 	assert.equal(monorepoCount.status, 'info')
-	assert.match(monorepoCount.message, /only the root package\.json was analyzed/)
-	assert.match(monorepoCount.message, /monorepo detected/)
+	assert.doesNotMatch(monorepoCount.message, /monorepo/)
+	assert.doesNotMatch(monorepoCount.message, /only the root package\.json was analyzed/)
+	assert.equal(monorepoCount.message, '1 production dependencies and 1 development dependencies are configured.')
 
 	const singleCount = depCountRule.check({
 		dependencies: { react: '^18.0.0' },
@@ -809,4 +815,99 @@ test('calculateHealthScore: health status and label follow the letter grade', ()
 	assert.equal(healthF.status, 'At Risk')
 	assert.equal(healthF.label, 'At Risk')
 })
+
+// 37. .env.example rule consistency and env usage detection
+test('.env.example and environment-documentation consistency and env usage detection', () => {
+	const envExampleRule = rulesMap['environment-example']
+	const envDocRule = rulesMap['environment-documentation']
+
+	// Case 1: .env.example is present -> both pass
+	const passCtx = { filePaths: ['.env.example', 'src/index.js'] }
+	assert.equal(envExampleRule.check(passCtx).status, 'pass')
+	assert.equal(envDocRule.check(passCtx).status, 'pass')
+
+	// Case 2: No env usage detected -> .env.example is info, env-doc is pass (no contradiction)
+	const noEnvCtx = {
+		filePaths: ['package.json', 'README.md', 'src/server.js'],
+		dependencies: { express: '^4.18.2' },
+		scripts: { start: 'node src/server.js' },
+	}
+	const noEnvEx = envExampleRule.check(noEnvCtx)
+	assert.equal(noEnvEx.status, 'info')
+	assert.equal(noEnvEx.message, '.env.example not needed; no environment usage detected.')
+	assert.equal(noEnvEx.fix, null)
+
+	const noEnvDoc = envDocRule.check(noEnvCtx)
+	assert.equal(noEnvDoc.status, 'pass')
+	assert.equal(noEnvDoc.message, 'No environment configuration was detected.')
+
+	// Case 3: Real .env at root -> both warn
+	const realEnvCtx = {
+		filePaths: ['.env', 'package.json', 'src/server.js'],
+	}
+	const realEnvEx = envExampleRule.check(realEnvCtx)
+	assert.equal(realEnvEx.status, 'warn')
+	assert.ok(realEnvEx.fix)
+
+	const realEnvDoc = envDocRule.check(realEnvCtx)
+	assert.equal(realEnvDoc.status, 'warn')
+	assert.equal(realEnvDoc.message, '.env is present without .env.example documentation.')
+
+	// Case 4: Real .env at depth <= 2 -> both warn
+	const depth2Ctx = {
+		filePaths: ['packages/backend/.env', 'package.json'],
+	}
+	assert.equal(envExampleRule.check(depth2Ctx).status, 'warn')
+	assert.equal(envDocRule.check(depth2Ctx).status, 'warn')
+
+	// Case 5: Dependencies like dotenv -> both warn
+	const dotenvCtx = {
+		filePaths: ['package.json'],
+		dependencies: { dotenv: '^16.4.5' },
+	}
+	const dotenvEx = envExampleRule.check(dotenvCtx)
+	assert.equal(dotenvEx.status, 'warn')
+	assert.ok(dotenvEx.fix)
+
+	const dotenvDoc = envDocRule.check(dotenvCtx)
+	assert.equal(dotenvDoc.status, 'warn')
+
+	// Case 6: Dev dependencies like cross-env -> both warn
+	const crossEnvCtx = {
+		filePaths: ['package.json'],
+		devDependencies: { 'cross-env': '^7.0.3' },
+	}
+	assert.equal(envExampleRule.check(crossEnvCtx).status, 'warn')
+	assert.equal(envDocRule.check(crossEnvCtx).status, 'warn')
+
+	// Case 7: Env-reading scripts (e.g. --env-file) -> both warn
+	const scriptCtx = {
+		filePaths: ['package.json'],
+		scripts: { dev: 'node --env-file=.env src/index.js' },
+	}
+	assert.equal(envExampleRule.check(scriptCtx).status, 'warn')
+	assert.equal(envDocRule.check(scriptCtx).status, 'warn')
+
+	// Case 8: Fixture-only .env does not count as env usage -> info / pass
+	const fixtureOnlyCtx = {
+		filePaths: ['test/fixtures/.env', 'docs/.env'],
+		dependencies: { lodash: '^4.17.21' },
+		scripts: { test: 'node --test' },
+	}
+	assert.equal(envExampleRule.check(fixtureOnlyCtx).status, 'info')
+	assert.equal(envExampleRule.check(fixtureOnlyCtx).message, '.env.example not needed; no environment usage detected.')
+	assert.equal(envDocRule.check(fixtureOnlyCtx).status, 'pass')
+
+	// Case 9: In runDiagnostics, no-env project gets info for .env.example without warning
+	const diagRes = runDiagnostics({
+		packageJson: { name: 'simple-node-app', scripts: { start: 'node index.js', test: 'node --test' }, engines: { node: '>=20.0.0' } },
+		treeData: { tree: [{ path: 'package.json', type: 'blob' }, { path: 'README.md', type: 'blob' }, { path: '.gitignore', type: 'blob' }, { path: 'package-lock.json', type: 'blob' }, { path: 'LICENSE', type: 'blob' }, { path: '.github/workflows/ci.yml', type: 'blob' }] },
+	})
+	const envExDiag = diagRes.diagnostics.find((d) => d.ruleId === 'environment-example')
+	assert.ok(envExDiag)
+	assert.equal(envExDiag.status, 'info')
+	assert.equal(envExDiag.level, 'info')
+	assert.equal(envExDiag.message, '.env.example not needed; no environment usage detected.')
+})
+
 
