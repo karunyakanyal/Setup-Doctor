@@ -1,4 +1,4 @@
-const { normalizeContext } = require('./utils')
+const { normalizeContext, formatList } = require('./utils')
 
 const rule = {
 	id: 'unpinned-dependencies',
@@ -17,7 +17,7 @@ const rule = {
 		if (unpinned.length > 0) {
 			return {
 				status: 'warn',
-				message: `Unpinned dependencies detected using '*' or 'latest': ${unpinned.join(', ')}.`,
+				message: `Unpinned dependencies detected using '*' or 'latest': ${formatList(unpinned, 3)}.`,
 				fix: {
 					description: `Pin ${unpinned[0]} to a specific version or semver range in package.json.`,
 					snippet: `"${unpinned[0]}": "^1.0.0"`,

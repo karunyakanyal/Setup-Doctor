@@ -9,6 +9,9 @@ const {
 	calculateCategoryScores,
 	detectFramework,
 	runDiagnostics,
+	isIgnoredPath,
+	isValidDependencyVersion,
+	formatList,
 } = require('./index')
 
 // 1. Tests for detectFramework
@@ -553,3 +556,257 @@ test('runDiagnostics: returns framework, grade, categoryScores, and diagnostics 
 		assert.ok('fix' in d, 'diagnostic must have fix property')
 	}
 })
+
+// 32. isIgnoredPath and formatList helpers
+test('isIgnoredPath: matches all required segments and formatList caps at 3 with "and N more"', () => {
+	const segments = [
+		'__tests__',
+		'__fixtures__',
+		'fixtures',
+		'fixture',
+		'test',
+		'tests',
+		'e2e',
+		'examples',
+		'example',
+		'playground',
+		'samples',
+		'docs',
+		'node_modules',
+	]
+
+	for (const seg of segments) {
+		assert.equal(isIgnoredPath(`packages/app/${seg}/file.js`), true, `must match ${seg}`)
+		assert.equal(isIgnoredPath(`${seg}/nested/.env`), true, `must match ${seg} at root`)
+	}
+
+	assert.equal(isIgnoredPath('src/components/Header.jsx'), false)
+	assert.equal(isIgnoredPath('packages/web/src/index.js'), false)
+	assert.equal(isIgnoredPath(''), false)
+	assert.equal(isIgnoredPath(null), false)
+
+	// formatList
+	assert.equal(formatList(['a']), 'a')
+	assert.equal(formatList(['a', 'b']), 'a, b')
+	assert.equal(formatList(['a', 'b', 'c']), 'a, b, c')
+	assert.equal(formatList(['a', 'b', 'c', 'd']), 'a, b, c and 1 more')
+	assert.equal(formatList(['a', 'b', 'c', 'd', 'e', 'f']), 'a, b, c and 3 more')
+})
+
+// 33. Fixture-path cases for environment rules and gitignore-essentials
+test('fixture-path cases: ignored paths and depth > 2 are not reported', () => {
+	const envSafetyRule = rulesMap['environment-file-safety']
+	const envDocRule = rulesMap['environment-documentation']
+	const gitignoreEssentialsRule = rulesMap['gitignore-essentials']
+
+	// Environment file safety: fixture paths must pass
+	const fixtureEnvPass = envSafetyRule.check({
+		filePaths: [
+			'test/fixtures/.env',
+			'packages/app/__tests__/.env',
+			'docs/.env',
+			'examples/demo/.env',
+			'playground/.env',
+			'node_modules/pkg/.env',
+			'packages/sub/deep/nested/.env', // depth 4 > 2
+		],
+	})
+	assert.equal(fixtureEnvPass.status, 'pass')
+
+	// Environment file safety: root .env and packages/x/.env (depth <= 2) must fail
+	const rootEnvFail = envSafetyRule.check({ filePaths: ['.env'] })
+	assert.equal(rootEnvFail.status, 'fail')
+	assert.match(rootEnvFail.message, /\.env/)
+
+	const depth2EnvFail = envSafetyRule.check({ filePaths: ['packages/ui/.env'] })
+	assert.equal(depth2EnvFail.status, 'fail')
+	assert.match(depth2EnvFail.message, /packages\/ui\/\.env/)
+
+	// Environment documentation: fixture .env without .env.example should not complain
+	const fixtureDocPass = envDocRule.check({
+		filePaths: ['test/fixtures/.env', 'docs/.env'],
+	})
+	assert.equal(fixtureDocPass.status, 'pass')
+	assert.equal(fixtureDocPass.message, 'No environment configuration was detected.')
+
+	// gitignore-essentials: fixture node_modules, dist, and .env must pass
+	const fixtureGitignorePass = gitignoreEssentialsRule.check({
+		filePaths: [
+			'.gitignore',
+			'test/fixtures/node_modules/pkg/index.js',
+			'docs/dist/main.js',
+			'examples/demo/.env',
+			'playground/dist/bundle.js',
+		],
+	})
+	assert.equal(fixtureGitignorePass.status, 'pass')
+
+	// gitignore-essentials: long message formats "and N more"
+	const manyUnwanted = gitignoreEssentialsRule.check({
+		filePaths: [
+			'.gitignore',
+			'node_modules/a/index.js',
+			'node_modules/b/index.js',
+			'dist/bundle.js',
+			'.env',
+		],
+	})
+	assert.equal(manyUnwanted.status, 'warn')
+	assert.match(manyUnwanted.message, /and 1 more/)
+})
+
+// 34. Pnpm-protocol and version validation cases
+test('pnpm-protocol and version validation cases: protocols, dist-tags, git urls are accepted', () => {
+	const versionRule = rulesMap['dependency-version-validity']
+
+	// All accepted formats
+	const validDeps = {
+		'pkg-workspace': 'workspace:*',
+		'pkg-workspace-caret': 'workspace:^1.2.3',
+		'pkg-catalog': 'catalog:default',
+		'pkg-npm': 'npm:react@^18.0.0',
+		'pkg-link': 'link:../other-package',
+		'pkg-file': 'file:./local-package',
+		'pkg-portal': 'portal:../portal-package',
+		'pkg-git': 'git+https://github.com/user/repo.git#main',
+		'pkg-https': 'https://github.com/user/repo/tarball/v1.0.0',
+		'pkg-shorthand': 'facebook/react#v18.0.0',
+		'pkg-latest': 'latest',
+		'pkg-next': 'next',
+		'pkg-beta': 'beta',
+		'pkg-canary': 'canary',
+		'pkg-semver': '^18.2.0',
+	}
+
+	assert.equal(versionRule.check({ dependencies: validDeps }).status, 'pass')
+
+	// Empty and malformed versions must fail
+	assert.equal(versionRule.check({ dependencies: { bad: '' } }).status, 'fail')
+	assert.equal(versionRule.check({ dependencies: { bad: '   ' } }).status, 'fail')
+	assert.equal(versionRule.check({ dependencies: { bad: 'not a valid version!@#' } }).status, 'fail')
+	assert.equal(versionRule.check({ dependencies: { bad: '>>>' } }).status, 'fail')
+})
+
+// 35. Monorepo detection cases
+test('monorepo detection: pnpm-workspace.yaml, lerna.json, and workspaces trigger monorepo mode', () => {
+	const monorepoRule = rulesMap['monorepo']
+	const depCountRule = rulesMap['dependency-count']
+
+	// Rule check: pnpm-workspace.yaml
+	assert.equal(monorepoRule.check({ filePaths: ['pnpm-workspace.yaml'] }).status, 'info')
+	// Rule check: lerna.json
+	assert.equal(monorepoRule.check({ filePaths: ['lerna.json'] }).status, 'info')
+	// Rule check: workspaces in package.json
+	assert.equal(monorepoRule.check({ packageJson: { workspaces: ['packages/*'] } }).status, 'info')
+	// Single repo check
+	assert.equal(monorepoRule.check({ filePaths: ['package.json'] }).status, 'pass')
+
+	// Dependency count: informs about root package.json only when in monorepo
+	const monorepoCount = depCountRule.check({
+		dependencies: { react: '^18.0.0' },
+		devDependencies: { vite: '^5.0.0' },
+		filePaths: ['pnpm-workspace.yaml'],
+	})
+	assert.equal(monorepoCount.status, 'info')
+	assert.match(monorepoCount.message, /only the root package\.json was analyzed/)
+	assert.match(monorepoCount.message, /monorepo detected/)
+
+	const singleCount = depCountRule.check({
+		dependencies: { react: '^18.0.0' },
+		devDependencies: { vite: '^5.0.0' },
+		filePaths: ['package.json'],
+	})
+	assert.equal(singleCount.status, 'info')
+	assert.doesNotMatch(singleCount.message, /monorepo/)
+
+	// runDiagnostics: returns monorepo: true and monorepo info diagnostic
+	const monorepoDiag = runDiagnostics({
+		packageJson: { name: 'monorepo-root', workspaces: ['packages/*'] },
+		treeData: { tree: [{ path: 'package.json', type: 'blob' }] },
+	})
+	assert.equal(monorepoDiag.monorepo, true)
+	const monoInfo = monorepoDiag.diagnostics.find((d) => d.ruleId === 'monorepo')
+	assert.ok(monoInfo, 'must include monorepo diagnostic')
+	assert.equal(monoInfo.message, 'Monorepo detected; only the root package.json was analyzed.')
+	assert.equal(monoInfo.status, 'info')
+	assert.equal(monoInfo.level, 'info')
+
+	// runDiagnostics: single repo returns monorepo: false without monorepo diagnostic
+	const singleDiag = runDiagnostics({
+		packageJson: { name: 'single-app' },
+		treeData: { tree: [{ path: 'package.json', type: 'blob' }] },
+	})
+	assert.equal(singleDiag.monorepo, false)
+	assert.equal(singleDiag.diagnostics.find((d) => d.ruleId === 'monorepo'), undefined)
+})
+
+// 36. Health label follows grade (A: Healthy, B: Good, C: Needs Attention, D/F: At Risk)
+test('calculateHealthScore: health status and label follow the letter grade', () => {
+	// Grade A (>= 90): Healthy
+	const healthA = calculateHealthScore([
+		{ rule: 'package-json', status: 'pass' },
+	])
+	assert.equal(healthA.grade, 'A')
+	assert.equal(healthA.status, 'Healthy')
+	assert.equal(healthA.label, 'Healthy')
+
+	// Grade B (>= 80): Good
+	const healthB = calculateHealthScore([
+		{ rule: 'r1', status: 'pass' },
+		{ rule: 'r2', status: 'pass' },
+		{ rule: 'r3', status: 'pass' },
+		{ rule: 'r4', status: 'pass' },
+		{ rule: 'r5', status: 'pass' },
+		{ rule: 'r6', status: 'pass' },
+		{ rule: 'r7', status: 'pass' },
+		{ rule: 'r8', status: 'warning' },
+		{ rule: 'r9', status: 'warning' },
+		{ rule: 'r10', status: 'warning' },
+	])
+	assert.equal(healthB.grade, 'B')
+	assert.equal(healthB.status, 'Good')
+	assert.equal(healthB.label, 'Good')
+
+	// Grade C (>= 70): Needs Attention
+	const healthC = calculateHealthScore([
+		{ rule: 'r1', status: 'pass' },
+		{ rule: 'r2', status: 'pass' },
+		{ rule: 'r3', status: 'pass' },
+		{ rule: 'r4', status: 'pass' },
+		{ rule: 'r5', status: 'pass' },
+		{ rule: 'r6', status: 'warning' },
+		{ rule: 'r7', status: 'warning' },
+		{ rule: 'r8', status: 'warning' },
+		{ rule: 'r9', status: 'warning' },
+		{ rule: 'r10', status: 'warning' },
+	])
+	assert.equal(healthC.grade, 'C')
+	assert.equal(healthC.status, 'Needs Attention')
+	assert.equal(healthC.label, 'Needs Attention')
+
+	// Grade D (>= 60): At Risk
+	const healthD = calculateHealthScore([
+		{ rule: 'r1', status: 'pass' },
+		{ rule: 'r2', status: 'pass' },
+		{ rule: 'r3', status: 'pass' },
+		{ rule: 'r4', status: 'warning' },
+		{ rule: 'r5', status: 'warning' },
+		{ rule: 'r6', status: 'warning' },
+		{ rule: 'r7', status: 'warning' },
+		{ rule: 'r8', status: 'warning' },
+		{ rule: 'r9', status: 'warning' },
+		{ rule: 'r10', status: 'warning' },
+	])
+	assert.equal(healthD.grade, 'D')
+	assert.equal(healthD.status, 'At Risk')
+	assert.equal(healthD.label, 'At Risk')
+
+	// Grade F (< 60): At Risk
+	const healthF = calculateHealthScore([
+		{ rule: 'r1', status: 'error' },
+	])
+	assert.equal(healthF.grade, 'F')
+	assert.equal(healthF.status, 'At Risk')
+	assert.equal(healthF.label, 'At Risk')
+})
+

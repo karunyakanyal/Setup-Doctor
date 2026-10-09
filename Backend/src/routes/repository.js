@@ -206,7 +206,7 @@ const handleDiagnose = async (req, res, next) => {
 		}
 
 		const treeData = await treeResponse.json()
-		const { stack, diagnostics, summary, health, framework, categoryScores, grade } = runDiagnostics({ packageJson, treeData })
+		const { stack, diagnostics, summary, health, framework, categoryScores, grade, monorepo } = runDiagnostics({ packageJson, treeData })
 
 		return res.json({
 			success: true,
@@ -223,6 +223,7 @@ const handleDiagnose = async (req, res, next) => {
 			framework,
 			categoryScores,
 			grade,
+			monorepo: Boolean(monorepo),
 		})
 	} catch (error) {
 		if (error && error.status === 429) {

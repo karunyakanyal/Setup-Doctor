@@ -1,4 +1,4 @@
-const { normalizeContext } = require('./utils')
+const { normalizeContext, isIgnoredPath } = require('./utils')
 
 const rule = {
 	id: 'environment-example',
@@ -8,7 +8,7 @@ const rule = {
 	category: 'config',
 	check(ctx) {
 		const { filePaths } = normalizeContext(ctx)
-		const hasEnvExample = [...filePaths].some((path) => typeof path === 'string' && path.split('/').pop() === '.env.example')
+		const hasEnvExample = [...filePaths].some((path) => typeof path === 'string' && path.split('/').pop() === '.env.example' && !isIgnoredPath(path))
 
 		if (hasEnvExample) {
 			return {

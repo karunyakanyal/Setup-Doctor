@@ -1,4 +1,4 @@
-const { normalizeContext } = require('./utils')
+const { normalizeContext, formatList } = require('./utils')
 
 const rule = {
 	id: 'package-manager-consistency',
@@ -26,7 +26,7 @@ const rule = {
 		if (lockfiles.length > 1) {
 			return {
 				status: 'warn',
-				message: `Multiple package manager lockfiles were found: ${lockfiles.join(', ')}.`,
+				message: `Multiple package manager lockfiles were found: ${formatList(lockfiles, 3)}.`,
 				fix: {
 					description: 'Delete extraneous lockfiles to prevent conflicting dependency resolution.',
 					command: 'git rm yarn.lock',

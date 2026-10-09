@@ -1,4 +1,4 @@
-const { normalizeContext } = require('./utils')
+const { normalizeContext, isIgnoredPath, isCandidateEnvFile, formatList } = require('./utils')
 
 const rule = {
 	id: 'gitignore-essentials',
@@ -22,20 +22,35 @@ const rule = {
 
 		const trackedUnwanted = [...filePaths].filter((path) => {
 			if (typeof path !== 'string') return false
-			return (
-				path === '.env' ||
-				path.endsWith('/.env') ||
-				path.startsWith('node_modules/') ||
-				path.includes('/node_modules/') ||
-				path.startsWith('dist/') ||
-				path.includes('/dist/')
-			)
+			const norm = path.replace(/\\/g, '/')
+			const parts = norm.split('/').filter(Boolean)
+			if (parts.length === 0) return false
+
+			// 1. .env files: only candidate env files (root or depth <= 2, not ignored)
+			if (parts[parts.length - 1] === '.env') {
+				return isCandidateEnvFile(path)
+			}
+
+			// 2. node_modules: tracked node_modules files (not inside ignored test/fixture/doc/etc paths)
+			const isNodeModules = parts.includes('node_modules')
+			if (isNodeModules) {
+				return !isIgnoredPath(path, { except: ['node_modules'] })
+			}
+
+			// 3. dist: tracked dist files (not inside ignored test/fixture/doc/etc paths)
+			const isDist = parts.includes('dist')
+			if (isDist) {
+				return !isIgnoredPath(path)
+			}
+
+			return false
 		})
 
 		if (trackedUnwanted.length > 0) {
+			const formattedList = formatList(trackedUnwanted, 3)
 			return {
 				status: 'warn',
-				message: `Essential patterns are violated; unwanted files tracked: ${trackedUnwanted.slice(0, 3).join(', ')}.`,
+				message: `Essential patterns are violated; unwanted files tracked: ${formattedList}.`,
 				fix: {
 					description: 'Add node_modules, dist, and .env to .gitignore and untrack existing files.',
 					snippet: 'node_modules/\ndist/\n.env',

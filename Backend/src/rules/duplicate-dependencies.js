@@ -1,4 +1,4 @@
-const { normalizeContext } = require('./utils')
+const { normalizeContext, formatList } = require('./utils')
 
 const rule = {
 	id: 'duplicate-dependencies',
@@ -26,7 +26,7 @@ const rule = {
 		if (duplicates.length > 0) {
 			return {
 				status: 'fail',
-				message: `These dependencies are declared in both sections: ${duplicates.join(', ')}.`,
+				message: `These dependencies are declared in both sections: ${formatList(duplicates, 3)}.`,
 				fix: {
 					description: `Remove duplicated package ${duplicates[0]} from devDependencies.`,
 					command: `npm uninstall --save-dev ${duplicates[0]}`,

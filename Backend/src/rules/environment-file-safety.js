@@ -1,4 +1,4 @@
-const { normalizeContext } = require('./utils')
+const { normalizeContext, isCandidateEnvFile, formatList } = require('./utils')
 
 const rule = {
 	id: 'environment-file-safety',
@@ -8,12 +8,13 @@ const rule = {
 	category: 'security',
 	check(ctx) {
 		const { filePaths } = normalizeContext(ctx)
-		const hasEnvFile = [...filePaths].some((path) => typeof path === 'string' && path.split('/').pop() === '.env')
+		const envFiles = [...filePaths].filter((path) => isCandidateEnvFile(path))
 
-		if (hasEnvFile) {
+		if (envFiles.length > 0) {
+			const formattedList = formatList(envFiles, 3)
 			return {
 				status: 'fail',
-				message: 'A .env file is committed; environment files may contain secrets.',
+				message: `A .env file is committed (${formattedList}); environment files may contain secrets.`,
 				fix: {
 					description: 'Remove .env from version control and ensure it is listed in .gitignore.',
 					command: 'git rm --cached .env',

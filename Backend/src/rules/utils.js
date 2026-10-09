@@ -1,5 +1,73 @@
 const semver = require('semver')
 
+const IGNORED_PATH_SEGMENTS = new Set([
+	'__tests__',
+	'__fixtures__',
+	'fixtures',
+	'fixture',
+	'test',
+	'tests',
+	'e2e',
+	'examples',
+	'example',
+	'playground',
+	'samples',
+	'docs',
+	'node_modules',
+])
+
+function isIgnoredPath(filePath, options = {}) {
+	if (typeof filePath !== 'string' || !filePath.trim()) {
+		return false
+	}
+	const normalized = filePath.replace(/\\/g, '/')
+	const segments = normalized.split('/').filter(Boolean)
+	const except = options && options.except ? new Set(options.except.map((s) => s.toLowerCase())) : null
+	return segments.some((segment) => {
+		const lower = segment.toLowerCase()
+		if (except && except.has(lower)) {
+			return false
+		}
+		return IGNORED_PATH_SEGMENTS.has(lower)
+	})
+}
+
+function isCandidateEnvFile(filePath) {
+	if (typeof filePath !== 'string' || !filePath.trim()) {
+		return false
+	}
+	const normalized = filePath.replace(/\\/g, '/')
+	const segments = normalized.split('/').filter(Boolean)
+	if (segments.length === 0) {
+		return false
+	}
+	const fileName = segments[segments.length - 1]
+	if (fileName !== '.env') {
+		return false
+	}
+	// Root .env is depth 0 (length 1). packages/x/.env is depth 2 (length 3).
+	const depth = segments.length - 1
+	if (depth > 2) {
+		return false
+	}
+	if (isIgnoredPath(filePath)) {
+		return false
+	}
+	return true
+}
+
+function formatList(items = [], max = 3) {
+	if (!Array.isArray(items) || items.length === 0) {
+		return ''
+	}
+	if (items.length <= max) {
+		return items.join(', ')
+	}
+	const head = items.slice(0, max).join(', ')
+	const remaining = items.length - max
+	return `${head} and ${remaining} more`
+}
+
 function getMajorVersion(version) {
 	if (typeof version !== 'string' || !version.trim()) {
 		return null
@@ -13,10 +81,40 @@ function getMajorVersion(version) {
 }
 
 function isValidDependencyVersion(version) {
-	if (typeof version !== 'string' || !version.trim()) {
+	if (typeof version !== 'string') {
 		return false
 	}
-	return semver.validRange(version.trim()) !== null
+	const trimmed = version.trim()
+	if (!trimmed) {
+		return false
+	}
+
+	// 1. Anything semver.validRange accepts
+	if (semver.validRange(trimmed) !== null) {
+		return true
+	}
+
+	// 2. Protocols: workspace:, catalog:, npm:, link:, file:, portal:
+	if (/^(workspace|catalog|npm|link|file|portal):/i.test(trimmed)) {
+		return true
+	}
+
+	// 3. Git / http(s) URLs
+	if (/^(git(\+[a-z0-9_-]+)?|https?|ssh|file):\/\//i.test(trimmed) || /^git@[a-z0-9_.-]+:/i.test(trimmed)) {
+		return true
+	}
+
+	// 4. GitHub shorthand: user/repo, github:user/repo, with optional #commit/branch
+	if (/^(github:)?[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(#[a-zA-Z0-9_./-]+)?$/i.test(trimmed)) {
+		return true
+	}
+
+	// 5. Dist-tags (latest, next, beta, canary, etc.)
+	if (/^[a-zA-Z][a-zA-Z0-9._-]*$/.test(trimmed)) {
+		return true
+	}
+
+	return false
 }
 
 function normalizeContext(ctx = {}) {
@@ -73,6 +171,10 @@ function normalizeContext(ctx = {}) {
 }
 
 module.exports = {
+	IGNORED_PATH_SEGMENTS,
+	isIgnoredPath,
+	isCandidateEnvFile,
+	formatList,
 	getMajorVersion,
 	isValidDependencyVersion,
 	normalizeContext,

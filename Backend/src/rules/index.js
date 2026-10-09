@@ -1,4 +1,12 @@
-const { getMajorVersion, isValidDependencyVersion, normalizeContext } = require('./utils')
+const {
+	getMajorVersion,
+	isValidDependencyVersion,
+	normalizeContext,
+	isIgnoredPath,
+	isCandidateEnvFile,
+	formatList,
+	IGNORED_PATH_SEGMENTS,
+} = require('./utils')
 const { detectFramework } = require('./framework')
 
 // 22 Existing rules
@@ -34,9 +42,12 @@ const gitignoreEssentialsRule = require('./gitignore-essentials')
 const unpinnedDependenciesRule = require('./unpinned-dependencies')
 const missingNvmrcOrEnginesRule = require('./missing-nvmrc-or-engines')
 
-// 2 Framework rules
+// Framework rules
 const reactDomVersionMatchRule = require('./react-dom-version-match')
 const expressStartScriptRule = require('./express-start-script')
+
+// Monorepo rule
+const monorepoRule = require('./monorepo')
 
 const allRules = [
 	packageJsonRule,
@@ -70,6 +81,7 @@ const allRules = [
 	missingNvmrcOrEnginesRule,
 	reactDomVersionMatchRule,
 	expressStartScriptRule,
+	monorepoRule,
 ]
 
 const rulesMap = Object.fromEntries(allRules.map((rule) => [rule.id, rule]))
@@ -233,6 +245,14 @@ const calculateGrade = (score) => {
 	return 'F'
 }
 
+const GRADE_LABELS = {
+	A: 'Healthy',
+	B: 'Good',
+	C: 'Needs Attention',
+	D: 'At Risk',
+	F: 'At Risk',
+}
+
 const CATEGORIES = ['structure', 'dependencies', 'config', 'testing', 'security', 'docs']
 
 const calculateCategoryScores = (diagnostics = []) => {
@@ -306,12 +326,13 @@ const calculateHealthScore = (diagnostics = []) => {
 		? 0
 		: Math.round(((scoredSummary.pass * 100) + (scoredSummary.warning * 50)) / scoredSummary.total)
 
-	const status = score >= 90 ? 'Healthy' : score >= 70 ? 'Needs Attention' : 'Critical'
 	const grade = calculateGrade(score)
+	const status = GRADE_LABELS[grade] || 'At Risk'
 
 	return {
 		score,
 		status,
+		label: status,
 		grade,
 	}
 }
@@ -320,7 +341,7 @@ const runDiagnostics = ({ packageJson = {}, treeData = {} }) => {
 	const framework = detectFramework(packageJson)
 	const ctx = { packageJson, treeData, framework }
 	const norm = normalizeContext(ctx)
-	const { scripts, dependencies, devDependencies, filePaths } = norm
+	const { dependencies, devDependencies, filePaths } = norm
 	const dependencyNames = new Set([...Object.keys(dependencies), ...Object.keys(devDependencies)])
 
 	const hasEslintConfig = [...filePaths].some((path) =>
@@ -349,6 +370,15 @@ const runDiagnostics = ({ packageJson = {}, treeData = {} }) => {
 
 	if (treeData && treeData.truncated) {
 		ruleList.push(treeTruncationRule)
+	}
+
+	const hasWorkspaceYaml = filePaths.has('pnpm-workspace.yaml') || [...filePaths].some((p) => typeof p === 'string' && p.split('/').pop() === 'pnpm-workspace.yaml')
+	const hasLerna = filePaths.has('lerna.json') || [...filePaths].some((p) => typeof p === 'string' && p.split('/').pop() === 'lerna.json')
+	const hasWorkspaces = Boolean(packageJson && packageJson.workspaces)
+	const isMonorepo = Boolean(hasWorkspaceYaml || hasLerna || hasWorkspaces)
+
+	if (isMonorepo) {
+		ruleList.push(monorepoRule)
 	}
 
 	const reactVersion = dependencies.react || devDependencies.react
@@ -451,6 +481,7 @@ const runDiagnostics = ({ packageJson = {}, treeData = {} }) => {
 		framework,
 		categoryScores,
 		grade,
+		monorepo: isMonorepo,
 	}
 }
 
@@ -463,6 +494,10 @@ const rules = {
 module.exports = {
 	getMajorVersion,
 	isValidDependencyVersion,
+	isIgnoredPath,
+	isCandidateEnvFile,
+	formatList,
+	IGNORED_PATH_SEGMENTS,
 	validPriorities,
 	getDiagnosticPriority,
 	withPriority,
@@ -475,6 +510,7 @@ module.exports = {
 	rulesMap,
 	calculateSummary,
 	calculateGrade,
+	GRADE_LABELS,
 	calculateCategoryScores,
 	calculateHealthScore,
 	calculateHealth: calculateHealthScore,
