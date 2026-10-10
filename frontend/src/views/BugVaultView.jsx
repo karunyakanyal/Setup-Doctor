@@ -464,11 +464,14 @@ function BugVaultView() {
           >
             Export
           </button>
-          <label className="secondary-button bug-vault-transfer-btn">
+          <label className="secondary-button bug-vault-transfer-btn" htmlFor="bug-vault-import-file">
             Import
             <input
+              id="bug-vault-import-file"
+              name="importFile"
               type="file"
               accept=".json"
+              aria-label="Import Bug Vault JSON file"
               style={{ display: 'none' }}
               onChange={handleImportFile}
             />
@@ -522,8 +525,10 @@ function BugVaultView() {
       <div className="bug-vault-search">
         <div className="bug-search-field">
           <input
+            id="bug-vault-search"
+            name="searchQuery"
             type="search"
-            aria-label="Search saved problems"
+            aria-label="Search bugs"
             placeholder="Search problems, errors, causes, solutions..."
             value={bugSearchQuery}
             onChange={(event) => setBugSearchQuery(event.target.value)}

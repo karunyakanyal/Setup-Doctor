@@ -484,6 +484,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
         <AnalyzeRepositoryModal
           onClose={() => setIsModalOpen(false)}
           onSuccess={handleAnalysisSuccess}
+          history={analysisHistory}
+          latestRepository={repository}
         />
       )}
 
