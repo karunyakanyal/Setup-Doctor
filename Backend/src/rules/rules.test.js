@@ -512,6 +512,67 @@ test('rule: missing-nvmrc-or-engines evaluates passing and failing cases', () =>
 	assert.ok(fail.fix)
 })
 
+test('rule: missing-nvmrc-or-engines respects detected Node 18, Node 20, or unknown runtime', () => {
+	const rule = rulesMap['missing-nvmrc-or-engines']
+
+	// 1. Detected Node 18 via @types/node
+	const res18 = rule.check({
+		devDependencies: { '@types/node': '^18.11.0' },
+		filePaths: [],
+	})
+	assert.equal(res18.status, 'warn')
+	assert.match(res18.fix.snippet, />=18\.0\.0/)
+	assert.doesNotMatch(res18.fix.snippet, />=22 <25/)
+	assert.match(res18.fix.description, /18/)
+	assert.match(res18.fix.description, /detected runtime configuration/)
+
+	// 2. Detected Node 20 via volta.node
+	const res20 = rule.check({
+		packageJson: { volta: { node: '20.10.0' } },
+		filePaths: [],
+	})
+	assert.equal(res20.status, 'warn')
+	assert.match(res20.fix.snippet, />=20\.0\.0/)
+	assert.doesNotMatch(res20.fix.snippet, />=22 <25/)
+	assert.match(res20.fix.description, /20/)
+	assert.match(res20.fix.description, /detected runtime configuration/)
+
+	// 3. Unknown runtime provides conservative illustrative guidance
+	const resUnknown = rule.check({
+		packageJson: {},
+		filePaths: [],
+	})
+	assert.equal(resUnknown.status, 'warn')
+	assert.match(resUnknown.fix.snippet, />=22 <25/)
+	assert.match(resUnknown.fix.description, /illustrative example/i)
+	assert.match(resUnknown.fix.description, /compatibility/i)
+})
+
+test('rule: missing-ci-config respects detected Node version or provides illustrative disclaimer', () => {
+	const rule = rulesMap['missing-ci-config']
+
+	const withNode18 = rule.check({
+		devDependencies: { '@types/node': '^18.0.0' },
+		filePaths: [],
+	})
+	assert.equal(withNode18.status, 'warn')
+	assert.match(withNode18.fix.snippet, /node-version:\s*18/)
+	assert.match(withNode18.fix.description, /detected Node\.js runtime version \(18\)/)
+
+	const withNode20 = rule.check({
+		packageJson: { volta: { node: '20.10.0' } },
+		filePaths: [],
+	})
+	assert.equal(withNode20.status, 'warn')
+	assert.match(withNode20.fix.snippet, /node-version:\s*20/)
+	assert.match(withNode20.fix.description, /detected Node\.js runtime version \(20\)/)
+
+	const unknownNode = rule.check({ filePaths: [] })
+	assert.equal(unknownNode.status, 'warn')
+	assert.match(unknownNode.fix.snippet, /node-version:\s*22/)
+	assert.match(unknownNode.fix.description, /illustrative/i)
+})
+
 // 30. react-dom-version-match (framework-specific)
 test('rule: react-dom-version-match evaluates passing and failing cases', () => {
 	const rule = rulesMap['react-dom-version-match']

@@ -150,7 +150,9 @@ function BugVaultView() {
 
   const [isDetailsOpen, setIsDetailsOpen] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [saveSuccessMessage, setSaveSuccessMessage] = useState('')
+  const [saveSuccessMessage, setSaveSuccessMessage] = useState(() => {
+    return location.state?.saveSuccessMessage || ''
+  })
 
   // Debounce search query by 250ms
   useEffect(() => {
@@ -204,6 +206,13 @@ function BugVaultView() {
       }
     }
   }, [saveSuccessMessage])
+
+  // Clear history state to avoid stale success messages on unrelated visits or refresh
+  useEffect(() => {
+    if (location.state?.saveSuccessMessage) {
+      navigate(location.pathname, { replace: true, state: {} })
+    }
+  }, [location.state?.saveSuccessMessage, location.pathname, navigate])
 
   const automaticCategory = useMemo(() => {
     return categorizeBug(getBugCategorizationInput(newBug))
@@ -338,6 +347,8 @@ function BugVaultView() {
       return
     }
 
+    setBugFormMessage('')
+    setSaveSuccessMessage('')
     setIsSubmitting(true)
     try {
       const draftWithCategory = {
@@ -345,13 +356,28 @@ function BugVaultView() {
         category: selectedCategory || automaticCategory,
       }
 
-      const successMsg = editingBugId === null
+      const successMsg = (editingBugId === null && !id)
         ? 'Problem saved to Bug Vault successfully.'
         : 'Changes saved successfully.'
 
-      saveBug(draftWithCategory, editingBugId, location.state?.repositoryName || null)
-      handleCancelBugForm()
-      setSaveSuccessMessage(successMsg)
+      const saveResult = saveBug(draftWithCategory, editingBugId, location.state?.repositoryName || null)
+
+      if (!saveResult || !saveResult.success) {
+        setBugFormMessage('Failed to save to local storage. Check browser storage permissions or quota.')
+        return
+      }
+
+      if (id || editingBugId !== null) {
+        navigate('/bug-vault', {
+          replace: true,
+          state: { saveSuccessMessage: successMsg },
+        })
+      } else {
+        handleCancelBugForm()
+        setSaveSuccessMessage(successMsg)
+      }
+    } catch {
+      setBugFormMessage('Failed to save to local storage. Check browser storage permissions or quota.')
     } finally {
       setIsSubmitting(false)
     }

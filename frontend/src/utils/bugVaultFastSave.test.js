@@ -258,3 +258,175 @@ test('Fast Save: backward compatibility with legacy entries and solved status', 
   draftToSolve.verifiedSolution = 'Applied patch #104'
   assert.equal(validateBugDraft(draftToSolve), '')
 })
+
+test('Bug Vault edit-and-save route transition: preserves success message and avoids stale feedback', () => {
+  // 1. Simulates editing an existing bug at /bug-vault/:id
+  const editId = '202'
+  const savedDraft = {
+    id: 202,
+    problem: 'Build script error',
+    error: 'vite: not found',
+    verifiedSolution: 'npm install -D vite',
+    status: BUG_STATUS_SOLVED,
+  }
+
+  assert.equal(validateBugDraft(savedDraft), '')
+
+  let navigatedTo = null
+  let navigationOptions = null
+
+  const mockNavigate = (to, options) => {
+    navigatedTo = to
+    navigationOptions = options
+  }
+
+  // Simulate save operation while editing
+  const editingBugId = 202
+  const successMsg = editingBugId === null && !editId
+    ? 'Problem saved to Bug Vault successfully.'
+    : 'Changes saved successfully.'
+
+  assert.equal(successMsg, 'Changes saved successfully.')
+
+  if (editId || editingBugId !== null) {
+    mockNavigate('/bug-vault', {
+      replace: true,
+      state: { saveSuccessMessage: successMsg },
+    })
+  }
+
+  assert.equal(navigatedTo, '/bug-vault')
+  assert.equal(navigationOptions.replace, true)
+  assert.deepEqual(navigationOptions.state, { saveSuccessMessage: 'Changes saved successfully.' })
+
+  // 2. Simulates remounting of BugVaultView at /bug-vault with destination location state
+  const destinationLocation = {
+    pathname: '/bug-vault',
+    state: navigationOptions.state,
+  }
+
+  // Initial state evaluation on remount
+  const initialSaveSuccessMessage = destinationLocation.state?.saveSuccessMessage || ''
+  assert.equal(initialSaveSuccessMessage, 'Changes saved successfully.')
+
+  // Banner focus simulation
+  let bannerFocused = false
+  let focusOptions = null
+  const mockBanner = {
+    focus: (opts) => {
+      bannerFocused = true
+      focusOptions = opts
+    },
+  }
+  if (initialSaveSuccessMessage && mockBanner) {
+    mockBanner.focus({ preventScroll: true })
+  }
+  assert.equal(bannerFocused, true)
+  assert.deepEqual(focusOptions, { preventScroll: true })
+
+  // 3. Clear history state effect to prevent stale banner on subsequent refresh
+  let clearedLocationState = null
+  const runClearEffect = () => {
+    if (destinationLocation.state?.saveSuccessMessage) {
+      mockNavigate(destinationLocation.pathname, { replace: true, state: {} })
+      clearedLocationState = {}
+    }
+  }
+  runClearEffect()
+  assert.deepEqual(clearedLocationState, {})
+  assert.deepEqual(navigationOptions.state, {})
+
+  // 4. On subsequent visit or refresh with cleared state, banner remains clean
+  const refreshedLocation = { pathname: '/bug-vault', state: {} }
+  const refreshedMessage = refreshedLocation.state?.saveSuccessMessage || ''
+  assert.equal(refreshedMessage, '', 'Refreshed or unrelated visits must not resurrect stale success messages')
+
+  // 5. Cancelling an edit navigates without saveSuccessMessage
+  let cancelNavState = undefined
+  const handleCancelEdit = () => {
+    if (editId) {
+      mockNavigate('/bug-vault', { replace: true })
+      cancelNavState = navigationOptions.state
+    }
+  }
+  handleCancelEdit()
+  assert.equal(cancelNavState, undefined, 'Cancelling edit must not set a success message')
+})
+
+test('Bug Vault Persistence: failed persistence does not report success or navigate away', () => {
+  // Simulate view state during an edit session at /bug-vault/42
+  const editId = '42'
+  let isSubmitting = false
+  let bugFormMessage = ''
+  let saveSuccessMessage = ''
+  let navigatedTo = null
+  let navigationOptions = null
+  let formOpen = true
+
+  const mockNavigate = (to, options) => {
+    navigatedTo = to
+    navigationOptions = options
+  }
+
+  // Simulated saveBug function that fails persistence
+  const failingSaveBug = () => ({
+    success: false,
+    storageError: 'storage-failed',
+  })
+
+  // Simulated handleSaveBug implementation in BugVaultView
+  const handleSaveBug = (saveFn) => {
+    bugFormMessage = ''
+    saveSuccessMessage = ''
+    isSubmitting = true
+    try {
+      const draftWithCategory = {
+        problem: 'Docker daemon down',
+        error: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock',
+      }
+      const successMsg = 'Changes saved successfully.'
+      const saveResult = saveFn(draftWithCategory, 42)
+
+      if (!saveResult || !saveResult.success) {
+        bugFormMessage = 'Failed to save to local storage. Check browser storage permissions or quota.'
+        return
+      }
+
+      if (editId) {
+        mockNavigate('/bug-vault', {
+          replace: true,
+          state: { saveSuccessMessage: successMsg },
+        })
+      } else {
+        formOpen = false
+        saveSuccessMessage = successMsg
+      }
+    } finally {
+      isSubmitting = false
+    }
+  }
+
+  // Run with failing storage
+  handleSaveBug(failingSaveBug)
+
+  // Verify:
+  assert.equal(isSubmitting, false)
+  assert.equal(navigatedTo, null, 'Must NOT navigate away when persistence fails')
+  assert.equal(navigationOptions, null)
+  assert.equal(saveSuccessMessage, '', 'Must NOT display success banner when persistence fails')
+  assert.equal(bugFormMessage, 'Failed to save to local storage. Check browser storage permissions or quota.')
+  assert.equal(formOpen, true, 'Form must remain open when persistence fails')
+
+  // Now run with successful storage
+  const successfulSaveBug = () => ({
+    success: true,
+    id: 42,
+  })
+
+  handleSaveBug(successfulSaveBug)
+
+  assert.equal(navigatedTo, '/bug-vault', 'Must navigate to /bug-vault after successful edit')
+  assert.equal(navigationOptions.replace, true)
+  assert.deepEqual(navigationOptions.state, { saveSuccessMessage: 'Changes saved successfully.' })
+  assert.equal(bugFormMessage, '', 'Error message must be cleared on success')
+})

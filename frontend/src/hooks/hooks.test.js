@@ -253,17 +253,19 @@ test('useBugVault: saves, updates, deletes bugs and creates custom categories', 
     status: 'unresolved',
   })
 
+  assert.equal(saved.success, true)
   assert.equal(hook.current.bugs.length, 1)
   assert.equal(hook.current.bugs[0].problem, 'Missing dependency')
   assert.equal(hook.current.bugs[0].status, 'unresolved')
 
   // Update existing bug
-  hook.current.saveBug({
+  const updated = hook.current.saveBug({
     ...saved,
     status: 'solved',
     verifiedSolution: 'npm install module',
   }, saved.id)
 
+  assert.equal(updated.success, true)
   assert.equal(hook.current.bugs.length, 1)
   assert.equal(hook.current.bugs[0].status, 'solved')
   assert.equal(hook.current.bugs[0].verifiedSolution, 'npm install module')
@@ -281,6 +283,99 @@ test('useBugVault: saves, updates, deletes bugs and creates custom categories', 
   // Verify storage was updated
   const storedBugs = JSON.parse(mockStorage.getItem(BUG_VAULT_STORAGE_KEY))
   assert.equal(storedBugs.data.length, 0)
+})
+
+test('useBugVault: saveBug reports failure and does not mutate state when storage fails on create', () => {
+  const hook = renderHook(() => useBugVault())
+  assert.equal(hook.current.bugs.length, 0)
+
+  // Simulate storage failure (e.g. QuotaExceededError or setItem failure)
+  mockStorage.setItem = () => {
+    throw new Error('QuotaExceededError: storage is full')
+  }
+
+  const result = hook.current.saveBug({
+    problem: 'Memory leak in worker',
+    error: 'JavaScript heap out of memory',
+    status: 'unresolved',
+  })
+
+  // Must report failure
+  assert.equal(result.success, false)
+  assert.equal(result.storageError, 'storage-failed')
+  assert.equal(result.problem, 'Memory leak in worker')
+
+  // State must NOT be updated with unsaved data
+  assert.equal(hook.current.bugs.length, 0)
+})
+
+test('useBugVault: saveBug reports failure and preserves original state when storage fails on edit', () => {
+  const hook = renderHook(() => useBugVault())
+
+  // First save succeeds
+  const initial = hook.current.saveBug({
+    problem: 'Port collision',
+    error: 'EADDRINUSE 3000',
+    status: 'unresolved',
+  })
+  assert.equal(initial.success, true)
+  assert.equal(hook.current.bugs.length, 1)
+  assert.equal(hook.current.bugs[0].status, 'unresolved')
+
+  // Simulate storage failure during edit
+  mockStorage.setItem = () => {
+    throw new Error('QuotaExceededError')
+  }
+
+  const editResult = hook.current.saveBug({
+    ...initial,
+    status: 'solved',
+    verifiedSolution: 'kill -9 $(lsof -t -i:3000)',
+  }, initial.id)
+
+  // Must report failure
+  assert.equal(editResult.success, false)
+  assert.equal(editResult.storageError, 'storage-failed')
+
+  // Original state must NOT be modified in memory
+  assert.equal(hook.current.bugs.length, 1)
+  assert.equal(hook.current.bugs[0].status, 'unresolved')
+  assert.equal(hook.current.bugs[0].verifiedSolution, '')
+})
+
+test('useBugVault: saveBug maintains compatibility with legacy records and string IDs', () => {
+  // Pre-seed storage with legacy bug that has string id and 'solution' instead of 'verifiedSolution'
+  const legacyRecord = {
+    id: 'legacy-bug-123',
+    problem: 'Old Python issue',
+    error: 'ModuleNotFoundError: No module named requests',
+    solution: 'pip install requests',
+    status: 'solved',
+  }
+  mockStorage.setItem(BUG_VAULT_STORAGE_KEY, JSON.stringify({
+    version: 1,
+    data: [legacyRecord],
+  }))
+
+  const hook = renderHook(() => useBugVault())
+  assert.equal(hook.current.bugs.length, 1)
+  assert.equal(hook.current.bugs[0].id, 'legacy-bug-123')
+
+  // Edit using string ID
+  const editResult = hook.current.saveBug({
+    ...hook.current.bugs[0],
+    verifiedSolution: 'pip install requests==2.31.0',
+  }, 'legacy-bug-123')
+
+  assert.equal(editResult.success, true)
+  assert.equal(editResult.id, 'legacy-bug-123')
+  assert.equal(hook.current.bugs.length, 1)
+  assert.equal(hook.current.bugs[0].verifiedSolution, 'pip install requests==2.31.0')
+
+  // Verify storage was updated with versioned envelope
+  const stored = JSON.parse(mockStorage.getItem(BUG_VAULT_STORAGE_KEY))
+  assert.equal(stored.data[0].id, 'legacy-bug-123')
+  assert.equal(stored.data[0].verifiedSolution, 'pip install requests==2.31.0')
 })
 
 test('useBugVault: imports bug vault json payload and updates state', () => {
