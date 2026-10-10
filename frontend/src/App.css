@@ -420,16 +420,64 @@ h2 { margin-bottom: 0; color: var(--ink); font-size: 20px; letter-spacing: -0.02
   font-weight: 700;
 }
 
+.similar-bugs h2:focus {
+  outline: none;
+}
+
+.similar-bugs h2:focus-visible {
+  outline: 2px solid rgba(101, 180, 158, 0.6);
+  outline-offset: 2px;
+}
+
+.similar-group-section {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid #d8e1de;
+}
+
+.similar-group-section:first-of-type {
+  margin-top: 14px;
+  padding-top: 0;
+  border-top: none;
+}
+
+.similar-group-header {
+  margin-bottom: 14px;
+}
+
+.similar-group-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.duplicate-group-title {
+  color: #991b1b;
+}
+
+.related-group-title {
+  color: #1e3a8a;
+}
+
+.similar-group-intro {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.45;
+}
+
 .similar-bug-item + .similar-bug-item {
   margin-top: 18px;
   padding-top: 18px;
   border-top: 1px solid #d8e1de;
 }
 
-.similar-bug-item h3 {
+.similar-bug-item h3,
+.similar-bug-item h4 {
   margin: 0;
   color: var(--ink);
-  font-size: 16px;
+  font-size: 15px;
   overflow-wrap: anywhere;
 }
 
@@ -444,6 +492,63 @@ h2 { margin-bottom: 0; color: var(--ink); font-size: 20px; letter-spacing: -0.02
 
 .similar-bug-item p strong {
   color: var(--ink);
+}
+
+.similar-bugs-header {
+  margin-bottom: 14px;
+}
+
+.similar-bugs-intro {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: #526575;
+  line-height: 1.5;
+}
+
+.similar-bug-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.similar-bug-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: #eef7f4;
+  color: #2b7a5f;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.similar-bug-badge.badge-strong {
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+}
+
+.similar-bug-badge.badge-related {
+  background: #f0fdf4;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+}
+
+.similar-bug-match-reason {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.4;
+}
+
+.similar-bugs-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #d8e1de;
 }
 
 .bug-vault-form {
@@ -477,6 +582,64 @@ h2 { margin-bottom: 0; color: var(--ink); font-size: 20px; letter-spacing: -0.02
   gap: 24px 28px;
   width: 100%;
   margin-bottom: 28px;
+}
+
+.bug-form-primary-grid {
+  margin-bottom: 20px;
+}
+
+.bug-form-full-width {
+  grid-column: 1 / -1;
+}
+
+.bug-form-optional-section {
+  margin: 16px 0 24px;
+  border: 1px solid #d8e1de;
+  border-radius: 8px;
+  background: #fafcfb;
+  overflow: hidden;
+}
+
+.bug-form-details-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 13px 18px;
+  background: #f2f6f4;
+  border: none;
+  border-bottom: 1px solid transparent;
+  color: #3d5149;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.bug-form-details-toggle:hover {
+  background: #e7eeeb;
+  color: var(--ink);
+}
+
+.bug-form-details-toggle:focus-visible {
+  outline: 2px solid rgba(101, 180, 158, 0.6);
+  outline-offset: -2px;
+}
+
+.bug-form-details-toggle[aria-expanded="true"] {
+  border-bottom-color: #d8e1de;
+}
+
+.bug-form-details-chevron {
+  font-size: 11px;
+  color: #6b7f75;
+}
+
+.bug-form-optional-grid {
+  padding: 20px 18px;
+  margin-bottom: 0;
+  background: #fff;
 }
 
 .bug-form-grid label {
@@ -695,6 +858,7 @@ button:focus-visible,
 .bug-search-clear:focus-visible,
 .bug-vault-transfer-btn:focus-visible,
 .bug-vault-transfer-dismiss:focus-visible,
+.bug-vault-save-success:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
@@ -1111,6 +1275,24 @@ select:focus-visible {
   font-size: 16px;
   padding: 0 4px;
   line-height: 1;
+}
+
+.bug-vault-save-success {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 14px 0 0;
+  padding: 10px 14px;
+  border: 1px solid #b8e6d2;
+  border-radius: 7px;
+  color: #287b5b;
+  background: #effbf5;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bug-vault-save-success:focus {
+  outline: none;
 }
 
 

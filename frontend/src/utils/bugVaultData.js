@@ -284,6 +284,10 @@ export function validateBugDraft(draft = {}) {
     return 'solution-required'
   }
 
+  if (draft.error !== undefined && !textValue(draft.error).trim()) {
+    return 'error-required'
+  }
+
   return ''
 }
 

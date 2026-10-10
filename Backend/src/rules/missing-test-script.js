@@ -28,8 +28,8 @@ const rule = {
 			status: 'warn',
 			message: 'Test script is missing in package.json.',
 			fix: {
-				description: 'Add a test script to package.json to run automated tests.',
-				snippet: '"test": "node --test"',
+				description: 'Add a "test" script to the "scripts" section of package.json to run automated tests.',
+				snippet: '"scripts": {\n  "test": "node --test"\n}',
 			},
 		}
 	},

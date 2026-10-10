@@ -23,8 +23,8 @@ const rule = {
 			status: 'warn',
 			message: 'Project does not specify a Node.js version via package.json engines or .nvmrc.',
 			fix: {
-				description: 'Specify Node.js version in package.json engines or add an .nvmrc file.',
-				snippet: '"engines": {\n  "node": ">=20.0.0"\n}',
+				description: 'Specify supported Node.js version range in package.json engines or pin the runtime in an .nvmrc file. Confirm compatibility with your dependencies and deployment environment rather than assuming a universal version.',
+				snippet: '"engines": {\n  "node": ">=22 <25"\n}',
 			},
 		}
 	},

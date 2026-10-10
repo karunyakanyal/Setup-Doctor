@@ -180,6 +180,31 @@ test('rule: node-engine evaluates passing and failing cases', () => {
 	assert.ok(fail.fix)
 })
 
+test('rule: node-engine recommends compatible range and explains compatibility declaration', () => {
+	const rule = rulesMap['node-engine']
+	// 1. Unknown compatibility does not blindly prescribe Node 20
+	const failUnknown = rule.check({ engines: {} })
+	assert.equal(failUnknown.status, 'warn')
+	assert.doesNotMatch(failUnknown.fix.snippet, />=20\.0\.0/)
+	assert.match(failUnknown.fix.snippet, />=22 <25/)
+	assert.match(failUnknown.fix.description, /compatibility/)
+	assert.match(failUnknown.fix.description, /does not install or switch/)
+	assert.match(failUnknown.fix.description, /\.nvmrc/)
+
+	// 2. Detected runtime configuration (e.g. @types/node) is respected
+	const failWithTypes = rule.check({
+		devDependencies: { '@types/node': '^22.5.0' },
+	})
+	assert.equal(failWithTypes.status, 'warn')
+	assert.match(failWithTypes.fix.snippet, />=22\.0\.0/)
+	assert.match(failWithTypes.fix.description, /22/)
+
+	// 3. Explicit nodeVersion in context
+	const failWithRuntime = rule.check({ nodeVersion: '23.0.0' })
+	assert.equal(failWithRuntime.status, 'warn')
+	assert.match(failWithRuntime.fix.snippet, />=23\.0\.0/)
+})
+
 // 7. dependency-count
 test('rule: dependency-count returns info status', () => {
 	const rule = rulesMap['dependency-count']
