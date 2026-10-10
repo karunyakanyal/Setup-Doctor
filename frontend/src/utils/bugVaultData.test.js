@@ -14,6 +14,7 @@ import {
   updateBugDraftStatus,
   isValidBugStatus,
   validateBugDraft,
+  isDiagnosticSavedInVault,
 } from './bugVaultData.js'
 
 test('maps node-engine diagnostics to a concise problem and preserves the error', () => {
@@ -39,10 +40,81 @@ test('maps node-engine diagnostics to a concise problem and preserves the error'
   assert.deepEqual(draft.source, {
     type: 'setupdoctor',
     diagnosticRule: 'node-engine',
+    ruleId: 'node-engine',
+    category: null,
+    framework: null,
+    fix: null,
     diagnosticPriority: 'high',
     diagnosticWhy: 'The project requires a newer Node version.',
   })
   assert.notEqual(draft.cause, draft.source.diagnosticWhy)
+})
+
+test('stores ruleId, category, framework, and fix metadata on bug draft and source', () => {
+  const fixObj = {
+    description: 'Install eslint',
+    command: 'npm install --save-dev eslint',
+  }
+
+  const draft = createBugDraftFromDiagnostic({
+    ruleId: 'eslint-dependency',
+    category: 'dependencies',
+    framework: 'react',
+    fix: fixObj,
+    priority: 'medium',
+    message: 'ESLint package is missing.',
+    why: 'Code quality tooling is absent.',
+    recommendation: 'Install eslint.',
+  })
+
+  assert.equal(draft.ruleId, 'eslint-dependency')
+  assert.equal(draft.category, 'dependencies')
+  assert.equal(draft.framework, 'react')
+  assert.deepEqual(draft.fix, fixObj)
+  assert.equal(draft.suggestedFix, 'npm install --save-dev eslint')
+  assert.deepEqual(draft.source, {
+    type: 'setupdoctor',
+    diagnosticRule: 'eslint-dependency',
+    ruleId: 'eslint-dependency',
+    category: 'dependencies',
+    framework: 'react',
+    fix: fixObj,
+    diagnosticPriority: 'medium',
+    diagnosticWhy: 'Code quality tooling is absent.',
+  })
+})
+
+test('isDiagnosticSavedInVault: correctly prevents duplicate entries for the same repository and rule', () => {
+  const bugs = [
+    {
+      id: 1,
+      repository: { fullName: 'owner/my-app' },
+      source: { ruleId: 'node-engine', diagnosticRule: 'node-engine' },
+    },
+    {
+      id: 2,
+      repository: 'owner/other-app',
+      source: { ruleId: 'eslint-dependency' },
+    },
+  ]
+
+  // Found for owner/my-app
+  assert.equal(
+    isDiagnosticSavedInVault(bugs, 'owner/my-app', { ruleId: 'node-engine' }),
+    true,
+  )
+  // Not found for other repo
+  assert.equal(
+    isDiagnosticSavedInVault(bugs, 'owner/other-app', { ruleId: 'node-engine' }),
+    false,
+  )
+  // Not found if rule hasn't been saved
+  assert.equal(
+    isDiagnosticSavedInVault(bugs, 'owner/my-app', { ruleId: 'missing-readme' }),
+    false,
+  )
+  // Safe handling of null/empty values
+  assert.equal(isDiagnosticSavedInVault([], 'owner/my-app', null), false)
 })
 
 test('maps other known diagnostic rules to distinct human-readable titles', () => {

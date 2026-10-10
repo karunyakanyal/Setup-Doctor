@@ -79,6 +79,8 @@ function Sidebar() {
               to={item.to}
               end={item.end}
               key={item.label}
+              aria-label={item.label}
+              title={item.label}
               className={({ isActive }) =>
                 `nav-item ${isActive ? 'active' : ''}`
               }
@@ -91,7 +93,7 @@ function Sidebar() {
       </div>
 
       <div className="sidebar-bottom">
-        <a className="nav-item" href="#">
+        <a className="nav-item" href="#" aria-label="Settings" title="Settings">
           <NavIcon type="settings" />
           <span>Settings</span>
         </a>

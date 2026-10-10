@@ -202,6 +202,30 @@ function hasEnvironmentUsage(ctx) {
 	return false
 }
 
+function detectNodeVersion(ctx, normalized) {
+	const norm = normalized || normalizeContext(ctx)
+	if (ctx && typeof ctx === 'object') {
+		if (typeof ctx.nodeVersion === 'string' && ctx.nodeVersion.trim()) return ctx.nodeVersion.trim()
+		if (typeof ctx.runtimeVersion === 'string' && ctx.runtimeVersion.trim()) return ctx.runtimeVersion.trim()
+		if (typeof ctx.runtime === 'string' && ctx.runtime.trim()) return ctx.runtime.trim()
+		if (typeof ctx.nvmrc === 'string' && ctx.nvmrc.trim()) return ctx.nvmrc.trim()
+		if (typeof ctx.nodeVersionFile === 'string' && ctx.nodeVersionFile.trim()) return ctx.nodeVersionFile.trim()
+	}
+	const { packageJson, dependencies, devDependencies } = norm
+	if (packageJson && packageJson.volta && typeof packageJson.volta.node === 'string' && packageJson.volta.node.trim()) {
+		return packageJson.volta.node.trim()
+	}
+	const typesNode = (devDependencies && devDependencies['@types/node']) || (dependencies && dependencies['@types/node'])
+	if (typeof typesNode === 'string' && typesNode.trim()) {
+		const coerced = semver.coerce(typesNode.trim())
+		if (coerced) {
+			return `>=${coerced.major}.0.0`
+		}
+		return typesNode.trim()
+	}
+	return null
+}
+
 module.exports = {
 	IGNORED_PATH_SEGMENTS,
 	isIgnoredPath,
@@ -211,4 +235,5 @@ module.exports = {
 	isValidDependencyVersion,
 	normalizeContext,
 	hasEnvironmentUsage,
+	detectNodeVersion,
 }

@@ -14,60 +14,104 @@ import { safeLoad, safeSave, BUG_VAULT_STORAGE_KEY } from '../utils/storage.js'
 
 const BugVaultContext = createContext(null)
 
-export function BugVaultProvider({ children, initialBugs, initialCategories }) {
+export function prepareAndPersistBug({
+  bugs,
+  bugDraft,
+  editingBugId = null,
+  repositoryName = null,
+  storage = null,
+}) {
+  const savedAt = new Date().toISOString()
+  const existingBug = editingBugId === null
+    ? null
+    : bugs.find((b) => b.id === editingBugId || String(b.id) === String(editingBugId))
+
+  const bugFields = createBugRecord({
+    ...bugDraft,
+    problem: (bugDraft.problem || '').trim(),
+    error: (bugDraft.error || '').trim(),
+    cause: (bugDraft.cause || '').trim(),
+    suggestedFix: (bugDraft.suggestedFix || '').trim(),
+    whatITried: (bugDraft.whatITried || '').trim(),
+    verifiedSolution: (bugDraft.verifiedSolution || '').trim(),
+    category: bugDraft.category,
+    repository: editingBugId === null
+      ? repositoryName || null
+      : existingBug?.repository ?? bugDraft.repository,
+  }, {
+    id: editingBugId === null ? Date.now() : existingBug?.id ?? editingBugId,
+    createdAt: editingBugId === null
+      ? savedAt
+      : existingBug?.createdAt ?? bugDraft.createdAt ?? savedAt,
+    updatedAt: editingBugId === null ? null : savedAt,
+  })
+
+  const updatedRecord = editingBugId === null
+    ? bugFields
+    : { ...existingBug, ...bugFields, updatedAt: savedAt }
+
+  const nextBugs = editingBugId === null
+    ? [bugFields, ...bugs]
+    : bugs.map((b) => (b.id === editingBugId || String(b.id) === String(editingBugId) ? updatedRecord : b))
+
+  const persisted = safeSave(BUG_VAULT_STORAGE_KEY, nextBugs, storage)
+
+  if (!persisted) {
+    return {
+      persisted: false,
+      result: {
+        success: false,
+        storageError: 'storage-failed',
+        bug: updatedRecord,
+        ...updatedRecord,
+      },
+      nextBugs: bugs,
+    }
+  }
+
+  return {
+    persisted: true,
+    result: {
+      success: true,
+      bug: updatedRecord,
+      ...updatedRecord,
+    },
+    nextBugs,
+  }
+}
+
+export function BugVaultProvider({ children, initialBugs, initialCategories, storage }) {
   const [bugs, setBugs] = useState(() => {
     if (initialBugs !== undefined) {
       return initialBugs
     }
-    return safeLoad(BUG_VAULT_STORAGE_KEY, [], Array.isArray)
+    return safeLoad(BUG_VAULT_STORAGE_KEY, [], Array.isArray, storage)
   })
 
   const [customCategories, setCustomCategories] = useState(() => {
     if (initialCategories !== undefined) {
       return initialCategories
     }
-    return loadCustomCategories()
+    return loadCustomCategories(storage)
   })
 
   const [transferMessage, setTransferMessage] = useState('')
 
-  const saveBug = useCallback((bugDraft, editingBugId = null, repositoryName = null) => {
-    const savedAt = new Date().toISOString()
-    const existingBug = editingBugId === null
-      ? null
-      : bugs.find((b) => b.id === editingBugId)
-
-    const bugFields = createBugRecord({
-      ...bugDraft,
-      problem: (bugDraft.problem || '').trim(),
-      error: (bugDraft.error || '').trim(),
-      cause: (bugDraft.cause || '').trim(),
-      suggestedFix: (bugDraft.suggestedFix || '').trim(),
-      whatITried: (bugDraft.whatITried || '').trim(),
-      verifiedSolution: (bugDraft.verifiedSolution || '').trim(),
-      category: bugDraft.category,
-      repository: editingBugId === null
-        ? repositoryName || null
-        : existingBug?.repository ?? bugDraft.repository,
-    }, {
-      id: editingBugId === null ? Date.now() : existingBug?.id ?? editingBugId,
-      createdAt: editingBugId === null
-        ? savedAt
-        : existingBug?.createdAt ?? bugDraft.createdAt ?? savedAt,
-      updatedAt: editingBugId === null ? null : savedAt,
+  const saveBug = useCallback((bugDraft, editingBugId = null, repositoryName = null, customStorage = null) => {
+    const { persisted, result, nextBugs } = prepareAndPersistBug({
+      bugs,
+      bugDraft,
+      editingBugId,
+      repositoryName,
+      storage: customStorage || storage,
     })
 
-    setBugs((currentBugs) => {
-      const nextBugs = editingBugId === null
-        ? [bugFields, ...currentBugs]
-        : currentBugs.map((b) => (b.id === editingBugId ? { ...b, ...bugFields, updatedAt: savedAt } : b))
+    if (persisted) {
+      setBugs(nextBugs)
+    }
 
-      safeSave(BUG_VAULT_STORAGE_KEY, nextBugs)
-      return nextBugs
-    })
-
-    return bugFields
-  }, [bugs])
+    return result
+  }, [bugs, storage])
 
   const deleteBug = useCallback((id) => {
     setBugs((currentBugs) => {
@@ -147,7 +191,7 @@ export function BugVaultProvider({ children, initialBugs, initialCategories }) {
   return createElement(BugVaultContext.Provider, { value }, children)
 }
 
-export function useBugVault() {
+export function useBugVault(customStorage) {
   const context = useContext(BugVaultContext)
   if (context) {
     return context
@@ -156,51 +200,31 @@ export function useBugVault() {
   // Fallback for standalone usage
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const [bugs, setBugs] = useState(() =>
-    safeLoad(BUG_VAULT_STORAGE_KEY, [], Array.isArray),
+    safeLoad(BUG_VAULT_STORAGE_KEY, [], Array.isArray, customStorage),
   )
   // eslint-disable-next-line react-hooks/rules-of-hooks
-  const [customCategories, setCustomCategories] = useState(loadCustomCategories)
+  const [customCategories, setCustomCategories] = useState(() =>
+    loadCustomCategories(customStorage),
+  )
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const [transferMessage, setTransferMessage] = useState('')
 
   // eslint-disable-next-line react-hooks/rules-of-hooks
-  const saveBug = useCallback((bugDraft, editingBugId = null, repositoryName = null) => {
-    const savedAt = new Date().toISOString()
-    const existingBug = editingBugId === null
-      ? null
-      : bugs.find((b) => b.id === editingBugId)
-
-    const bugFields = createBugRecord({
-      ...bugDraft,
-      problem: (bugDraft.problem || '').trim(),
-      error: (bugDraft.error || '').trim(),
-      cause: (bugDraft.cause || '').trim(),
-      suggestedFix: (bugDraft.suggestedFix || '').trim(),
-      whatITried: (bugDraft.whatITried || '').trim(),
-      verifiedSolution: (bugDraft.verifiedSolution || '').trim(),
-      category: bugDraft.category,
-      repository: editingBugId === null
-        ? repositoryName || null
-        : existingBug?.repository ?? bugDraft.repository,
-    }, {
-      id: editingBugId === null ? Date.now() : existingBug?.id ?? editingBugId,
-      createdAt: editingBugId === null
-        ? savedAt
-        : existingBug?.createdAt ?? bugDraft.createdAt ?? savedAt,
-      updatedAt: editingBugId === null ? null : savedAt,
+  const saveBug = useCallback((bugDraft, editingBugId = null, repositoryName = null, overrideStorage = null) => {
+    const { persisted, result, nextBugs } = prepareAndPersistBug({
+      bugs,
+      bugDraft,
+      editingBugId,
+      repositoryName,
+      storage: overrideStorage || customStorage,
     })
 
-    setBugs((currentBugs) => {
-      const nextBugs = editingBugId === null
-        ? [bugFields, ...currentBugs]
-        : currentBugs.map((b) => (b.id === editingBugId ? { ...b, ...bugFields, updatedAt: savedAt } : b))
+    if (persisted) {
+      setBugs(nextBugs)
+    }
 
-      safeSave(BUG_VAULT_STORAGE_KEY, nextBugs)
-      return nextBugs
-    })
-
-    return bugFields
-  }, [bugs])
+    return result
+  }, [bugs, customStorage])
 
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const deleteBug = useCallback((id) => {

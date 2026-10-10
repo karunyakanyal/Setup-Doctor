@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import BugForm, { CREATE_CUSTOM_CATEGORY } from '../components/BugForm'
 import DeleteBugModal from '../components/DeleteBugModal'
@@ -90,13 +90,16 @@ function BugVaultView() {
 
   const [similarBugs, setSimilarBugs] = useState(() => {
     if (location.state?.fromDiagnostic) {
-      const diagnostic = location.state.fromDiagnostic
+      const draft = createBugDraftFromDiagnostic(location.state.fromDiagnostic)
       return findSimilarBugs({
-        problem: diagnostic.message || diagnostic.rule || '',
-        error: diagnostic.message || '',
-        cause: diagnostic.why || '',
+        problem: draft.problem,
+        error: draft.error,
+        cause: draft.cause,
+        suggestedFix: draft.suggestedFix,
+        ruleId: draft.ruleId,
+        category: draft.category,
         bugs,
-        limit: 3,
+        limit: 6,
       })
     }
     return []
@@ -137,6 +140,20 @@ function BugVaultView() {
     }
   })
 
+  const formRef = useRef(null)
+  const headingRef = useRef(null)
+  const similarPanelRef = useRef(null)
+  const similarHeadingRef = useRef(null)
+  const successBannerRef = useRef(null)
+  const shouldScrollRef = useRef(Boolean(location.state?.fromDiagnostic))
+  const lastScrolledKeyRef = useRef(null)
+
+  const [isDetailsOpen, setIsDetailsOpen] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [saveSuccessMessage, setSaveSuccessMessage] = useState(() => {
+    return location.state?.saveSuccessMessage || ''
+  })
+
   // Debounce search query by 250ms
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -145,6 +162,91 @@ function BugVaultView() {
 
     return () => clearTimeout(timer)
   }, [bugSearchQuery])
+
+  // Automatically scroll into view and focus when arriving from a diagnostic
+  useEffect(() => {
+    const isFromDiag = Boolean(location.state?.fromDiagnostic)
+    const isNewNav = isFromDiag && lastScrolledKeyRef.current !== location.key
+
+    if (isBugFormOpen && (isNewNav || shouldScrollRef.current)) {
+      if (isNewNav) {
+        lastScrolledKeyRef.current = location.key
+      }
+      shouldScrollRef.current = false
+
+      const hasSimilar = similarBugs && similarBugs.length > 0
+      if (hasSimilar && similarPanelRef.current) {
+        if (typeof similarPanelRef.current.scrollIntoView === 'function') {
+          similarPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }
+        if (similarHeadingRef.current && typeof similarHeadingRef.current.focus === 'function') {
+          similarHeadingRef.current.focus({ preventScroll: true })
+        }
+      } else if (formRef.current) {
+        if (typeof formRef.current.scrollIntoView === 'function') {
+          formRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }
+        if (headingRef.current && typeof headingRef.current.focus === 'function') {
+          headingRef.current.focus({ preventScroll: true })
+        } else {
+          const firstInput = formRef.current.querySelector('textarea, input, select')
+          if (firstInput && typeof firstInput.focus === 'function') {
+            firstInput.focus({ preventScroll: true })
+          }
+        }
+      }
+    }
+  }, [isBugFormOpen, location.state, location.key, similarBugs])
+
+  // Move focus to save success message when it appears
+  useEffect(() => {
+    if (saveSuccessMessage && successBannerRef.current) {
+      if (typeof successBannerRef.current.focus === 'function') {
+        successBannerRef.current.focus({ preventScroll: true })
+      }
+    }
+  }, [saveSuccessMessage])
+
+  // Clear history state to avoid stale success messages on unrelated visits or refresh
+  useEffect(() => {
+    if (location.state?.saveSuccessMessage) {
+      navigate(location.pathname, { replace: true, state: {} })
+    }
+  }, [location.state?.saveSuccessMessage, location.pathname, navigate])
+
+  const automaticCategory = useMemo(() => {
+    return categorizeBug(getBugCategorizationInput(newBug))
+  }, [newBug])
+
+  // Automatically update similar bugs when problem or error changes in open form
+  useEffect(() => {
+    if (!isBugFormOpen || editingBugId !== null) {
+      return
+    }
+
+    const trimmedProblem = (newBug.problem || '').trim()
+    const trimmedError = (newBug.error || '').trim()
+
+    const timer = setTimeout(() => {
+      if (!trimmedProblem && !trimmedError) {
+        setSimilarBugs([])
+        return
+      }
+      const matches = findSimilarBugs({
+        problem: trimmedProblem,
+        error: trimmedError,
+        cause: (newBug.cause || '').trim(),
+        suggestedFix: (newBug.suggestedFix || '').trim(),
+        ruleId: location.state?.fromDiagnostic?.ruleId || location.state?.fromDiagnostic?.rule || newBug.ruleId || '',
+        category: selectedCategory || newBug.category || automaticCategory || '',
+        bugs,
+        limit: 6,
+      })
+      setSimilarBugs(matches)
+    }, 250)
+
+    return () => clearTimeout(timer)
+  }, [isBugFormOpen, editingBugId, newBug.problem, newBug.error, newBug.cause, newBug.suggestedFix, newBug.ruleId, newBug.category, selectedCategory, automaticCategory, bugs, location.state])
 
   const normalizedBugSearch = useMemo(() => {
     return debouncedSearchQuery.trim().replace(/\s+/g, ' ').toLowerCase()
@@ -162,13 +264,11 @@ function BugVaultView() {
     })
   }, [bugs, normalizedBugSearch])
 
-  const automaticCategory = useMemo(() => {
-    return categorizeBug(getBugCategorizationInput(newBug))
-  }, [newBug])
-
   function handleCancelBugForm() {
     setIsBugFormOpen(false)
     setEditingBugId(null)
+    setIsDetailsOpen(false)
+    setIsSubmitting(false)
     setNewBug({
       problem: '',
       error: '',
@@ -196,7 +296,10 @@ function BugVaultView() {
       return
     }
 
+    setSaveSuccessMessage('')
     setEditingBugId(null)
+    setIsDetailsOpen(false)
+    setIsSubmitting(false)
     setNewBug({
       problem: '',
       error: '',
@@ -212,11 +315,18 @@ function BugVaultView() {
     setIsCategoryMessageError(false)
     setBugFormMessage('')
     setSimilarBugs([])
+    shouldScrollRef.current = true
     setIsBugFormOpen(true)
   }
 
   function handleSaveBug(event) {
-    event.preventDefault()
+    if (event?.preventDefault) {
+      event.preventDefault()
+    }
+
+    if (isSubmitting) {
+      return
+    }
 
     if (selectedCategory === CREATE_CUSTOM_CATEGORY) {
       setCategoryMessage('Create or select a category before saving.')
@@ -226,21 +336,51 @@ function BugVaultView() {
 
     const validationError = validateBugDraft(newBug)
     if (validationError) {
-      setBugFormMessage(
-        validationError === 'solution-required'
-          ? 'Add the verified solution before marking this problem solved.'
-          : 'Enter a problem before saving.',
-      )
+      if (validationError === 'solution-required') {
+        setIsDetailsOpen(true)
+        setBugFormMessage('Add the verified solution before marking this problem solved.')
+      } else if (validationError === 'error-required') {
+        setBugFormMessage('Enter an error or description before saving.')
+      } else {
+        setBugFormMessage('Enter a problem before saving.')
+      }
       return
     }
 
-    const draftWithCategory = {
-      ...newBug,
-      category: selectedCategory || automaticCategory,
-    }
+    setBugFormMessage('')
+    setSaveSuccessMessage('')
+    setIsSubmitting(true)
+    try {
+      const draftWithCategory = {
+        ...newBug,
+        category: selectedCategory || automaticCategory,
+      }
 
-    saveBug(draftWithCategory, editingBugId, location.state?.repositoryName || null)
-    handleCancelBugForm()
+      const successMsg = (editingBugId === null && !id)
+        ? 'Problem saved to Bug Vault successfully.'
+        : 'Changes saved successfully.'
+
+      const saveResult = saveBug(draftWithCategory, editingBugId, location.state?.repositoryName || null)
+
+      if (!saveResult || !saveResult.success) {
+        setBugFormMessage('Failed to save to local storage. Check browser storage permissions or quota.')
+        return
+      }
+
+      if (id || editingBugId !== null) {
+        navigate('/bug-vault', {
+          replace: true,
+          state: { saveSuccessMessage: successMsg },
+        })
+      } else {
+        handleCancelBugForm()
+        setSaveSuccessMessage(successMsg)
+      }
+    } catch {
+      setBugFormMessage('Failed to save to local storage. Check browser storage permissions or quota.')
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
   function handleStartBugEdit(bug) {
@@ -360,6 +500,25 @@ function BugVaultView() {
         </div>
       )}
 
+      {saveSuccessMessage && (
+        <div
+          className="bug-vault-save-success"
+          role="status"
+          tabIndex={-1}
+          ref={successBannerRef}
+        >
+          <span>{saveSuccessMessage}</span>
+          <button
+            className="bug-vault-transfer-dismiss"
+            type="button"
+            aria-label="Dismiss success message"
+            onClick={() => setSaveSuccessMessage('')}
+          >
+            &times;
+          </button>
+        </div>
+      )}
+
       <div className="bug-vault-search">
         <div className="bug-search-field">
           <input
@@ -392,6 +551,10 @@ function BugVaultView() {
 
       {isBugFormOpen && (
         <BugForm
+          formRef={formRef}
+          headingRef={headingRef}
+          similarPanelRef={similarPanelRef}
+          similarHeadingRef={similarHeadingRef}
           newBug={newBug}
           setNewBug={setNewBug}
           editingBugId={editingBugId}
@@ -408,8 +571,12 @@ function BugVaultView() {
           customCategories={customCategories}
           automaticCategory={automaticCategory}
           similarBugs={similarBugs}
+          isDetailsOpen={isDetailsOpen}
+          setIsDetailsOpen={setIsDetailsOpen}
+          isSubmitting={isSubmitting}
           onSubmit={handleSaveBug}
           onCancel={handleCancelBugForm}
+          onSaveAnyway={handleSaveBug}
           onCreateCustomCategory={handleCreateCustomCategory}
         />
       )}

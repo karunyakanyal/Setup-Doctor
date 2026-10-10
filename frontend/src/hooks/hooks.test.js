@@ -162,6 +162,86 @@ test('useHistory: caps history entries at 5', () => {
   assert.equal(hook.current.analysisHistory[0].repository.fullName, 'owner/repo-7')
 })
 
+test('useHistory: stores and persists meta (framework, monorepo, stack) with backward compatibility', () => {
+  const hook = renderHook(() => useHistory())
+
+  // Add analysis with metadata
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/modern-app' },
+    { score: 92, status: 'Healthy' },
+    { total: 10, pass: 9, warning: 1, error: 0 },
+    [{ rule: 'pkg', status: 'pass' }],
+    {
+      framework: 'Next.js',
+      monorepo: true,
+      stack: [{ name: 'React', detected: true }, { name: 'TypeScript', detected: true }],
+    },
+  )
+
+  assert.equal(hook.current.analysisHistory[0].framework, 'Next.js')
+  assert.equal(hook.current.analysisHistory[0].monorepo, true)
+  assert.equal(hook.current.analysisHistory[0].stack.length, 2)
+
+  // Verify stored shape
+  const stored = JSON.parse(mockStorage.getItem(HISTORY_STORAGE_KEY))
+  assert.equal(stored.data[0].framework, 'Next.js')
+  assert.equal(stored.data[0].monorepo, true)
+  assert.deepEqual(stored.data[0].stack, [
+    { name: 'React', detected: true },
+    { name: 'TypeScript', detected: true },
+  ])
+
+  // Backward compatibility: add entry without meta
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/legacy-app' },
+    { score: 70, status: 'Needs Attention' },
+  )
+
+  assert.equal(hook.current.analysisHistory[0].framework, null)
+  assert.equal(hook.current.analysisHistory[0].monorepo, false)
+  assert.deepEqual(hook.current.analysisHistory[0].stack, [])
+})
+
+test('useHistory: successfulSetups counts unique projects whose latest analysis is >= 90', () => {
+  const hook = renderHook(() => useHistory())
+
+  // First analysis for repo1: score 95 (successful)
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/repo1' },
+    { score: 95, status: 'Healthy' },
+    null,
+    [],
+  )
+  assert.equal(hook.current.successfulSetups, 1)
+
+  // Second analysis for repo1: score 98 (still successful, but must count once, not twice)
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/repo1' },
+    { score: 98, status: 'Healthy' },
+    null,
+    [],
+  )
+  assert.equal(hook.current.successfulSetups, 1)
+
+  // First analysis for repo2: score 92 (successful, now 2 unique projects)
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/repo2' },
+    { score: 92, status: 'Healthy' },
+    null,
+    [],
+  )
+  assert.equal(hook.current.successfulSetups, 2)
+
+  // Third analysis for repo1: score drops to 70 (latest is now < 90, so repo1 is no longer successful)
+  hook.current.addAnalysisEntry(
+    { fullName: 'owner/repo1' },
+    { score: 70, status: 'Needs Attention' },
+    null,
+    [],
+  )
+  assert.equal(hook.current.successfulSetups, 1)
+})
+
 test('useBugVault: saves, updates, deletes bugs and creates custom categories', () => {
   const hook = renderHook(() => useBugVault())
   assert.equal(hook.current.bugs.length, 0)
@@ -173,17 +253,19 @@ test('useBugVault: saves, updates, deletes bugs and creates custom categories', 
     status: 'unresolved',
   })
 
+  assert.equal(saved.success, true)
   assert.equal(hook.current.bugs.length, 1)
   assert.equal(hook.current.bugs[0].problem, 'Missing dependency')
   assert.equal(hook.current.bugs[0].status, 'unresolved')
 
   // Update existing bug
-  hook.current.saveBug({
+  const updated = hook.current.saveBug({
     ...saved,
     status: 'solved',
     verifiedSolution: 'npm install module',
   }, saved.id)
 
+  assert.equal(updated.success, true)
   assert.equal(hook.current.bugs.length, 1)
   assert.equal(hook.current.bugs[0].status, 'solved')
   assert.equal(hook.current.bugs[0].verifiedSolution, 'npm install module')
@@ -201,6 +283,99 @@ test('useBugVault: saves, updates, deletes bugs and creates custom categories', 
   // Verify storage was updated
   const storedBugs = JSON.parse(mockStorage.getItem(BUG_VAULT_STORAGE_KEY))
   assert.equal(storedBugs.data.length, 0)
+})
+
+test('useBugVault: saveBug reports failure and does not mutate state when storage fails on create', () => {
+  const hook = renderHook(() => useBugVault())
+  assert.equal(hook.current.bugs.length, 0)
+
+  // Simulate storage failure (e.g. QuotaExceededError or setItem failure)
+  mockStorage.setItem = () => {
+    throw new Error('QuotaExceededError: storage is full')
+  }
+
+  const result = hook.current.saveBug({
+    problem: 'Memory leak in worker',
+    error: 'JavaScript heap out of memory',
+    status: 'unresolved',
+  })
+
+  // Must report failure
+  assert.equal(result.success, false)
+  assert.equal(result.storageError, 'storage-failed')
+  assert.equal(result.problem, 'Memory leak in worker')
+
+  // State must NOT be updated with unsaved data
+  assert.equal(hook.current.bugs.length, 0)
+})
+
+test('useBugVault: saveBug reports failure and preserves original state when storage fails on edit', () => {
+  const hook = renderHook(() => useBugVault())
+
+  // First save succeeds
+  const initial = hook.current.saveBug({
+    problem: 'Port collision',
+    error: 'EADDRINUSE 3000',
+    status: 'unresolved',
+  })
+  assert.equal(initial.success, true)
+  assert.equal(hook.current.bugs.length, 1)
+  assert.equal(hook.current.bugs[0].status, 'unresolved')
+
+  // Simulate storage failure during edit
+  mockStorage.setItem = () => {
+    throw new Error('QuotaExceededError')
+  }
+
+  const editResult = hook.current.saveBug({
+    ...initial,
+    status: 'solved',
+    verifiedSolution: 'kill -9 $(lsof -t -i:3000)',
+  }, initial.id)
+
+  // Must report failure
+  assert.equal(editResult.success, false)
+  assert.equal(editResult.storageError, 'storage-failed')
+
+  // Original state must NOT be modified in memory
+  assert.equal(hook.current.bugs.length, 1)
+  assert.equal(hook.current.bugs[0].status, 'unresolved')
+  assert.equal(hook.current.bugs[0].verifiedSolution, '')
+})
+
+test('useBugVault: saveBug maintains compatibility with legacy records and string IDs', () => {
+  // Pre-seed storage with legacy bug that has string id and 'solution' instead of 'verifiedSolution'
+  const legacyRecord = {
+    id: 'legacy-bug-123',
+    problem: 'Old Python issue',
+    error: 'ModuleNotFoundError: No module named requests',
+    solution: 'pip install requests',
+    status: 'solved',
+  }
+  mockStorage.setItem(BUG_VAULT_STORAGE_KEY, JSON.stringify({
+    version: 1,
+    data: [legacyRecord],
+  }))
+
+  const hook = renderHook(() => useBugVault())
+  assert.equal(hook.current.bugs.length, 1)
+  assert.equal(hook.current.bugs[0].id, 'legacy-bug-123')
+
+  // Edit using string ID
+  const editResult = hook.current.saveBug({
+    ...hook.current.bugs[0],
+    verifiedSolution: 'pip install requests==2.31.0',
+  }, 'legacy-bug-123')
+
+  assert.equal(editResult.success, true)
+  assert.equal(editResult.id, 'legacy-bug-123')
+  assert.equal(hook.current.bugs.length, 1)
+  assert.equal(hook.current.bugs[0].verifiedSolution, 'pip install requests==2.31.0')
+
+  // Verify storage was updated with versioned envelope
+  const stored = JSON.parse(mockStorage.getItem(BUG_VAULT_STORAGE_KEY))
+  assert.equal(stored.data[0].id, 'legacy-bug-123')
+  assert.equal(stored.data[0].verifiedSolution, 'pip install requests==2.31.0')
 })
 
 test('useBugVault: imports bug vault json payload and updates state', () => {
