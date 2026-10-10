@@ -238,3 +238,72 @@ test('BugVaultView: import and search form controls have id, name, and accessibl
     'Search input must have aria-label="Search bugs"',
   )
 })
+
+test('AnalyzeRepositoryModal: renders recent repository chips built as https://github.com/owner/repo with latest repo first', () => {
+  const mockHistory = [
+    { repository: { owner: 'otherowner', name: 'otherrepo', fullName: 'otherowner/otherrepo' } },
+    { repository: { owner: 'oldowner', name: 'oldrepo', fullName: 'oldowner/oldrepo' } },
+    { repository: { owner: 'otherowner', name: 'otherrepo', fullName: 'otherowner/otherrepo' } }, // Duplicate
+  ]
+  const mockLatestRepo = {
+    owner: 'latestowner',
+    name: 'latestrepo',
+    fullName: 'latestowner/latestrepo',
+  }
+
+  const html = renderToStaticMarkup(
+    React.createElement(AnalyzeRepositoryModal, {
+      onClose: () => {},
+      onSuccess: () => {},
+      history: mockHistory,
+      latestRepository: mockLatestRepo,
+    }),
+  )
+
+  assert.ok(html.includes('class="recent-repo-chips"'), 'recent-repo-chips container must be rendered')
+
+  // Extract chips and their order
+  const chipRegex = /<button[^>]*class="recent-repo-chip"[^>]*title="([^"]*)"[^>]*>([\s\S]*?)<\/button>/gi
+  const chips = []
+  let match
+  while ((match = chipRegex.exec(html)) !== null) {
+    chips.push({
+      url: match[1],
+      label: match[2].trim(),
+    })
+  }
+
+  assert.equal(chips.length, 3, 'Expected 3 unique chips (latestRepo + 2 non-duplicate history entries)')
+
+  // 1. Latest repo appears first
+  assert.equal(chips[0].label, 'latestowner/latestrepo')
+  assert.equal(chips[0].url, 'https://github.com/latestowner/latestrepo')
+
+  // 2. Subsequent history items follow without duplicates
+  assert.equal(chips[1].label, 'otherowner/otherrepo')
+  assert.equal(chips[1].url, 'https://github.com/otherowner/otherrepo')
+
+  assert.equal(chips[2].label, 'oldowner/oldrepo')
+  assert.equal(chips[2].url, 'https://github.com/oldowner/oldrepo')
+})
+
+test('App.css: modal-label has small, medium-weight style with 6px spacing matching spec', () => {
+  const cssPath = path.resolve(__dirname, '../App.css')
+  const css = fs.readFileSync(cssPath, 'utf8')
+
+  assert.ok(css.includes('.modal-label'), 'App.css must define .modal-label')
+  assert.ok(css.includes('margin-bottom: 6px'), '.modal-label must have 6px spacing above the input')
+  assert.ok(
+    css.includes('font-size: 13px') || css.includes('font-size: 14px'),
+    '.modal-label must be small font size (13-14px)',
+  )
+  assert.ok(
+    css.includes('font-weight: 500') || css.includes('font-weight: 600'),
+    '.modal-label must have medium-weight font',
+  )
+  assert.ok(
+    css.includes('color: var(--ink)') || css.includes('color: #20333c'),
+    '.modal-label must have normal text color',
+  )
+})
+

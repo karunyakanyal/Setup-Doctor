@@ -1,11 +1,86 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useHistory } from '../hooks/useHistory'
+import { resolveLatestAnalysis, extractAnalysisState } from '../utils/diagnosisFormatters'
 
-function AnalyzeRepositoryModal({ onClose, onSuccess }) {
+function extractOwnerRepo(repoInput) {
+  if (!repoInput) return null
+  if (typeof repoInput === 'string') {
+    const parts = repoInput.trim().split('/')
+    if (parts.length >= 2 && parts[0] && parts[1]) {
+      return { owner: parts[0], repo: parts[1] }
+    }
+    return null
+  }
+  if (typeof repoInput === 'object') {
+    const owner =
+      repoInput.owner ||
+      (typeof repoInput.fullName === 'string' ? repoInput.fullName.split('/')[0] : '')
+    const repo =
+      repoInput.name ||
+      repoInput.repo ||
+      (typeof repoInput.fullName === 'string' ? repoInput.fullName.split('/')[1] : '')
+    if (owner && repo) {
+      return { owner: String(owner).trim(), repo: String(repo).trim() }
+    }
+  }
+  return null
+}
+
+const EMPTY_ARRAY = []
+
+function AnalyzeRepositoryModal({
+  onClose,
+  onSuccess,
+  history: propHistory,
+  latestRepository: propLatestRepo,
+}) {
   const [repositoryUrl, setRepositoryUrl] = useState('')
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const modalRef = useRef(null)
   const triggerRef = useRef(typeof document !== 'undefined' ? document.activeElement : null)
+
+  const historyContext = useHistory()
+  const history = useMemo(() => {
+    return propHistory !== undefined ? propHistory : (historyContext?.analysisHistory || EMPTY_ARRAY)
+  }, [propHistory, historyContext?.analysisHistory])
+  const selectedAnalysis = historyContext?.selectedAnalysis || null
+
+  const active = resolveLatestAnalysis(history, selectedAnalysis)
+  const contextLatestRepo = extractAnalysisState(active).repository
+  const latestRepo = propLatestRepo !== undefined ? propLatestRepo : contextLatestRepo
+
+  const recentItems = useMemo(() => {
+    const items = []
+    const seen = new Set()
+
+    function addItem(repoInput) {
+      const parsed = extractOwnerRepo(repoInput)
+      if (!parsed) return
+      const { owner, repo } = parsed
+      const key = `${owner.toLowerCase()}/${repo.toLowerCase()}`
+      if (seen.has(key)) return
+      seen.add(key)
+      items.push({
+        owner,
+        repo,
+        fullName: `${owner}/${repo}`,
+        url: `https://github.com/${owner}/${repo}`,
+      })
+    }
+
+    if (latestRepo) {
+      addItem(latestRepo)
+    }
+
+    if (Array.isArray(history)) {
+      for (const entry of history) {
+        addItem(entry?.repository)
+      }
+    }
+
+    return items
+  }, [latestRepo, history])
 
   useEffect(() => {
     const triggerElement = triggerRef.current
@@ -133,6 +208,24 @@ function AnalyzeRepositoryModal({ onClose, onSuccess }) {
             aria-describedby={error ? 'repository-error' : undefined}
             autoFocus
           />
+          {recentItems.length > 0 && (
+            <div className="recent-repo-chips" role="group" aria-label="Recent repositories">
+              {recentItems.map((item) => (
+                <button
+                  key={item.url}
+                  type="button"
+                  className="recent-repo-chip"
+                  onClick={() => {
+                    setRepositoryUrl(item.url)
+                    if (error) setError('')
+                  }}
+                  title={item.url}
+                >
+                  {item.fullName}
+                </button>
+              ))}
+            </div>
+          )}
           {error && <p className="form-error" id="repository-error">{error}</p>}
           <div className="modal-actions">
             <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
