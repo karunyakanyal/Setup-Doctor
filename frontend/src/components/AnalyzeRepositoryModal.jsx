@@ -121,6 +121,7 @@ function AnalyzeRepositoryModal({ onClose, onSuccess }) {
           <input
             className={`repository-input ${error ? 'has-error' : ''}`}
             id="repository-url"
+            name="repositoryUrl"
             type="url"
             value={repositoryUrl}
             onChange={(event) => {

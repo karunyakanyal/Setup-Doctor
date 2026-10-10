@@ -212,9 +212,11 @@ function BugForm({
 
         {/* Primary / default visible fields */}
         <div className="bug-form-grid bug-form-primary-grid">
-          <label>
+          <label htmlFor="bug-problem">
             Problem Title *
             <textarea
+              id="bug-problem"
+              name="problem"
               className="bug-textarea-problem"
               rows={3}
               value={newBug.problem}
@@ -229,9 +231,11 @@ function BugForm({
             />
           </label>
 
-          <label>
+          <label htmlFor="bug-error">
             Error / Description *
             <textarea
+              id="bug-error"
+              name="error"
               className="bug-textarea-error"
               rows={4}
               value={newBug.error}
@@ -246,9 +250,11 @@ function BugForm({
             />
           </label>
 
-          <label className="bug-form-full-width">
+          <label className="bug-form-full-width" htmlFor="bug-suggested-fix">
             Suggested Fix
             <textarea
+              id="bug-suggested-fix"
+              name="suggestedFix"
               className="bug-textarea-suggested-fix"
               rows={3}
               value={newBug.suggestedFix}
@@ -285,9 +291,11 @@ function BugForm({
               id="bug-form-optional-details"
               className="bug-form-grid bug-form-optional-grid"
             >
-              <label>
+              <label htmlFor="bug-cause">
                 Cause
                 <textarea
+                  id="bug-cause"
+                  name="cause"
                   className="bug-textarea-cause"
                   rows={3}
                   value={newBug.cause}
@@ -301,9 +309,11 @@ function BugForm({
                 />
               </label>
 
-              <label>
+              <label htmlFor="bug-what-i-tried">
                 What I Tried
                 <textarea
+                  id="bug-what-i-tried"
+                  name="whatITried"
                   className="bug-textarea-what-tried"
                   rows={3}
                   value={newBug.whatITried}
@@ -317,11 +327,13 @@ function BugForm({
                 />
               </label>
 
-              <label>
+              <label htmlFor="bug-verified-solution">
                 {newBug.status === BUG_STATUS_SOLVED
                   ? 'Verified Solution *'
                   : 'Verified Solution'}
                 <textarea
+                  id="bug-verified-solution"
+                  name="verifiedSolution"
                   className="bug-textarea-verified-solution"
                   rows={3}
                   value={newBug.verifiedSolution}
@@ -343,9 +355,11 @@ function BugForm({
                 />
               </label>
 
-              <label>
+              <label htmlFor="bug-status">
                 Status
                 <select
+                  id="bug-status"
+                  name="status"
                   value={newBug.status}
                   onChange={(event) => {
                     setNewBug((current) =>
@@ -359,9 +373,11 @@ function BugForm({
                 </select>
               </label>
 
-              <label>
+              <label htmlFor="bug-category">
                 Category
                 <select
+                  id="bug-category"
+                  name="category"
                   value={selectedCategory || automaticCategory}
                   onChange={(event) => {
                     const { value } = event.target
@@ -404,6 +420,7 @@ function BugForm({
                     New category
                     <input
                       id="new-custom-category"
+                      name="newCategoryName"
                       type="text"
                       value={newCategoryName}
                       onChange={(event) => {
