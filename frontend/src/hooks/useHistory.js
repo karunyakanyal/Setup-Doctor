@@ -58,6 +58,7 @@ export function HistoryProvider({ children, initialHistory }) {
         framework: meta.framework || null,
         monorepo: Boolean(meta.monorepo),
         stack: Array.isArray(meta.stack) ? meta.stack : [],
+        codeMapSummary: meta.codeMapSummary || null,
       } : {}),
     }
 
@@ -68,6 +69,27 @@ export function HistoryProvider({ children, initialHistory }) {
     })
 
     return historyEntry
+  }, [])
+
+  const updateAnalysisCodeMapSummary = useCallback((repositoryData, codeMapSummary) => {
+    setAnalysisHistory((currentHistory) => {
+      if (!Array.isArray(currentHistory) || currentHistory.length === 0) return currentHistory
+      const repoFullName = repositoryData?.fullName || repositoryData?.name
+      let found = false
+      const nextHistory = currentHistory.map((entry) => {
+        const entryRepo = entry?.repository?.fullName || entry?.repository?.name
+        if (!found && (!repoFullName || entryRepo === repoFullName)) {
+          found = true
+          return {
+            ...entry,
+            codeMapSummary,
+          }
+        }
+        return entry
+      })
+      safeSave(HISTORY_STORAGE_KEY, nextHistory)
+      return nextHistory
+    })
   }, [])
 
   const selectAnalysis = useCallback((analysis) => {
@@ -102,6 +124,7 @@ export function HistoryProvider({ children, initialHistory }) {
     setSelectedAnalysis,
     selectAnalysis,
     addAnalysisEntry,
+    updateAnalysisCodeMapSummary,
     issuesFound,
     successfulSetups,
   }
@@ -135,6 +158,7 @@ export function useHistory() {
         framework: meta.framework || null,
         monorepo: Boolean(meta.monorepo),
         stack: Array.isArray(meta.stack) ? meta.stack : [],
+        codeMapSummary: meta.codeMapSummary || null,
       } : {}),
     }
 
@@ -145,6 +169,28 @@ export function useHistory() {
     })
 
     return historyEntry
+  }, [])
+
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const updateAnalysisCodeMapSummary = useCallback((repositoryData, codeMapSummary) => {
+    setAnalysisHistory((currentHistory) => {
+      if (!Array.isArray(currentHistory) || currentHistory.length === 0) return currentHistory
+      const repoFullName = repositoryData?.fullName || repositoryData?.name
+      let found = false
+      const nextHistory = currentHistory.map((entry) => {
+        const entryRepo = entry?.repository?.fullName || entry?.repository?.name
+        if (!found && (!repoFullName || entryRepo === repoFullName)) {
+          found = true
+          return {
+            ...entry,
+            codeMapSummary,
+          }
+        }
+        return entry
+      })
+      safeSave(HISTORY_STORAGE_KEY, nextHistory)
+      return nextHistory
+    })
   }, [])
 
   // eslint-disable-next-line react-hooks/rules-of-hooks
@@ -182,6 +228,7 @@ export function useHistory() {
     setSelectedAnalysis,
     selectAnalysis,
     addAnalysisEntry,
+    updateAnalysisCodeMapSummary,
     issuesFound,
     successfulSetups,
   }
