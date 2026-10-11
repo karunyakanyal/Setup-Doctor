@@ -159,11 +159,14 @@ function parseArchiveStream(inputStream, options = {}) {
 		const isGzip = options.isGzip !== false
 		const files = new Map()
 		const skipped = {}
+		const byLanguage = {}
+		const byFolder = {}
+		const allFilesList = []
 		let totalFiles = 0
-		let totalEntries = 0
 		let totalCompressedBytes = 0
 		let totalExpandedBytes = 0
 		let hasAborted = false
+		let truncated = false
 
 		const extract = tar.extract()
 
@@ -204,89 +207,160 @@ function parseArchiveStream(inputStream, options = {}) {
 
 		extract.on('entry', (header, stream, next) => {
 			stream.on('error', () => {})
-			totalEntries++
-			if (totalEntries > MAX_ENTRIES) {
+
+			// Directory entries are not counted
+			if (header.type === 'directory' || header.name.endsWith('/')) {
 				stream.resume()
-				return abort('Repository archive exceeds entry limit of 5000 entries')
+				return next()
 			}
 
-			// Symlink handling: ignore and record
+			const cleanPath = stripTopLevelFolder(header.name)
+			if (!cleanPath || cleanPath.endsWith('/')) {
+				stream.resume()
+				return next()
+			}
+
+			// 1. Increment totalFiles for every tar entry that is a regular file, before any skip check
+			totalFiles++
+
+			// 2. entry_limit (past 5000 entries)
+			if (totalFiles > MAX_ENTRIES) {
+				skipped.entry_limit = (skipped.entry_limit || 0) + 1
+				truncated = true
+				stream.resume()
+				return next()
+			}
+
+			// 3. symlink
 			if (header.type === 'symlink' || header.type === 'link') {
 				skipped.symlink = (skipped.symlink || 0) + 1
 				stream.resume()
 				return next()
 			}
 
-			// Path traversal check on raw tar name
-			if (isPathTraversal(header.name)) {
+			// 4. path_traversal
+			if (isPathTraversal(header.name) || isPathTraversal(cleanPath)) {
 				skipped.path_traversal = (skipped.path_traversal || 0) + 1
 				stream.resume()
 				return next()
 			}
 
-			const cleanPath = stripTopLevelFolder(header.name)
-
-			// Skip directory entries and empty paths resulting from root stripping
-			if (header.type === 'directory' || !cleanPath || cleanPath.endsWith('/')) {
-				stream.resume()
-				return next()
-			}
-
-			// Path traversal check on stripped path
-			if (isPathTraversal(cleanPath)) {
-				skipped.path_traversal = (skipped.path_traversal || 0) + 1
-				stream.resume()
-				return next()
-			}
-
-			totalFiles++
-
-			// Skip ignored directories (node_modules, dist, build, coverage, .git, vendor)
+			// 5. ignored_directory
 			if (isIgnoredDirectoryPath(cleanPath)) {
 				skipped.ignored_directory = (skipped.ignored_directory || 0) + 1
 				stream.resume()
 				return next()
 			}
 
+			// 6. Fast-path binary extension check
+			const ext = cleanPath.split('.').pop()
+			if (isBinaryExtension(ext)) {
+				skipped.binary = (skipped.binary || 0) + 1
+				let fileSize = 0
+
+				stream.on('data', (chunk) => {
+					if (hasAborted) return
+					fileSize += chunk.length
+					totalExpandedBytes += chunk.length
+					if (totalExpandedBytes > MAX_EXPANDED_BYTES) {
+						return abort('Repository archive exceeds expanded size limit of 120MB')
+					}
+				})
+
+				stream.on('end', () => {
+					if (hasAborted) return
+					allFilesList.push({
+						path: cleanPath,
+						size: fileSize,
+						lang: 'binary',
+					})
+					byLanguage['binary'] = (byLanguage['binary'] || 0) + 1
+					const folder = getTopFolder(cleanPath)
+					byFolder[folder] = (byFolder[folder] || 0) + 1
+					next()
+				})
+
+				stream.on('error', (err) => {
+					if (!hasAborted) abort(err.message || 'Stream extraction error', 400)
+				})
+				return
+			}
+
+			// 7. Non-binary extension: buffer up to MAX_TEXT_PER_FILE_BYTES, check null bytes
 			const chunks = []
-			let fileExpandedBytes = 0
+			let fileSize = 0
+			let isBinaryContent = false
+			let isSizeLimit = false
 
 			stream.on('data', (chunk) => {
 				if (hasAborted) return
-				fileExpandedBytes += chunk.length
+				fileSize += chunk.length
 				totalExpandedBytes += chunk.length
 
 				if (totalExpandedBytes > MAX_EXPANDED_BYTES) {
 					return abort('Repository archive exceeds expanded size limit of 120MB')
 				}
 
-				chunks.push(chunk)
+				if (!isBinaryContent && containsNullByte(chunk)) {
+					isBinaryContent = true
+				}
+
+				if (!isBinaryContent && fileSize > MAX_TEXT_PER_FILE_BYTES) {
+					isSizeLimit = true
+					truncated = true
+				}
+
+				if (!isSizeLimit && !isBinaryContent) {
+					chunks.push(chunk)
+				}
 			})
 
 			stream.on('end', () => {
 				if (hasAborted) return
 
-				const fileBuffer = Buffer.concat(chunks)
-				const ext = cleanPath.split('.').pop()
-				const isBinary = isBinaryExtension(ext) || containsNullByte(fileBuffer)
-				const lang = isBinary ? 'binary' : detectLanguage(cleanPath)
-
-				if (isBinary) {
-					files.set(cleanPath, {
-						size: fileBuffer.length,
-						lang,
-						text: null,
+				if (isBinaryContent) {
+					skipped.binary = (skipped.binary || 0) + 1
+					allFilesList.push({
+						path: cleanPath,
+						size: fileSize,
+						lang: 'binary',
 					})
-				} else {
-					if (fileBuffer.length > MAX_TEXT_PER_FILE_BYTES) {
-						return abort(`File exceeds text size limit of 300KB: ${cleanPath}`)
-					}
-					files.set(cleanPath, {
-						size: fileBuffer.length,
-						lang,
-						text: fileBuffer.toString('utf8'),
-					})
+					byLanguage['binary'] = (byLanguage['binary'] || 0) + 1
+					const folder = getTopFolder(cleanPath)
+					byFolder[folder] = (byFolder[folder] || 0) + 1
+					return next()
 				}
+
+				if (isSizeLimit) {
+					skipped.size_limit = (skipped.size_limit || 0) + 1
+					const lang = detectLanguage(cleanPath)
+					allFilesList.push({
+						path: cleanPath,
+						size: fileSize,
+						lang,
+					})
+					byLanguage[lang] = (byLanguage[lang] || 0) + 1
+					const folder = getTopFolder(cleanPath)
+					byFolder[folder] = (byFolder[folder] || 0) + 1
+					return next()
+				}
+
+				// Regular analyzed text file
+				const fileBuffer = Buffer.concat(chunks)
+				const lang = detectLanguage(cleanPath)
+				files.set(cleanPath, {
+					size: fileBuffer.length,
+					lang,
+					text: fileBuffer.toString('utf8'),
+				})
+				allFilesList.push({
+					path: cleanPath,
+					size: fileBuffer.length,
+					lang,
+				})
+				byLanguage[lang] = (byLanguage[lang] || 0) + 1
+				const folder = getTopFolder(cleanPath)
+				byFolder[folder] = (byFolder[folder] || 0) + 1
 
 				next()
 			})
@@ -298,22 +372,6 @@ function parseArchiveStream(inputStream, options = {}) {
 
 		extract.on('finish', () => {
 			if (hasAborted) return
-
-			// Compute inventory
-			const byLanguage = {}
-			const byFolder = {}
-			const allFilesList = []
-
-			for (const [filePath, fileData] of files.entries()) {
-				byLanguage[fileData.lang] = (byLanguage[fileData.lang] || 0) + 1
-				const folder = getTopFolder(filePath)
-				byFolder[folder] = (byFolder[folder] || 0) + 1
-				allFilesList.push({
-					path: filePath,
-					size: fileData.size,
-					lang: fileData.lang,
-				})
-			}
 
 			allFilesList.sort((a, b) => b.size - a.size)
 			const largest = allFilesList.slice(0, 10)
@@ -330,7 +388,7 @@ function parseArchiveStream(inputStream, options = {}) {
 			resolve({
 				files,
 				inventory,
-				truncated: false,
+				truncated,
 			})
 		})
 
