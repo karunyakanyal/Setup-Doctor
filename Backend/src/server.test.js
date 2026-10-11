@@ -160,3 +160,88 @@ test('rules: environment-file-safety rule evaluates passing and failing inputs',
 	assert.equal(failResult.status, 'warning')
 	assert.match(failResult.message, /committed/)
 })
+
+test('POST /api/repository/diagnose: returns 404 with NO_PACKAGE_JSON when package.json is not found', async () => {
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async (url, options) => {
+		if (typeof url === 'string' && url.includes('contents/package.json')) {
+			return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 })
+		}
+		return originalFetch(url, options)
+	}
+
+	try {
+		const res = await originalFetch(`${baseUrl}/api/repository/diagnose`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ owner: 'test-owner', repo: 'no-pkg-repo', branch: 'main' }),
+		})
+
+		assert.equal(res.status, 404)
+		const data = await res.json()
+		assert.deepEqual(data, {
+			success: false,
+			code: 'NO_PACKAGE_JSON',
+			message: 'package.json not found',
+		})
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('POST /api/repository/build-check: returns 404 with NO_PACKAGE_JSON when package.json is not found', async () => {
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async (url, options) => {
+		if (typeof url === 'string' && url.includes('contents/package.json')) {
+			return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 })
+		}
+		return originalFetch(url, options)
+	}
+
+	try {
+		const res = await originalFetch(`${baseUrl}/api/repository/build-check`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ owner: 'test-owner', repo: 'no-pkg-repo', branch: 'main' }),
+		})
+
+		assert.equal(res.status, 404)
+		const data = await res.json()
+		assert.deepEqual(data, {
+			success: false,
+			code: 'NO_PACKAGE_JSON',
+			message: 'package.json not found',
+		})
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('POST /api/repository/diagnose: returns 502 with timeout message when GitHub times out twice', async () => {
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async (url, options) => {
+		if (typeof url === 'string' && url.includes('contents/package.json')) {
+			const timeoutErr = new Error('The operation was aborted due to timeout')
+			timeoutErr.name = 'TimeoutError'
+			throw timeoutErr
+		}
+		return originalFetch(url, options)
+	}
+
+	try {
+		const res = await originalFetch(`${baseUrl}/api/repository/diagnose`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ owner: 'timeout-owner', repo: 'timeout-repo', branch: 'main' }),
+		})
+
+		assert.equal(res.status, 502)
+		const data = await res.json()
+		assert.deepEqual(data, {
+			success: false,
+			message: 'GitHub took too long to respond. Try again in a moment.',
+		})
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})

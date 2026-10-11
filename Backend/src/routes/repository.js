@@ -1,7 +1,7 @@
 const express = require('express')
 const { rateLimit } = require('express-rate-limit')
 const { runDiagnostics } = require('../rules')
-const { ghFetch } = require('../services/github')
+const { ghFetch, TIMEOUT_ERROR_MESSAGE } = require('../services/github')
 const { fetchRepoArchive } = require('../services/archive')
 const { buildGraph, getCachedGraph, setCachedGraph } = require('../services/graph')
 
@@ -66,10 +66,13 @@ const handleTree = async (req, res, next) => {
 			})),
 		})
 	} catch (error) {
-		if (error && error.status === 429) {
+		if (res?.writableEnded || error?.name === 'AbortError') {
+			return
+		}
+		if (error && error.status) {
 			return next(error)
 		}
-		const err = new Error('Unable to connect to the GitHub API')
+		const err = new Error(error?.message || 'Unable to connect to the GitHub API')
 		err.status = 502
 		return next(err)
 	}
@@ -135,10 +138,13 @@ const handleFile = async (req, res, next) => {
 			content,
 		})
 	} catch (error) {
-		if (error && error.status === 429) {
+		if (res?.writableEnded || error?.name === 'AbortError') {
+			return
+		}
+		if (error && error.status) {
 			return next(error)
 		}
-		const err = new Error('Unable to connect to the GitHub API')
+		const err = new Error(error?.message || 'Unable to connect to the GitHub API')
 		err.status = 502
 		return next(err)
 	}
@@ -161,14 +167,59 @@ const handleDiagnose = async (req, res, next) => {
 		})
 	}
 
+	const overallTimeoutMs = req.diagnoseTimeout || req.timeout || req.body?.diagnoseTimeout || 40000
+	const overallSignal = AbortSignal.timeout(overallTimeoutMs)
+
+	let clientDisconnected = false
+	const clientAbortController = new AbortController()
+
+	const onClientDisconnect = () => {
+		if (!res.headersSent && !res.writableEnded) {
+			clientDisconnected = true
+			clientAbortController.abort(new Error('Client disconnected'))
+		}
+	}
+
+	if (req?.signal) {
+		if (req.signal.aborted) {
+			onClientDisconnect()
+		} else {
+			req.signal.addEventListener('abort', onClientDisconnect, { once: true })
+		}
+	}
+	if (req && typeof req.on === 'function') {
+		req.on('aborted', onClientDisconnect)
+	}
+	if (res && typeof res.on === 'function') {
+		res.on('close', () => {
+			if (!res.writableEnded) {
+				onClientDisconnect()
+			}
+		})
+	}
+
+	let diagnoseSignal = overallSignal
+	if (typeof AbortSignal.any === 'function') {
+		diagnoseSignal = AbortSignal.any([overallSignal, clientAbortController.signal])
+	}
+
+	const fetchOptions = {
+		signal: diagnoseSignal,
+	}
+	if (req.fetchFn) {
+		fetchOptions.fetchFn = req.fetchFn
+	}
+
 	try {
 		const githubResponse = await ghFetch(
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/package.json?ref=${encodeURIComponent(branch)}`,
+			fetchOptions,
 		)
 
 		if (githubResponse.status === 404) {
 			return res.status(404).json({
 				success: false,
+				code: 'NO_PACKAGE_JSON',
 				message: 'package.json not found',
 			})
 		}
@@ -199,6 +250,7 @@ const handleDiagnose = async (req, res, next) => {
 
 		const treeResponse = await ghFetch(
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+			fetchOptions,
 		)
 
 		if (!treeResponse.ok) {
@@ -229,12 +281,34 @@ const handleDiagnose = async (req, res, next) => {
 			monorepo: Boolean(monorepo),
 		})
 	} catch (error) {
-		if (error && error.status === 429) {
+		if (clientDisconnected || res.writableEnded) {
+			return
+		}
+
+		if (error && (error.status === 429 || error.status === 404)) {
 			return next(error)
 		}
-		const err = new Error('Unable to connect to the GitHub API')
-		err.status = 502
-		return next(err)
+
+		if (overallSignal.aborted || error?.message === TIMEOUT_ERROR_MESSAGE || error?.status === 502) {
+			if (!res.headersSent) {
+				return res.status(502).json({
+					success: false,
+					message: TIMEOUT_ERROR_MESSAGE,
+				})
+			}
+			return
+		}
+
+		if (error && error.status) {
+			return next(error)
+		}
+
+		if (!res.headersSent) {
+			return res.status(502).json({
+				success: false,
+				message: TIMEOUT_ERROR_MESSAGE,
+			})
+		}
 	}
 }
 
@@ -263,6 +337,7 @@ const handleBuildCheck = async (req, res, next) => {
 		if (githubResponse.status === 404) {
 			return res.status(404).json({
 				success: false,
+				code: 'NO_PACKAGE_JSON',
 				message: 'package.json not found',
 			})
 		}
@@ -305,10 +380,13 @@ const handleBuildCheck = async (req, res, next) => {
 			},
 		})
 	} catch (error) {
-		if (error && error.status === 429) {
+		if (res?.writableEnded || error?.name === 'AbortError') {
+			return
+		}
+		if (error && error.status) {
 			return next(error)
 		}
-		const err = new Error('Unable to connect to the GitHub API')
+		const err = new Error(error?.message || 'Unable to connect to the GitHub API')
 		err.status = 502
 		return next(err)
 	}
@@ -352,86 +430,106 @@ const handleGraph = async (req, res, next) => {
 		})
 	}
 
+	const cached = getCachedGraph(owner, repo, targetBranch)
+	if (cached) {
+		return res.json({
+			success: true,
+			...cached,
+		})
+	}
+
+	if (activeScans >= MAX_CONCURRENT_SCANS) {
+		if (typeof res.setHeader === 'function') {
+			res.setHeader('Retry-After', '60')
+		} else if (typeof res.set === 'function') {
+			res.set('Retry-After', '60')
+		}
+		return res.status(503).json({
+			success: false,
+			message: 'Deep scan is busy. Try again in a minute.',
+		})
+	}
+
+	activeScans++
+	let slotReleased = false
+	const releaseSlot = () => {
+		if (!slotReleased) {
+			slotReleased = true
+			activeScans = Math.max(0, activeScans - 1)
+		}
+	}
+
+	const clientAbortController = new AbortController()
+	let clientDisconnected = false
+	const onDisconnect = () => {
+		clientDisconnected = true
+		releaseSlot()
+		clientAbortController.abort(new Error('Client disconnected'))
+	}
+
+	if (req && typeof req.on === 'function') {
+		req.on('close', onDisconnect)
+		req.on('timeout', onDisconnect)
+	}
+	if (res && typeof res.on === 'function') {
+		res.on('close', onDisconnect)
+	}
+	if (req?.signal) {
+		if (req.signal.aborted) {
+			onDisconnect()
+		} else {
+			req.signal.addEventListener('abort', onDisconnect, { once: true })
+		}
+	}
+
 	try {
-		const cached = getCachedGraph(owner, repo, targetBranch)
-		if (cached) {
-			return res.json({
-				success: true,
-				...cached,
-			})
+		const archiveOptions = {
+			signal: clientAbortController.signal,
+		}
+		if (req.archiveTotalTimeout || req.archiveDeadlineTimeout || req.body?.archiveTotalTimeout || req.body?.archiveDeadlineTimeout) {
+			archiveOptions.totalTimeout = req.archiveTotalTimeout || req.archiveDeadlineTimeout || req.body?.archiveTotalTimeout || req.body?.archiveDeadlineTimeout
+		}
+		if (req.archiveConnectTimeout || req.archiveHeaderTimeout || req.body?.archiveConnectTimeout || req.body?.archiveHeaderTimeout) {
+			archiveOptions.connectTimeout = req.archiveConnectTimeout || req.archiveHeaderTimeout || req.body?.archiveConnectTimeout || req.body?.archiveHeaderTimeout
+		}
+		if (req.fetchFn) {
+			archiveOptions.fetchFn = req.fetchFn
 		}
 
-		if (activeScans >= MAX_CONCURRENT_SCANS) {
-			if (typeof res.setHeader === 'function') {
-				res.setHeader('Retry-After', '60')
-			} else if (typeof res.set === 'function') {
-				res.set('Retry-After', '60')
-			}
-			return res.status(503).json({
-				success: false,
-				message: 'Deep scan is busy. Try again in a minute.',
-			})
+		const archiveResult = await fetchRepoArchive(owner, repo, targetBranch, archiveOptions)
+		const graphResult = buildGraph(archiveResult.files)
+
+		const coverage = {
+			analyzedFiles: archiveResult.inventory.analyzedFiles,
+			totalFiles: archiveResult.inventory.totalFiles,
+			skipped: archiveResult.inventory.skipped,
+			truncated: Boolean(archiveResult.truncated || graphResult.truncated),
+			graphNodesOmitted: graphResult.graphNodesOmitted || 0,
+			approximate: true,
 		}
 
-		activeScans++
-		let slotReleased = false
-		const releaseSlot = () => {
-			if (!slotReleased) {
-				slotReleased = true
-				activeScans = Math.max(0, activeScans - 1)
-			}
+		const responsePayload = {
+			inventory: archiveResult.inventory,
+			graph: {
+				nodes: graphResult.nodes,
+				edges: graphResult.edges,
+				externals: graphResult.externals,
+			},
+			summary: graphResult.summary,
+			coverage,
 		}
 
-		if (req && typeof req.on === 'function') {
-			req.on('close', releaseSlot)
-			req.on('timeout', releaseSlot)
-		}
-		if (res && typeof res.on === 'function') {
-			res.on('close', releaseSlot)
-		}
+		setCachedGraph(owner, repo, targetBranch, responsePayload)
 
-		try {
-			const archiveResult = await fetchRepoArchive(owner, repo, targetBranch)
-			const graphResult = buildGraph(archiveResult.files)
-
-			const coverage = {
-				analyzedFiles: archiveResult.inventory.analyzedFiles,
-				totalFiles: archiveResult.inventory.totalFiles,
-				skipped: archiveResult.inventory.skipped,
-				truncated: Boolean(archiveResult.truncated || graphResult.truncated),
-				graphNodesOmitted: graphResult.graphNodesOmitted || 0,
-				approximate: true,
-			}
-
-			const responsePayload = {
-				inventory: archiveResult.inventory,
-				graph: {
-					nodes: graphResult.nodes,
-					edges: graphResult.edges,
-					externals: graphResult.externals,
-				},
-				summary: graphResult.summary,
-				coverage,
-			}
-
-			setCachedGraph(owner, repo, targetBranch, responsePayload)
-
-			return res.json({
-				success: true,
-				...responsePayload,
-			})
-		} finally {
-			releaseSlot()
-			if (req && typeof req.removeListener === 'function') {
-				req.removeListener('close', releaseSlot)
-				req.removeListener('timeout', releaseSlot)
-			}
-			if (res && typeof res.removeListener === 'function') {
-				res.removeListener('close', releaseSlot)
-			}
-		}
+		return res.json({
+			success: true,
+			...responsePayload,
+		})
 	} catch (error) {
-		if (error && (error.status === 429 || error.status === 404 || error.status === 413 || error.status === 400)) {
+		if (clientDisconnected || error?.name === 'AbortError') {
+			return
+		}
+		if (error && (error.status === 429 || error.status === 404 || error.status === 413 || error.status === 400 || error.status === 504)) {
 			return next(error)
 		}
 		if (error && error.status) {
@@ -440,6 +538,15 @@ const handleGraph = async (req, res, next) => {
 		const err = new Error(error?.message || 'Unable to connect to the GitHub API')
 		err.status = 502
 		return next(err)
+	} finally {
+		releaseSlot()
+		if (req && typeof req.removeListener === 'function') {
+			req.removeListener('close', onDisconnect)
+			req.removeListener('timeout', onDisconnect)
+		}
+		if (res && typeof res.removeListener === 'function') {
+			res.removeListener('close', onDisconnect)
+		}
 	}
 }
 

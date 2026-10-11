@@ -68,7 +68,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     return extractAnalysisState(active).stack
   })
   const [isDiagnosticsLoading, setIsDiagnosticsLoading] = useState(false)
-  const [diagnosticsError, setDiagnosticsError] = useState(false)
+  const [diagnosticsError, setDiagnosticsError] = useState(null)
 
   // Deep scan state
   const [deepScanStatus, setDeepScanStatus] = useState('idle')
@@ -98,7 +98,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     setFramework(null)
     setMonorepo(false)
     setStack([])
-    setDiagnosticsError(false)
+    setDiagnosticsError(null)
     setIsDiagnosticsLoading(true)
     setDeepScanData(null)
     setDeepScanError(null)
@@ -118,10 +118,28 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
         }),
       })
 
-      const data = await response.json()
+      let data = null
+      try {
+        data = await response.json()
+      } catch {
+        // non-JSON response
+      }
 
-      if (!response.ok || !data.success) {
-        throw new Error('Diagnostic request failed')
+      if (!response.ok || !data?.success) {
+        let errorMessage = 'We encountered a problem fetching the manifest or tree for this repository. Please verify network connectivity, GitHub access, or branch name.'
+        if (data?.code === 'NO_PACKAGE_JSON') {
+          errorMessage = 'No package.json found. SetupDoctor currently analyzes JavaScript and TypeScript projects.'
+        } else if (response.status === 429) {
+          errorMessage = data?.message || 'GitHub API rate limit exceeded. Set GITHUB_TOKEN.'
+        }
+
+        setDiagnosticsError({
+          status: response.status,
+          code: data?.code,
+          message: errorMessage,
+          backendMessage: data?.message,
+        })
+        return
       }
 
       setDiagnostics(Array.isArray(data.diagnostics) ? data.diagnostics : [])
@@ -150,8 +168,11 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
 
       // Automatically start deep scan in background without blocking diagnostics results
       void runDeepScan(repositoryData)
-    } catch {
-      setDiagnosticsError(true)
+    } catch (err) {
+      setDiagnosticsError({
+        message: 'We encountered a problem fetching the manifest or tree for this repository. Please verify network connectivity, GitHub access, or branch name.',
+        originalError: err?.message,
+      })
     } finally {
       setIsDiagnosticsLoading(false)
     }
@@ -443,6 +464,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
 
           {diagnosticsError && (
             <DiagnosticsErrorState
+              error={diagnosticsError}
+              message={typeof diagnosticsError === 'object' ? diagnosticsError.message : undefined}
               onRetry={() => repository && runDiagnostics(repository)}
             />
           )}

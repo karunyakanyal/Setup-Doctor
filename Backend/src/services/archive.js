@@ -7,6 +7,25 @@ const MAX_COMPRESSED_BYTES = 30 * 1024 * 1024 // 30MB
 const MAX_EXPANDED_BYTES = 120 * 1024 * 1024 // 120MB
 const MAX_ENTRIES = 5000
 const MAX_TEXT_PER_FILE_BYTES = 300 * 1024 // 300KB
+const ARCHIVE_CONNECT_TIMEOUT_MS = 30000
+const ARCHIVE_TOTAL_TIMEOUT_MS = 60000
+const ARCHIVE_TIMEOUT_MESSAGE = 'Repository download took too long.'
+
+function isArchiveTimeoutError(err, signal) {
+	if (signal?.aborted && (signal.reason?.name === 'TimeoutError' || signal.reason?.status === 504 || (typeof signal.reason?.message === 'string' && /timeout|timed out|took too long/i.test(signal.reason.message)))) {
+		return true
+	}
+	if (!err) return false
+	if (err.name === 'TimeoutError' || err.status === 504) return true
+	if (err.code === 'ETIMEDOUT' || err.code === 'ESOCKETTIMEDOUT') return true
+	if (err.name === 'AbortError' && (err.cause?.name === 'TimeoutError' || (signal?.aborted && (signal.reason?.name === 'TimeoutError' || signal.reason?.status === 504)))) {
+		return true
+	}
+	if (typeof err.message === 'string' && /timeout|timed out|took too long/i.test(err.message)) {
+		return true
+	}
+	return false
+}
 
 function createCompressedLimiter(maxBytes, onLimitExceeded) {
 	let bytes = 0
@@ -167,6 +186,8 @@ function parseArchiveStream(inputStream, options = {}) {
 		let totalExpandedBytes = 0
 		let hasAborted = false
 		let truncated = false
+		let gunzipStream = null
+		let onSignalAbort = null
 
 		const extract = tar.extract()
 
@@ -178,11 +199,23 @@ function parseArchiveStream(inputStream, options = {}) {
 		})
 		limiter.on('error', () => {})
 
-		function abort(message, statusCode = 413) {
+		if (isGzip) {
+			gunzipStream = zlib.createGunzip()
+			gunzipStream.on('error', (err) => {
+				if (!hasAborted) abort(err.message || 'Corrupt gzip stream', 400)
+			})
+		}
+
+		function abort(messageOrError, statusCode = 413) {
 			if (hasAborted) return
 			hasAborted = true
-			const err = new Error(message)
-			err.status = statusCode
+			if (options.signal && onSignalAbort) {
+				options.signal.removeEventListener('abort', onSignalAbort)
+			}
+			const err = messageOrError instanceof Error ? messageOrError : new Error(messageOrError)
+			if (typeof statusCode === 'number' && !err.status) {
+				err.status = statusCode
+			}
 			if (typeof options.onAbort === 'function') {
 				try {
 					options.onAbort(err)
@@ -197,12 +230,16 @@ function parseArchiveStream(inputStream, options = {}) {
 			reject(err)
 		}
 
-		let gunzipStream = null
-		if (isGzip) {
-			gunzipStream = zlib.createGunzip()
-			gunzipStream.on('error', (err) => {
-				if (!hasAborted) abort(err.message || 'Corrupt gzip stream', 400)
-			})
+		if (options.signal) {
+			onSignalAbort = () => {
+				const reason = options.signal.reason
+				abort(reason || ARCHIVE_TIMEOUT_MESSAGE, reason?.status || 504)
+			}
+			if (options.signal.aborted) {
+				onSignalAbort()
+			} else {
+				options.signal.addEventListener('abort', onSignalAbort, { once: true })
+			}
 		}
 
 		extract.on('entry', (header, stream, next) => {
@@ -371,6 +408,9 @@ function parseArchiveStream(inputStream, options = {}) {
 
 		extract.on('finish', () => {
 			if (hasAborted) return
+			if (options.signal && onSignalAbort) {
+				options.signal.removeEventListener('abort', onSignalAbort)
+			}
 
 			allFilesList.sort((a, b) => b.size - a.size)
 			const largest = allFilesList.slice(0, 10)
@@ -416,68 +456,136 @@ function parseArchiveStream(inputStream, options = {}) {
  */
 async function fetchRepoArchive(owner, repo, ref, options = {}) {
 	const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tarball/${encodeURIComponent(ref)}`
-	const fetchFn = options.fetchFn || globalThis.fetch
+	const fetchFn = options.fetchFn || options.fetch || globalThis.fetch
 	const headers = getGithubHeaders()
+
+	const connectTimeoutMs = options.connectTimeoutMs ?? options.connectTimeout ?? options.headerTimeoutMs ?? options.headerTimeout ?? ARCHIVE_CONNECT_TIMEOUT_MS
+	const totalTimeoutMs = options.totalTimeoutMs ?? options.totalTimeout ?? options.deadlineTimeoutMs ?? options.deadlineTimeout ?? ARCHIVE_TOTAL_TIMEOUT_MS
 
 	const abortController = new AbortController()
 	if (options.signal) {
-		options.signal.addEventListener('abort', () => abortController.abort(), { once: true })
+		if (options.signal.aborted) {
+			abortController.abort(options.signal.reason)
+		} else {
+			options.signal.addEventListener('abort', () => abortController.abort(options.signal.reason), { once: true })
+		}
 	}
 
-	const response = await fetchFn(url, {
-		headers,
-		redirect: 'follow',
-		signal: abortController.signal,
+	let totalTimeoutTriggered = false
+	let nodeStream = null
+
+	const destroyStreams = (err) => {
+		if (nodeStream && typeof nodeStream.destroy === 'function' && !nodeStream.destroyed) {
+			nodeStream.destroy(err)
+		}
+	}
+
+	let totalTimer = null
+	const totalPromise = new Promise((_, reject) => {
+		totalTimer = setTimeout(() => {
+			totalTimeoutTriggered = true
+			const err = new Error(ARCHIVE_TIMEOUT_MESSAGE)
+			err.status = 504
+			abortController.abort(err)
+			destroyStreams(err)
+			reject(err)
+		}, totalTimeoutMs)
+		if (totalTimer && typeof totalTimer.unref === 'function') {
+			totalTimer.unref()
+		}
 	})
 
-	if (
-		response.status === 429 ||
-		(response.status === 403 && response.headers?.get?.('x-ratelimit-remaining') === '0')
-	) {
-		const error = new Error('GitHub API rate limit exceeded. Set GITHUB_TOKEN.')
-		error.status = 429
-		throw error
-	}
-
-	if (response.status === 404) {
-		const error = new Error('GitHub repository or ref not found')
-		error.status = 404
-		throw error
-	}
-
-	if (!response.ok) {
-		const error = new Error('GitHub API request failed')
-		error.status = 502
-		throw error
-	}
-
-	const contentLength = Number(response.headers?.get?.('content-length'))
-	if (contentLength && contentLength > MAX_COMPRESSED_BYTES) {
-		abortController.abort()
-		const error = new Error('Repository archive exceeds compressed size limit of 30MB')
-		error.status = 413
-		throw error
-	}
-
-	let nodeStream
-	if (Buffer.isBuffer(response.body)) {
-		nodeStream = Readable.from(response.body)
-	} else if (response.body && typeof response.body.pipe === 'function') {
-		nodeStream = response.body
-	} else if (response.body && typeof response.body.getReader === 'function') {
-		nodeStream = Readable.fromWeb(response.body)
+	const headersTimeoutSignal = AbortSignal.timeout(connectTimeoutMs)
+	let fetchSignal
+	if (typeof AbortSignal.any === 'function') {
+		fetchSignal = AbortSignal.any([abortController.signal, headersTimeoutSignal])
 	} else {
-		nodeStream = Readable.from(response.body)
+		fetchSignal = abortController.signal
 	}
 
-	const result = await parseArchiveStream(nodeStream, {
-		isGzip: true,
-		onAbort: () => {
-			abortController.abort()
-		},
-	})
+	try {
+		return await Promise.race([
+			(async () => {
+				let response
+				try {
+					response = await fetchFn(url, {
+						headers,
+						redirect: 'follow',
+						signal: fetchSignal,
+					})
+				} catch (fetchErr) {
+					if (headersTimeoutSignal.aborted || totalTimeoutTriggered || isArchiveTimeoutError(fetchErr, headersTimeoutSignal)) {
+						const timeoutErr = new Error(ARCHIVE_TIMEOUT_MESSAGE)
+						timeoutErr.status = 504
+						abortController.abort(timeoutErr)
+						throw timeoutErr
+					}
+					throw fetchErr
+				}
 
-	return result
+				if (
+					response.status === 429 ||
+					(response.status === 403 && response.headers?.get?.('x-ratelimit-remaining') === '0')
+				) {
+					const error = new Error('GitHub API rate limit exceeded. Set GITHUB_TOKEN.')
+					error.status = 429
+					throw error
+				}
+
+				if (response.status === 404) {
+					const error = new Error('GitHub repository or ref not found')
+					error.status = 404
+					throw error
+				}
+
+				if (!response.ok) {
+					const error = new Error('GitHub API request failed')
+					error.status = 502
+					throw error
+				}
+
+				const contentLength = Number(response.headers?.get?.('content-length'))
+				if (contentLength && contentLength > MAX_COMPRESSED_BYTES) {
+					abortController.abort()
+					const error = new Error('Repository archive exceeds compressed size limit of 30MB')
+					error.status = 413
+					throw error
+				}
+
+				if (Buffer.isBuffer(response.body)) {
+					nodeStream = Readable.from(response.body)
+				} else if (response.body && typeof response.body.pipe === 'function') {
+					nodeStream = response.body
+				} else if (response.body && typeof response.body.getReader === 'function') {
+					nodeStream = Readable.fromWeb(response.body)
+				} else {
+					nodeStream = Readable.from(response.body)
+				}
+
+				const result = await parseArchiveStream(nodeStream, {
+					isGzip: true,
+					signal: abortController.signal,
+					onAbort: () => {
+						abortController.abort()
+					},
+				})
+
+				return result
+			})(),
+			totalPromise,
+		])
+	} catch (err) {
+		destroyStreams(err)
+		abortController.abort(err)
+		if (totalTimeoutTriggered || headersTimeoutSignal.aborted || isArchiveTimeoutError(err, headersTimeoutSignal)) {
+			const timeoutErr = new Error(ARCHIVE_TIMEOUT_MESSAGE)
+			timeoutErr.status = 504
+			throw timeoutErr
+		}
+		throw err
+	} finally {
+		clearTimeout(totalTimer)
+	}
 }
 
 function clearArchiveCache() {}
@@ -497,4 +605,7 @@ module.exports = {
 	MAX_EXPANDED_BYTES,
 	MAX_ENTRIES,
 	MAX_TEXT_PER_FILE_BYTES,
+	ARCHIVE_CONNECT_TIMEOUT_MS,
+	ARCHIVE_TOTAL_TIMEOUT_MS,
+	ARCHIVE_TIMEOUT_MESSAGE,
 }

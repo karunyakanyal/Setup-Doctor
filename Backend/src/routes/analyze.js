@@ -77,6 +77,9 @@ const handleAnalyze = async (req, res, next) => {
 			stars: repository.stargazers_count,
 		})
 	} catch (error) {
+		if (res?.writableEnded || error?.name === 'AbortError') {
+			return
+		}
 		if (error && error.status === 429) {
 			return next(error)
 		}

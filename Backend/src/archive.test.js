@@ -8,6 +8,7 @@ const {
 	stripTopLevelFolder,
 	isPathTraversal,
 	detectLanguage,
+	fetchRepoArchive,
 } = require('./services/archive')
 
 function createTarGzStream(entries = []) {
@@ -261,3 +262,74 @@ test('archive parser cap: aborts expanded bytes when exceeding 120MB', async () 
 		},
 	)
 })
+
+test('fetchRepoArchive: stalled headers response hits timeout and rejects with 504', async () => {
+	const mockFetch = async (url, options) => {
+		return new Promise((resolve, reject) => {
+			if (options.signal) {
+				options.signal.addEventListener(
+					'abort',
+					() => {
+						const err = new Error('The operation was aborted due to timeout')
+						err.name = 'TimeoutError'
+						reject(err)
+					},
+					{ once: true },
+				)
+			}
+		})
+	}
+
+	await assert.rejects(
+		async () => {
+			await fetchRepoArchive('owner', 'repo', 'main', {
+				fetchFn: mockFetch,
+				connectTimeoutMs: 50,
+			})
+		},
+		(err) => {
+			assert.equal(err.status, 504)
+			assert.equal(err.message, 'Repository download took too long.')
+			return true
+		},
+	)
+})
+
+test('fetchRepoArchive: stalled archive stream hits deadline, destroys stream, and rejects with 504', async () => {
+	let streamDestroyed = false
+	const stalledStream = new Readable({
+		read() {
+			// Don't push any data - stream stalls
+		},
+		destroy(err, cb) {
+			streamDestroyed = true
+			if (cb) cb(err)
+		},
+	})
+
+	const mockFetch = async () => {
+		return {
+			ok: true,
+			status: 200,
+			headers: { get: () => null },
+			body: stalledStream,
+		}
+	}
+
+	await assert.rejects(
+		async () => {
+			await fetchRepoArchive('owner', 'repo', 'main', {
+				fetchFn: mockFetch,
+				totalTimeoutMs: 50,
+			})
+		},
+		(err) => {
+			assert.equal(err.status, 504)
+			assert.equal(err.message, 'Repository download took too long.')
+			return true
+		},
+	)
+
+	assert.equal(streamDestroyed, true)
+})
+

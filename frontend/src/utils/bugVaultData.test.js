@@ -377,3 +377,87 @@ test('invalid statuses fall back to legacy solution inference safely', () => {
     BUG_STATUS_UNRESOLVED,
   )
 })
+
+test('string fix prefill: createBugDraftFromDiagnostic accepts diagnostic.fix as a string', () => {
+  const draft = createBugDraftFromDiagnostic({
+    rule: 'missing-test-script',
+    message: 'Test script is missing in package.json.',
+    fix: 'npm pkg set scripts.test="node --test"',
+    recommendation: 'Add a test script to package.json.',
+  })
+
+  assert.equal(draft.suggestedFix, 'npm pkg set scripts.test="node --test"')
+  assert.equal(draft.fix, 'npm pkg set scripts.test="node --test"')
+  assert.equal(draft.source.fix, 'npm pkg set scripts.test="node --test"')
+})
+
+test('object fix prefill: createBugDraftFromDiagnostic accepts fix with command, snippet, or description', () => {
+  // Command prefill
+  const draftCommand = createBugDraftFromDiagnostic({
+    rule: 'eslint-dependency',
+    message: 'ESLint is missing.',
+    fix: { command: 'npm install --save-dev eslint' },
+    recommendation: 'Install eslint.',
+  })
+  assert.equal(draftCommand.suggestedFix, 'npm install --save-dev eslint')
+  assert.deepEqual(draftCommand.fix, { command: 'npm install --save-dev eslint' })
+
+  // Snippet prefill
+  const draftSnippet = createBugDraftFromDiagnostic({
+    rule: 'node-engine',
+    message: 'Node version missing.',
+    fix: { snippet: '"engines": { "node": ">=20.0.0" }' },
+    recommendation: 'Specify node engine.',
+  })
+  assert.equal(draftSnippet.suggestedFix, '"engines": { "node": ">=20.0.0" }')
+
+  // Description prefill
+  const draftDescription = createBugDraftFromDiagnostic({
+    rule: 'readme',
+    message: 'README.md is missing.',
+    fix: { description: 'Create README.md with project overview' },
+    recommendation: 'Add a README.md file.',
+  })
+  assert.equal(draftDescription.suggestedFix, 'Create README.md with project overview')
+
+  // Precedence: command over snippet and description
+  const draftPrecedence = createBugDraftFromDiagnostic({
+    rule: 'build-script',
+    message: 'Build script is missing.',
+    fix: {
+      command: 'npm run build',
+      snippet: 'build: vite build',
+      description: 'Configure build script',
+    },
+    recommendation: 'Add a build script.',
+  })
+  assert.equal(draftPrecedence.suggestedFix, 'npm run build')
+})
+
+test('fallback to recommendation: createBugDraftFromDiagnostic falls back when fix is empty or missing', () => {
+  // Missing fix
+  const draftMissing = createBugDraftFromDiagnostic({
+    rule: 'gitignore',
+    message: '.gitignore is missing.',
+    recommendation: 'Add .gitignore to prevent committing node_modules.',
+  })
+  assert.equal(draftMissing.suggestedFix, 'Add .gitignore to prevent committing node_modules.')
+
+  // Empty string fix
+  const draftEmptyString = createBugDraftFromDiagnostic({
+    rule: 'gitignore',
+    message: '.gitignore is missing.',
+    fix: '   ',
+    recommendation: 'Add .gitignore to prevent committing node_modules.',
+  })
+  assert.equal(draftEmptyString.suggestedFix, 'Add .gitignore to prevent committing node_modules.')
+
+  // Empty object fix
+  const draftEmptyObj = createBugDraftFromDiagnostic({
+    rule: 'gitignore',
+    message: '.gitignore is missing.',
+    fix: {},
+    recommendation: 'Add .gitignore to prevent committing node_modules.',
+  })
+  assert.equal(draftEmptyObj.suggestedFix, 'Add .gitignore to prevent committing node_modules.')
+})

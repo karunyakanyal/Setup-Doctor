@@ -48,7 +48,7 @@ function normalizeSource(source) {
     if (source.framework) {
       normalized.framework = textValue(source.framework)
     }
-    if (source.fix && typeof source.fix === 'object') {
+    if (source.fix && (typeof source.fix === 'object' || typeof source.fix === 'string')) {
       normalized.fix = source.fix
     }
     return normalized
@@ -199,16 +199,27 @@ export function createBugDraftFromDiagnostic(diagnostic = {}) {
   const ruleId = textValue(diagnostic.ruleId || diagnostic.rule) || null
   const category = diagnostic.category ? textValue(diagnostic.category) : null
   const framework = diagnostic.framework ? textValue(diagnostic.framework) : null
-  const fix = diagnostic.fix && typeof diagnostic.fix === 'object' ? diagnostic.fix : null
-  const suggestedFix = fix && (fix.command || fix.snippet || fix.description)
-    ? textValue(fix.command || fix.snippet || fix.description)
-    : textValue(diagnostic.recommendation)
+  let fix = null
+  let fixText = ''
+
+  if (typeof diagnostic.fix === 'string') {
+    fix = diagnostic.fix
+    fixText = diagnostic.fix.trim()
+  } else if (diagnostic.fix && typeof diagnostic.fix === 'object') {
+    fix = diagnostic.fix
+    fixText = textValue(
+      diagnostic.fix.command || diagnostic.fix.snippet || diagnostic.fix.description,
+    ).trim()
+  }
+
+  const fallback = textValue(diagnostic.recommendation)
+  const suggestedFix = fixText || fallback
 
   return {
     problem: getDiagnosticProblemTitle(ruleId) || textValue(diagnostic.title || diagnostic.message),
     error: textValue(diagnostic.message),
     cause: '',
-    suggestedFix: textValue(suggestedFix || diagnostic.recommendation),
+    suggestedFix: textValue(suggestedFix),
     status: BUG_STATUS_UNRESOLVED,
     category: category,
     ruleId,

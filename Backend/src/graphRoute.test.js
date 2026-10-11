@@ -12,6 +12,7 @@ const {
 	MAX_CONCURRENT_SCANS,
 } = require('./routes/repository')
 const { setArchiveCache, clearArchiveCache } = require('./services/archive')
+const { clearGraphCache } = require('./services/graph')
 const errorHandler = require('./middleware/errorHandler')
 
 function createMockReqRes({ body = {}, ip = '127.0.0.1' } = {}) {
@@ -586,3 +587,47 @@ test('POST /api/repository/graph concurrency: overlapping requests where one is 
 		resetActiveScans()
 	}
 })
+
+test('POST /api/repository/graph timeout: stalled archive stream hits total deadline, releases slot, and returns 504', async () => {
+	clearGraphCache()
+	resetActiveScans()
+
+	const stalledStream = new Readable({
+		read() {},
+	})
+
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => {
+		return {
+			ok: true,
+			status: 200,
+			headers: { get: () => null },
+			body: stalledStream,
+		}
+	}
+
+	try {
+		const mock = createMockReqRes({
+			body: {
+				owner: 'stalled-org',
+				repo: 'stalled-repo',
+				branch: 'main',
+				archiveTotalTimeout: 50,
+			},
+		})
+
+		let nextError = null
+		await handleGraph(mock.req, mock.res, (err) => {
+			nextError = err
+		})
+
+		assert.equal(getActiveScans(), 0, 'Active scans slot must be released in finally block')
+		assert.ok(nextError, 'Should pass error to next()')
+		assert.equal(nextError.status, 504)
+		assert.equal(nextError.message, 'Repository download took too long.')
+	} finally {
+		globalThis.fetch = originalFetch
+		resetActiveScans()
+	}
+})
+
