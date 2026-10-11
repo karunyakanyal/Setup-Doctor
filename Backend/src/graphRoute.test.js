@@ -494,3 +494,95 @@ test('POST /api/repository/graph concurrency: releases slot when request closes/
 		resetActiveScans()
 	}
 })
+
+test('POST /api/repository/graph concurrency: emits both close and timeout on single request and counter never goes negative', async () => {
+	clearGraphCache()
+	resetActiveScans()
+
+	const originalFetch = globalThis.fetch
+	let releaseFetch
+	const gate = new Promise((resolve) => { releaseFetch = resolve })
+	globalThis.fetch = async () => {
+		await gate
+		return { ok: true, status: 200, headers: { get: () => '0' }, body: Buffer.alloc(0) }
+	}
+
+	try {
+		const mock = createMockReqRes({ body: { owner: 'both-org', repo: 'both-repo', branch: 'main' } })
+		const p = handleGraph(mock.req, mock.res, () => {})
+		await new Promise((r) => setImmediate(r))
+
+		assert.equal(getActiveScans(), 1)
+
+		// Fire both 'close' and 'timeout' on the exact same request
+		mock.req.emit('close')
+		assert.equal(getActiveScans(), 0)
+		assert.ok(getActiveScans() >= 0, 'Counter must never be negative')
+
+		mock.req.emit('timeout')
+		assert.equal(getActiveScans(), 0)
+		assert.ok(getActiveScans() >= 0, 'Counter must never be negative')
+
+		// Finish handler execution (finally block runs releaseSlot again)
+		releaseFetch()
+		await p
+
+		assert.equal(getActiveScans(), 0)
+		assert.ok(getActiveScans() >= 0, 'Counter must never be negative after handler finishes')
+	} finally {
+		globalThis.fetch = originalFetch
+		resetActiveScans()
+	}
+})
+
+test('POST /api/repository/graph concurrency: overlapping requests where one is aborted keep other scan slot intact', async () => {
+	clearGraphCache()
+	resetActiveScans()
+
+	const originalFetch = globalThis.fetch
+	let releaseFetch1
+	let releaseFetch2
+	const gate1 = new Promise((resolve) => { releaseFetch1 = resolve })
+	const gate2 = new Promise((resolve) => { releaseFetch2 = resolve })
+
+	let fetchCount = 0
+	globalThis.fetch = async () => {
+		fetchCount++
+		if (fetchCount === 1) {
+			await gate1
+		} else {
+			await gate2
+		}
+		return { ok: true, status: 200, headers: { get: () => '0' }, body: Buffer.alloc(0) }
+	}
+
+	try {
+		const mock1 = createMockReqRes({ body: { owner: 'overlap-org1', repo: 'overlap-repo1', branch: 'main' } })
+		const mock2 = createMockReqRes({ body: { owner: 'overlap-org2', repo: 'overlap-repo2', branch: 'main' } })
+
+		const p1 = handleGraph(mock1.req, mock1.res, () => {})
+		const p2 = handleGraph(mock2.req, mock2.res, () => {})
+		await new Promise((r) => setImmediate(r))
+
+		assert.equal(getActiveScans(), 2)
+
+		// Abort request 1
+		mock1.req.emit('close')
+
+		// Request 2 must keep its slot: getActiveScans() === 1 until request 2 finishes
+		assert.equal(getActiveScans(), 1, 'Active scans should remain at 1 for the ongoing request')
+
+		// Even if request 1 completely finishes settling its promise
+		releaseFetch1()
+		await p1
+		assert.equal(getActiveScans(), 1, 'Request 2 still holds its slot')
+
+		// Finally, request 2 finishes and slot drops to 0
+		releaseFetch2()
+		await p2
+		assert.equal(getActiveScans(), 0, 'Active scans should return to 0 after both requests finish')
+	} finally {
+		globalThis.fetch = originalFetch
+		resetActiveScans()
+	}
+})
