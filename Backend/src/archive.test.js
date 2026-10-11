@@ -135,7 +135,7 @@ test('archive skip reason: path_traversal', async () => {
 	assert.equal(result.inventory.analyzedFiles + sumSkipped(result.inventory.skipped), result.inventory.totalFiles)
 })
 
-test('archive skip reason: size_limit (over 300KB does not abort, sets truncated: true)', async () => {
+test('archive skip reason: size_limit (over 300KB does not abort, does not set truncated)', async () => {
 	const hugeText = 'a'.repeat(301 * 1024) // 301 KB
 	const stream = createTarGzStream([
 		{ header: { name: 'root/src/index.js' }, content: 'console.log("ok");' },
@@ -144,7 +144,7 @@ test('archive skip reason: size_limit (over 300KB does not abort, sets truncated
 
 	const result = await parseArchiveStream(stream, { isGzip: true })
 
-	assert.equal(result.truncated, true)
+	assert.equal(result.truncated, false)
 	assert.equal(result.inventory.skipped.size_limit, 1)
 	assert.equal(result.inventory.analyzedFiles, 1)
 	assert.equal(result.inventory.totalFiles, 2)
@@ -193,7 +193,7 @@ test('archive mixed archive: all skip reasons combined and sum invariant holds',
 	assert.equal(result.inventory.skipped.ignored_directory, 1)
 	assert.equal(result.inventory.skipped.symlink, 1)
 	assert.equal(result.inventory.skipped.path_traversal, 1)
-	assert.equal(result.truncated, true)
+	assert.equal(result.truncated, false)
 
 	assert.equal(result.inventory.analyzedFiles + sumSkipped(result.inventory.skipped), result.inventory.totalFiles)
 })

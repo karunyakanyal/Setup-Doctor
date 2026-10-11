@@ -1,11 +1,23 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
 const express = require('express')
-const { handleGraph, graphLimiter } = require('./routes/repository')
+const zlib = require('zlib')
+const tar = require('tar-stream')
+const { Readable } = require('stream')
+const {
+	handleGraph,
+	graphLimiter,
+	getActiveScans,
+	resetActiveScans,
+	MAX_CONCURRENT_SCANS,
+} = require('./routes/repository')
 const { setArchiveCache, clearArchiveCache } = require('./services/archive')
 const errorHandler = require('./middleware/errorHandler')
 
 function createMockReqRes({ body = {}, ip = '127.0.0.1' } = {}) {
+	const reqListeners = {}
+	const resListeners = {}
+
 	const req = {
 		body,
 		ip,
@@ -13,6 +25,22 @@ function createMockReqRes({ body = {}, ip = '127.0.0.1' } = {}) {
 		connection: { remoteAddress: ip },
 		socket: { remoteAddress: ip },
 		app: { get: () => false },
+		on(event, cb) {
+			reqListeners[event] = reqListeners[event] || []
+			reqListeners[event].push(cb)
+			return this
+		},
+		removeListener(event, cb) {
+			if (reqListeners[event]) {
+				reqListeners[event] = reqListeners[event].filter((l) => l !== cb)
+			}
+			return this
+		},
+		emit(event, ...args) {
+			if (reqListeners[event]) {
+				reqListeners[event].forEach((cb) => cb(...args))
+			}
+		},
 	}
 
 	let statusCode = 200
@@ -29,11 +57,31 @@ function createMockReqRes({ body = {}, ip = '127.0.0.1' } = {}) {
 			return this
 		},
 		setHeader(key, value) {
-			responseHeaders[key.toLowerCase()] = value
+			responseHeaders[key.toLowerCase()] = String(value)
+			return this
+		},
+		set(key, value) {
+			responseHeaders[key.toLowerCase()] = String(value)
 			return this
 		},
 		getHeader(key) {
 			return responseHeaders[key.toLowerCase()]
+		},
+		on(event, cb) {
+			resListeners[event] = resListeners[event] || []
+			resListeners[event].push(cb)
+			return this
+		},
+		removeListener(event, cb) {
+			if (resListeners[event]) {
+				resListeners[event] = resListeners[event].filter((l) => l !== cb)
+			}
+			return this
+		},
+		emit(event, ...args) {
+			if (resListeners[event]) {
+				resListeners[event].forEach((cb) => cb(...args))
+			}
 		},
 	}
 
@@ -181,6 +229,7 @@ test('POST /api/repository/graph: returns complete graph payload with cached gra
 			totalFiles: 2,
 			skipped: {},
 			truncated: false,
+			graphNodesOmitted: 0,
 			approximate: true,
 		},
 	}
@@ -211,12 +260,13 @@ test('POST /api/repository/graph: returns complete graph payload with cached gra
 	assert.equal(body.summary.parsedFiles, 2)
 	assert.equal(body.summary.approximate, undefined)
 
-	// Coverage contains all required fields: analyzedFiles, totalFiles, skipped, truncated, approximate
+	// Coverage contains all required fields: analyzedFiles, totalFiles, skipped, truncated, graphNodesOmitted, approximate
 	assert.ok(body.coverage)
 	assert.equal(body.coverage.analyzedFiles, 2)
 	assert.equal(body.coverage.totalFiles, 2)
 	assert.deepEqual(body.coverage.skipped, {})
 	assert.equal(body.coverage.truncated, false)
+	assert.equal(body.coverage.graphNodesOmitted, 0)
 	assert.equal(body.coverage.approximate, true)
 
 	// No raw file text retained
@@ -245,4 +295,202 @@ test('POST /api/repository/graph: error propagation passes error to central hand
 	assert.equal(mockErrRes.getStatus(), nextError.status)
 	assert.equal(mockErrRes.getBody().success, false)
 	assert.ok(mockErrRes.getBody().message)
+})
+
+test('POST /api/repository/graph concurrency: at most 2 concurrent scans, 3rd gets 503 and Retry-After header', async () => {
+	clearGraphCache()
+	resetActiveScans()
+
+	const originalFetch = globalThis.fetch
+	let releaseFetch1
+	let releaseFetch2
+	const fetchGate1 = new Promise((resolve) => { releaseFetch1 = resolve })
+	const fetchGate2 = new Promise((resolve) => { releaseFetch2 = resolve })
+
+	const sampleBuffer = await new Promise((resolve, reject) => {
+		const pack = tar.pack()
+		pack.entry({ name: 'root/src/index.js' }, 'console.log("hello");')
+		pack.finalize()
+		const gzip = zlib.createGzip()
+		const chunks = []
+		pack.pipe(gzip)
+			.on('data', (c) => chunks.push(c))
+			.on('end', () => resolve(Buffer.concat(chunks)))
+			.on('error', reject)
+	})
+
+	let fetchCount = 0
+	globalThis.fetch = async (url) => {
+		fetchCount++
+		if (fetchCount === 1) {
+			await fetchGate1
+		} else if (fetchCount === 2) {
+			await fetchGate2
+		}
+		return {
+			ok: true,
+			status: 200,
+			headers: {
+				get: (h) => (h.toLowerCase() === 'content-length' ? String(sampleBuffer.length) : null),
+			},
+			body: sampleBuffer,
+		}
+	}
+
+	try {
+		const mock1 = createMockReqRes({ body: { owner: 'org1', repo: 'repo1', branch: 'main' } })
+		const mock2 = createMockReqRes({ body: { owner: 'org2', repo: 'repo2', branch: 'main' } })
+		const mock3 = createMockReqRes({ body: { owner: 'org3', repo: 'repo3', branch: 'main' } })
+
+		// Launch 1st and 2nd scans asynchronously (they pause at fetchGate)
+		const p1 = handleGraph(mock1.req, mock1.res, () => {})
+		const p2 = handleGraph(mock2.req, mock2.res, () => {})
+
+		// Give event loop a tick to enter handleGraph and increment activeScans
+		await new Promise((r) => setImmediate(r))
+
+		assert.equal(getActiveScans(), 2)
+
+		// 3rd scan arrives while 2 scans are active: should immediately receive 503 with Retry-After header
+		let nextCalledFor3 = false
+		await handleGraph(mock3.req, mock3.res, () => { nextCalledFor3 = true })
+
+		assert.equal(nextCalledFor3, false)
+		assert.equal(mock3.getStatus(), 503)
+		assert.equal(mock3.getHeaders()['retry-after'], '60')
+		assert.deepEqual(mock3.getBody(), {
+			success: false,
+			message: 'Deep scan is busy. Try again in a minute.',
+		})
+		assert.equal(getActiveScans(), 2)
+
+		// Cached request arrives while 2 scans are active: serves immediately without taking a slot
+		setCachedGraph('cached-org', 'cached-repo', 'main', {
+			inventory: { totalFiles: 1, analyzedFiles: 1 },
+			graph: { nodes: [], edges: [], externals: [] },
+			summary: {},
+			coverage: { graphNodesOmitted: 0 },
+		})
+		const mockCached = createMockReqRes({ body: { owner: 'cached-org', repo: 'cached-repo', branch: 'main' } })
+		await handleGraph(mockCached.req, mockCached.res, () => {})
+		assert.equal(mockCached.getStatus(), 200)
+		assert.equal(mockCached.getBody().success, true)
+		assert.equal(getActiveScans(), 2)
+
+		// Release 1st scan
+		releaseFetch1()
+		await p1
+
+		assert.equal(mock1.getStatus(), 200)
+		assert.equal(mock1.getBody().coverage.graphNodesOmitted, 0)
+		assert.equal(getActiveScans(), 1)
+
+		// Now a new scan (mock4) should succeed in acquiring a slot
+		let releaseFetch4
+		const fetchGate4 = new Promise((resolve) => { releaseFetch4 = resolve })
+		globalThis.fetch = async () => {
+			await fetchGate4
+			return {
+				ok: true,
+				status: 200,
+				headers: { get: () => String(sampleBuffer.length) },
+				body: sampleBuffer,
+			}
+		}
+
+		const mock4 = createMockReqRes({ body: { owner: 'org4', repo: 'repo4', branch: 'main' } })
+		const p4 = handleGraph(mock4.req, mock4.res, () => {})
+		await new Promise((r) => setImmediate(r))
+		assert.equal(getActiveScans(), 2)
+
+		// Release remaining scans
+		releaseFetch2()
+		releaseFetch4()
+		await Promise.all([p2, p4])
+
+		assert.equal(mock2.getStatus(), 200)
+		assert.equal(mock4.getStatus(), 200)
+		assert.equal(getActiveScans(), 0)
+	} finally {
+		globalThis.fetch = originalFetch
+		clearGraphCache()
+		resetActiveScans()
+	}
+})
+
+test('POST /api/repository/graph concurrency: releases slot in finally block on error', async () => {
+	clearGraphCache()
+	resetActiveScans()
+
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => {
+		const err = new Error('GitHub API exploded')
+		err.status = 502
+		throw err
+	}
+
+	try {
+		const mock = createMockReqRes({ body: { owner: 'err-org', repo: 'err-repo', branch: 'main' } })
+		let errorReceived = null
+		await handleGraph(mock.req, mock.res, (err) => {
+			errorReceived = err
+		})
+
+		assert.ok(errorReceived)
+		assert.equal(getActiveScans(), 0, 'Slot must be released on error')
+	} finally {
+		globalThis.fetch = originalFetch
+		resetActiveScans()
+	}
+})
+
+test('POST /api/repository/graph concurrency: releases slot when request closes/aborts or times out', async () => {
+	clearGraphCache()
+	resetActiveScans()
+
+	const originalFetch = globalThis.fetch
+	let releaseFetch
+	const gate = new Promise((resolve) => { releaseFetch = resolve })
+	globalThis.fetch = async () => {
+		await gate
+		return { ok: true, status: 200, headers: { get: () => '0' }, body: Buffer.alloc(0) }
+	}
+
+	try {
+		// Test close
+		const mockAbort = createMockReqRes({ body: { owner: 'abort-org', repo: 'abort-repo', branch: 'main' } })
+		const pAbort = handleGraph(mockAbort.req, mockAbort.res, () => {})
+		await new Promise((r) => setImmediate(r))
+
+		assert.equal(getActiveScans(), 1)
+		mockAbort.req.emit('close')
+		assert.equal(getActiveScans(), 0, 'Slot must be released immediately on client close')
+
+		releaseFetch()
+		await pAbort
+		assert.equal(getActiveScans(), 0)
+
+		// Test timeout
+		let releaseTimeout
+		const gateTimeout = new Promise((resolve) => { releaseTimeout = resolve })
+		globalThis.fetch = async () => {
+			await gateTimeout
+			return { ok: true, status: 200, headers: { get: () => '0' }, body: Buffer.alloc(0) }
+		}
+
+		const mockTimeout = createMockReqRes({ body: { owner: 'timeout-org', repo: 'timeout-repo', branch: 'main' } })
+		const pTimeout = handleGraph(mockTimeout.req, mockTimeout.res, () => {})
+		await new Promise((r) => setImmediate(r))
+
+		assert.equal(getActiveScans(), 1)
+		mockTimeout.req.emit('timeout')
+		assert.equal(getActiveScans(), 0, 'Slot must be released on request timeout')
+
+		releaseTimeout()
+		await pTimeout
+		assert.equal(getActiveScans(), 0)
+	} finally {
+		globalThis.fetch = originalFetch
+		resetActiveScans()
+	}
 })

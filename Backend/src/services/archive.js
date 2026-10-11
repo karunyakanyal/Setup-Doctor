@@ -307,7 +307,6 @@ function parseArchiveStream(inputStream, options = {}) {
 
 				if (!isBinaryContent && fileSize > MAX_TEXT_PER_FILE_BYTES) {
 					isSizeLimit = true
-					truncated = true
 				}
 
 				if (!isSizeLimit && !isBinaryContent) {

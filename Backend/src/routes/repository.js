@@ -326,6 +326,14 @@ const graphLimiter = rateLimit({
 	},
 })
 
+const MAX_CONCURRENT_SCANS = 2
+let activeScans = 0
+
+const getActiveScans = () => activeScans
+const resetActiveScans = () => {
+	activeScans = 0
+}
+
 const handleGraph = async (req, res, next) => {
 	const { owner, repo, branch, ref } = req.body || {}
 	const targetBranch = branch || ref
@@ -353,34 +361,75 @@ const handleGraph = async (req, res, next) => {
 			})
 		}
 
-		const archiveResult = await fetchRepoArchive(owner, repo, targetBranch)
-		const graphResult = buildGraph(archiveResult.files)
-
-		const coverage = {
-			analyzedFiles: archiveResult.inventory.analyzedFiles,
-			totalFiles: archiveResult.inventory.totalFiles,
-			skipped: archiveResult.inventory.skipped,
-			truncated: Boolean(archiveResult.truncated || graphResult.truncated),
-			approximate: true,
+		if (activeScans >= MAX_CONCURRENT_SCANS) {
+			if (typeof res.setHeader === 'function') {
+				res.setHeader('Retry-After', '60')
+			} else if (typeof res.set === 'function') {
+				res.set('Retry-After', '60')
+			}
+			return res.status(503).json({
+				success: false,
+				message: 'Deep scan is busy. Try again in a minute.',
+			})
 		}
 
-		const responsePayload = {
-			inventory: archiveResult.inventory,
-			graph: {
-				nodes: graphResult.nodes,
-				edges: graphResult.edges,
-				externals: graphResult.externals,
-			},
-			summary: graphResult.summary,
-			coverage,
+		activeScans++
+		let slotReleased = false
+		const releaseSlot = () => {
+			if (!slotReleased) {
+				slotReleased = true
+				activeScans = Math.max(0, activeScans - 1)
+			}
 		}
 
-		setCachedGraph(owner, repo, targetBranch, responsePayload)
+		if (req && typeof req.on === 'function') {
+			req.on('close', releaseSlot)
+			req.on('timeout', releaseSlot)
+		}
+		if (res && typeof res.on === 'function') {
+			res.on('close', releaseSlot)
+		}
 
-		return res.json({
-			success: true,
-			...responsePayload,
-		})
+		try {
+			const archiveResult = await fetchRepoArchive(owner, repo, targetBranch)
+			const graphResult = buildGraph(archiveResult.files)
+
+			const coverage = {
+				analyzedFiles: archiveResult.inventory.analyzedFiles,
+				totalFiles: archiveResult.inventory.totalFiles,
+				skipped: archiveResult.inventory.skipped,
+				truncated: Boolean(archiveResult.truncated || graphResult.truncated),
+				graphNodesOmitted: graphResult.graphNodesOmitted || 0,
+				approximate: true,
+			}
+
+			const responsePayload = {
+				inventory: archiveResult.inventory,
+				graph: {
+					nodes: graphResult.nodes,
+					edges: graphResult.edges,
+					externals: graphResult.externals,
+				},
+				summary: graphResult.summary,
+				coverage,
+			}
+
+			setCachedGraph(owner, repo, targetBranch, responsePayload)
+
+			return res.json({
+				success: true,
+				...responsePayload,
+			})
+		} finally {
+			releaseSlot()
+			if (req && typeof req.removeListener === 'function') {
+				req.removeListener('close', releaseSlot)
+				req.removeListener('timeout', releaseSlot)
+			}
+			if (res && typeof res.removeListener === 'function') {
+				res.removeListener('close', releaseSlot)
+			}
+		}
 	} catch (error) {
 		if (error && (error.status === 429 || error.status === 404 || error.status === 413 || error.status === 400)) {
 			return next(error)
@@ -412,3 +461,6 @@ router.post('/repository/graph', graphLimiter, handleGraph)
 module.exports = router
 module.exports.handleGraph = handleGraph
 module.exports.graphLimiter = graphLimiter
+module.exports.getActiveScans = getActiveScans
+module.exports.resetActiveScans = resetActiveScans
+module.exports.MAX_CONCURRENT_SCANS = MAX_CONCURRENT_SCANS

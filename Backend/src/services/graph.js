@@ -485,8 +485,10 @@ function buildGraph(files, packageJsons = []) {
 	}
 
 	let truncated = false
+	let graphNodesOmitted = 0
 	if (codeFileEntries.length > MAX_NODES) {
 		truncated = true
+		graphNodesOmitted = codeFileEntries.length - MAX_NODES
 		codeFileEntries.length = MAX_NODES
 	}
 
@@ -835,6 +837,7 @@ function buildGraph(files, packageJsons = []) {
 			parsedFiles: nodes.length,
 		},
 		truncated,
+		graphNodesOmitted,
 	}
 
 	return graphResult

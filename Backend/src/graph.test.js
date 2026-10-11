@@ -301,3 +301,34 @@ test('getImpact: computes direct, transitive impact and percentOfRepo via revers
 	assert.deepEqual(impactA.transitive, [])
 	assert.equal(impactA.percentOfRepo, 0)
 })
+
+test('graph builder: caps nodes at 3000, sets truncated: true, and records graphNodesOmitted', () => {
+	const files = new Map()
+	for (let i = 0; i < 3005; i++) {
+		files.set(`src/file_${i}.js`, {
+			text: `export const val_${i} = ${i};`,
+			lang: 'javascript',
+			size: 20,
+		})
+	}
+
+	const result = buildGraph(files)
+
+	assert.equal(result.nodes.length, 3000)
+	assert.equal(result.truncated, true)
+	assert.equal(result.graphNodesOmitted, 5)
+	assert.equal(result.summary.parsedFiles, 3000)
+})
+
+test('graph builder: under 3000 nodes sets truncated: false and graphNodesOmitted: 0', () => {
+	const files = {
+		'src/a.js': 'export const a = 1;',
+		'src/b.js': 'import "./a";',
+	}
+
+	const result = buildGraph(files)
+
+	assert.equal(result.nodes.length, 2)
+	assert.equal(result.truncated, false)
+	assert.equal(result.graphNodesOmitted, 0)
+})
