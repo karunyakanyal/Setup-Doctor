@@ -275,3 +275,34 @@ test('does not retry on 4xx responses or rate limit errors', async () => {
 		},
 	)
 })
+
+test('no retry after the overall deadline: does not start attempt 2 once overall signal has aborted', async () => {
+	let callCount = 0
+	const controller = new AbortController()
+
+	const mockFetch = async () => {
+		callCount++
+		// Abort the overall signal on first attempt with timeout reason
+		const timeoutErr = new Error('The operation was aborted due to timeout')
+		timeoutErr.name = 'TimeoutError'
+		controller.abort(timeoutErr)
+		throw timeoutErr
+	}
+
+	const url = 'https://api.github.com/repos/test/no-retry-overall-deadline'
+	await assert.rejects(
+		async () => {
+			await ghFetch(url, {
+				fetchFn: mockFetch,
+				signal: controller.signal,
+			})
+		},
+		(err) => {
+			assert.equal(callCount, 1, 'Must not retry after overall signal aborts')
+			assert.equal(err.status, 502)
+			assert.equal(err.message, 'GitHub took too long to respond. Try again in a moment.')
+			return true
+		},
+	)
+})
+

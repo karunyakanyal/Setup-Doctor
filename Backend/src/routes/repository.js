@@ -567,6 +567,7 @@ router.post('/repository/graph', graphLimiter, handleGraph)
 
 module.exports = router
 module.exports.handleGraph = handleGraph
+module.exports.handleDiagnose = handleDiagnose
 module.exports.graphLimiter = graphLimiter
 module.exports.getActiveScans = getActiveScans
 module.exports.resetActiveScans = resetActiveScans

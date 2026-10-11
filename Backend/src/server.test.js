@@ -245,3 +245,95 @@ test('POST /api/repository/diagnose: returns 502 with timeout message when GitHu
 		globalThis.fetch = originalFetch
 	}
 })
+
+test('POST /api/repository/diagnose: overall deadline returns 502 with timeout message and never 500', async () => {
+	let fetchCalls = 0
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async (url, options) => {
+		if (typeof url === 'string' && url.includes('contents/package.json')) {
+			fetchCalls++
+			return new Promise((resolve, reject) => {
+				if (options.signal) {
+					options.signal.addEventListener(
+						'abort',
+						() => {
+							const err = new Error('The operation was aborted due to timeout')
+							err.name = 'TimeoutError'
+							reject(err)
+						},
+						{ once: true },
+					)
+				}
+			})
+		}
+		return originalFetch(url, options)
+	}
+
+	try {
+		const res = await originalFetch(`${baseUrl}/api/repository/diagnose`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				owner: 'overall-owner',
+				repo: 'overall-repo',
+				branch: 'main',
+				diagnoseTimeout: 50,
+			}),
+		})
+
+		assert.equal(res.status, 502)
+		assert.notEqual(res.status, 500)
+		const data = await res.json()
+		assert.deepEqual(data, {
+			success: false,
+			message: 'GitHub took too long to respond. Try again in a moment.',
+		})
+		assert.equal(fetchCalls, 1, 'Should not retry after overall deadline')
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('POST /api/repository/diagnose: client abort is quiet without 500', async () => {
+	const originalFetch = globalThis.fetch
+	const clientController = new AbortController()
+	globalThis.fetch = async (url, options) => {
+		if (typeof url === 'string' && url.includes('contents/package.json')) {
+			return new Promise((resolve, reject) => {
+				if (options.signal) {
+					options.signal.addEventListener(
+						'abort',
+						() => {
+							reject(new Error('aborted'))
+						},
+						{ once: true },
+					)
+				}
+			})
+		}
+		return originalFetch(url, options)
+	}
+
+	try {
+		const fetchPromise = originalFetch(`${baseUrl}/api/repository/diagnose`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				owner: 'client-abort-owner',
+				repo: 'client-abort-repo',
+				branch: 'main',
+			}),
+			signal: clientController.signal,
+		})
+
+		setTimeout(() => clientController.abort(), 20)
+
+		await assert.rejects(fetchPromise, (err) => {
+			assert.ok(err.name === 'AbortError' || err.cause?.name === 'AbortError' || (err.name === 'TypeError' && /abort/i.test(err.message)))
+			return true
+		})
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+

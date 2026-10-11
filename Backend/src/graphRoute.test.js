@@ -6,13 +6,14 @@ const tar = require('tar-stream')
 const { Readable } = require('stream')
 const {
 	handleGraph,
+	handleDiagnose,
 	graphLimiter,
 	getActiveScans,
 	resetActiveScans,
 	MAX_CONCURRENT_SCANS,
 } = require('./routes/repository')
 const { setArchiveCache, clearArchiveCache } = require('./services/archive')
-const { clearGraphCache } = require('./services/graph')
+const { setCachedGraph, getCachedGraph, clearGraphCache } = require('./services/graph')
 const errorHandler = require('./middleware/errorHandler')
 
 function createMockReqRes({ body = {}, ip = '127.0.0.1' } = {}) {
@@ -187,8 +188,6 @@ test('graphLimiter: allows 5 requests and blocks 6th with 429', async () => {
 		message: 'Too many requests, please try again later.',
 	})
 })
-
-const { setCachedGraph, getCachedGraph, clearGraphCache } = require('./services/graph')
 
 test('POST /api/repository/graph: returns complete graph payload with cached graph', async () => {
 	clearGraphCache()
@@ -630,4 +629,92 @@ test('POST /api/repository/graph timeout: stalled archive stream hits total dead
 		resetActiveScans()
 	}
 })
+
+test('POST /api/repository/diagnose overall deadline: returns 502 with timeout message, never 500, and does not retry after deadline', async () => {
+	let fetchCalls = 0
+	const mockFetch = async (url, options) => {
+		fetchCalls++
+		return new Promise((resolve, reject) => {
+			if (options.signal) {
+				options.signal.addEventListener(
+					'abort',
+					() => {
+						const err = new Error('The operation was aborted due to timeout')
+						err.name = 'TimeoutError'
+						reject(err)
+					},
+					{ once: true },
+				)
+			}
+		})
+	}
+
+	const mock = createMockReqRes({
+		body: {
+			owner: 'overall-owner',
+			repo: 'overall-repo',
+			branch: 'main',
+			diagnoseTimeout: 50,
+		},
+	})
+	mock.req.fetchFn = mockFetch
+
+	let nextError = null
+	await handleDiagnose(mock.req, mock.res, (err) => {
+		nextError = err
+	})
+
+	assert.equal(nextError, null, 'Must never pass error to next() as 500')
+	assert.equal(mock.getStatus(), 502)
+	assert.notEqual(mock.getStatus(), 500)
+	assert.deepEqual(mock.getBody(), {
+		success: false,
+		message: 'GitHub took too long to respond. Try again in a moment.',
+	})
+	assert.equal(fetchCalls, 1, 'Must not retry after overall deadline')
+})
+
+test('POST /api/repository/diagnose: client abort is quiet without error log or 500', async () => {
+	const mockFetch = async (url, options) => {
+		return new Promise((resolve, reject) => {
+			if (options.signal) {
+				if (options.signal.aborted) {
+					const err = new Error('The operation was aborted')
+					err.name = 'AbortError'
+					return reject(err)
+				}
+				options.signal.addEventListener(
+					'abort',
+					() => {
+						const err = new Error('The operation was aborted')
+						err.name = 'AbortError'
+						reject(err)
+					},
+					{ once: true },
+				)
+			}
+		})
+	}
+
+	const mock = createMockReqRes({
+		body: {
+			owner: 'client-abort-owner',
+			repo: 'client-abort-repo',
+			branch: 'main',
+		},
+	})
+	mock.req.fetchFn = mockFetch
+
+	let nextError = null
+	const p = handleDiagnose(mock.req, mock.res, (err) => {
+		nextError = err
+	})
+
+	mock.req.emit('aborted')
+	await p
+
+	assert.equal(nextError, null, 'Client abort must not call next(error)')
+	assert.notEqual(mock.getStatus(), 500)
+})
+
 
