@@ -13,6 +13,7 @@ import DiagnosticsFilterTabs from '../components/diagnostics/DiagnosticsFilterTa
 import DiagnosticsEmptyState from '../components/diagnostics/DiagnosticsEmptyState'
 import DiagnosticsLoadingSkeleton from '../components/diagnostics/DiagnosticsLoadingSkeleton'
 import DiagnosticsErrorState from '../components/diagnostics/DiagnosticsErrorState'
+import CodeMapPanel from '../components/codemap/CodeMapPanel'
 import {
   filterDiagnostics,
   groupDiagnosticsByCategory,
@@ -22,6 +23,7 @@ import {
   resolveLatestAnalysis,
   extractAnalysisState,
   normalizeTechnologyStack,
+  createCodeMapSummary,
 } from '../utils/diagnosisFormatters'
 import { getBugRepositoryName } from '../utils/bugVaultData'
 
@@ -32,6 +34,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
   const {
     analysisHistory,
     addAnalysisEntry,
+    updateAnalysisCodeMapSummary,
     selectedAnalysis,
     selectAnalysis,
     issuesFound,
@@ -67,6 +70,11 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
   const [isDiagnosticsLoading, setIsDiagnosticsLoading] = useState(false)
   const [diagnosticsError, setDiagnosticsError] = useState(false)
 
+  // Deep scan state
+  const [deepScanStatus, setDeepScanStatus] = useState('idle')
+  const [deepScanData, setDeepScanData] = useState(null)
+  const [deepScanError, setDeepScanError] = useState(null)
+
   // Filter & passing toggle state
   const [activeFilter, setActiveFilter] = useState('all')
   const [showPassed, setShowPassed] = useState(false)
@@ -92,6 +100,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     setStack([])
     setDiagnosticsError(false)
     setIsDiagnosticsLoading(true)
+    setDeepScanData(null)
+    setDeepScanError(null)
     setActiveFilter('all')
     setShowPassed(false)
 
@@ -137,10 +147,78 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
       } else {
         setHealth(null)
       }
+
+      // Automatically start deep scan in background without blocking diagnostics results
+      void runDeepScan(repositoryData)
     } catch {
       setDiagnosticsError(true)
     } finally {
       setIsDiagnosticsLoading(false)
+    }
+  }
+
+  async function runDeepScan(repositoryData) {
+    if (!repositoryData?.owner || !repositoryData?.name || !repositoryData?.defaultBranch) {
+      return
+    }
+
+    setDeepScanStatus('scanning')
+    setDeepScanError(null)
+
+    try {
+      const response = await fetch('/api/repository/graph', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          owner: repositoryData.owner,
+          repo: repositoryData.name,
+          branch: repositoryData.defaultBranch,
+        }),
+      })
+
+      if (response.status === 413) {
+        throw new Error('Repository too large to scan fully')
+      }
+
+      if (response.status === 429) {
+        const retryAfter = response.headers?.get?.('retry-after')
+        const message = retryAfter
+          ? `Rate limit exceeded. Try again in ${retryAfter}s.`
+          : 'Rate limit exceeded. Please try again later.'
+        throw new Error(message)
+      }
+
+      if (response.status === 503) {
+        throw new Error('Deep scan is busy, try again in a minute')
+      }
+
+      if (!response.ok) {
+        let errMessage = 'Deep scan request failed'
+        try {
+          const errData = await response.json()
+          if (errData?.message) errMessage = errData.message
+        } catch {
+          // ignore
+        }
+        throw new Error(errMessage)
+      }
+
+      const data = await response.json()
+      if (!data.success) {
+        throw new Error(data.message || 'Deep scan request was unsuccessful')
+      }
+
+      setDeepScanData(data)
+      setDeepScanStatus('success')
+
+      // Save only small summary with analysis in localStorage, NEVER the full graph
+      const smallSummary = createCodeMapSummary(data)
+      updateAnalysisCodeMapSummary(repositoryData, smallSummary)
+    } catch (err) {
+      setDeepScanStatus('error')
+      setDeepScanError(err.message || 'Network error while running deep scan')
     }
   }
 
@@ -436,6 +514,15 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
         </section>
       )}
 
+      {repository && !isDiagnosticsLoading && !diagnosticsError && (
+        <CodeMapPanel
+          data={deepScanData}
+          status={deepScanStatus}
+          error={deepScanError}
+          onRerun={() => runDeepScan(repository)}
+        />
+      )}
+
       {repository && (
         <section className="technology-stack" aria-labelledby="technology-stack-title">
           <div className="section-heading">
@@ -491,7 +578,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
 
       {showSuccessToast && (
         <div className="success-toast" role="status">
-          &#10003; Repository added for analysis
+          &#10003; Analysis complete
         </div>
       )}
     </>

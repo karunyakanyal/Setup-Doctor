@@ -414,5 +414,30 @@ export function extractAnalysisState(analysis) {
     framework,
     monorepo: Boolean(analysis.monorepo),
     stack,
+    codeMapSummary: analysis.codeMapSummary || null,
+  }
+}
+
+/**
+ * Creates a lightweight code map summary for persistent storage in localStorage.
+ * Stores only small summary statistics, cycles, orphans, and top hotspots, never the full graph.
+ */
+export function createCodeMapSummary(data) {
+  if (!data) return null
+  return {
+    analyzedFiles: data.coverage?.analyzedFiles ?? data.inventory?.analyzedFiles ?? 0,
+    totalFiles: data.coverage?.totalFiles ?? data.inventory?.totalFiles ?? 0,
+    languagesCount: Object.keys(data.inventory?.byLanguage || {}).length,
+    entryPointsCount: (data.summary?.entryPoints || []).length,
+    cyclesCount: (data.summary?.cycles || []).length,
+    orphansCount: (data.summary?.orphans || []).length,
+    unresolvedCount: data.summary?.unresolvedCount ?? 0,
+    cycles: (data.summary?.cycles || []).slice(0, 10),
+    orphans: (data.summary?.orphans || []).slice(0, 20),
+    topHotspots: {
+      byFanIn: (data.summary?.hotspots?.byFanIn || []).slice(0, 5),
+      byTransitiveImpact: (data.summary?.hotspots?.byTransitiveImpact || []).slice(0, 5),
+    },
+    coverage: data.coverage || null,
   }
 }
