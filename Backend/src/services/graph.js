@@ -833,7 +833,6 @@ function buildGraph(files, packageJsons = []) {
 			longestChain,
 			unresolvedCount,
 			parsedFiles: nodes.length,
-			approximate: true,
 		},
 		truncated,
 	}
@@ -908,9 +907,52 @@ function getImpact(graph, fileId) {
 	}
 }
 
+const GRAPH_CACHE = new Map()
+const GRAPH_CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes
+const MAX_GRAPH_CACHE_ENTRIES = 3
+
+function getCachedGraph(owner, repo, ref) {
+	const key = `${owner}/${repo}/${ref}`
+	const item = GRAPH_CACHE.get(key)
+	if (!item) return null
+	if (Date.now() > item.expiresAt) {
+		GRAPH_CACHE.delete(key)
+		return null
+	}
+	return item.data
+}
+
+function setCachedGraph(owner, repo, ref, data, ttlMs = GRAPH_CACHE_TTL_MS) {
+	const key = `${owner}/${repo}/${ref}`
+	if (GRAPH_CACHE.has(key)) {
+		GRAPH_CACHE.delete(key)
+	} else if (GRAPH_CACHE.size >= MAX_GRAPH_CACHE_ENTRIES) {
+		const oldestKey = GRAPH_CACHE.keys().next().value
+		GRAPH_CACHE.delete(oldestKey)
+	}
+	GRAPH_CACHE.set(key, {
+		data,
+		expiresAt: Date.now() + ttlMs,
+	})
+}
+
+function clearGraphCache() {
+	GRAPH_CACHE.clear()
+}
+
+function getGraphCacheSize() {
+	return GRAPH_CACHE.size
+}
+
 module.exports = {
 	buildGraph,
 	getImpact,
+	getCachedGraph,
+	setCachedGraph,
+	clearGraphCache,
+	getGraphCacheSize,
+	GRAPH_CACHE_TTL_MS,
+	MAX_GRAPH_CACHE_ENTRIES,
 	extractImportSpecifiers,
 	normalizeExternalPackageName,
 }

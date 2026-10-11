@@ -163,3 +163,42 @@ test('archive parser cap: aborts when entries exceed 5000', async () => {
 		},
 	)
 })
+
+test('archive parser cap: aborts compressed stream during streaming when exceeding 30MB', async () => {
+	let chunksEmitted = 0
+	let totalBytesEmitted = 0
+	const oneMbChunk = Buffer.alloc(1024 * 1024, 0)
+
+	const stream = new Readable({
+		read() {
+			if (this.destroyed) return
+			if (chunksEmitted < 35) {
+				chunksEmitted++
+				totalBytesEmitted += oneMbChunk.length
+				this.push(oneMbChunk)
+			} else {
+				this.push(null)
+			}
+		},
+	})
+
+	let onAbortCalled = false
+	await assert.rejects(
+		async () => {
+			await parseArchiveStream(stream, {
+				isGzip: false,
+				onAbort: () => {
+					onAbortCalled = true
+				},
+			})
+		},
+		(err) => {
+			assert.equal(err.status, 413)
+			assert.ok(err.message.includes('30MB'))
+			return true
+		},
+	)
+
+	assert.equal(onAbortCalled, true)
+	assert.ok(chunksEmitted < 35, `Should abort before emitting all chunks (emitted: ${chunksEmitted})`)
+})

@@ -1,16 +1,26 @@
 const zlib = require('zlib')
 const tar = require('tar-stream')
-const { Readable } = require('stream')
+const { Readable, Transform } = require('stream')
 const { getGithubHeaders } = require('./github')
-
-const ARCHIVE_CACHE = new Map()
-const ARCHIVE_CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes
-const MAX_ARCHIVE_CACHE_ENTRIES = 50
 
 const MAX_COMPRESSED_BYTES = 30 * 1024 * 1024 // 30MB
 const MAX_EXPANDED_BYTES = 120 * 1024 * 1024 // 120MB
 const MAX_ENTRIES = 5000
 const MAX_TEXT_PER_FILE_BYTES = 300 * 1024 // 300KB
+
+function createCompressedLimiter(maxBytes, onLimitExceeded) {
+	let bytes = 0
+	return new Transform({
+		transform(chunk, encoding, callback) {
+			bytes += chunk.length
+			if (bytes > maxBytes) {
+				const err = onLimitExceeded(bytes)
+				return callback(err)
+			}
+			callback(null, chunk)
+		},
+	})
+}
 
 const BINARY_EXTENSIONS = new Set([
 	'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp', 'tiff', 'psd', 'avif',
@@ -157,11 +167,25 @@ function parseArchiveStream(inputStream, options = {}) {
 
 		const extract = tar.extract()
 
+		const limiter = createCompressedLimiter(MAX_COMPRESSED_BYTES, () => {
+			const err = new Error('Repository archive exceeds compressed size limit of 30MB')
+			err.status = 413
+			abort(err.message, 413)
+			return err
+		})
+		limiter.on('error', () => {})
+
 		function abort(message, statusCode = 413) {
 			if (hasAborted) return
 			hasAborted = true
 			const err = new Error(message)
 			err.status = statusCode
+			if (typeof options.onAbort === 'function') {
+				try {
+					options.onAbort(err)
+				} catch {}
+			}
+			limiter.destroy(err)
 			extract.destroy(err)
 			if (gunzipStream) gunzipStream.destroy(err)
 			if (inputStream && typeof inputStream.destroy === 'function') {
@@ -314,35 +338,18 @@ function parseArchiveStream(inputStream, options = {}) {
 			if (!hasAborted) abort(err.message || 'Tar extraction failed', 400)
 		})
 
-		// Track compressed bytes if gzip
 		if (isGzip) {
-			inputStream.on('data', (chunk) => {
-				if (hasAborted) return
-				totalCompressedBytes += chunk.length
-				if (totalCompressedBytes > MAX_COMPRESSED_BYTES) {
-					abort('Repository archive exceeds compressed size limit of 30MB')
-				}
-			})
-
 			inputStream.on('error', (err) => {
 				if (!hasAborted) abort(err.message || 'Input stream error', 400)
 			})
 
-			inputStream.pipe(gunzipStream).pipe(extract)
+			inputStream.pipe(limiter).pipe(gunzipStream).pipe(extract)
 		} else {
-			inputStream.on('data', (chunk) => {
-				if (hasAborted) return
-				totalCompressedBytes += chunk.length
-				if (totalCompressedBytes > MAX_COMPRESSED_BYTES) {
-					abort('Repository archive exceeds compressed size limit of 30MB')
-				}
-			})
-
 			inputStream.on('error', (err) => {
 				if (!hasAborted) abort(err.message || 'Input stream error', 400)
 			})
 
-			inputStream.pipe(extract)
+			inputStream.pipe(limiter).pipe(extract)
 		}
 	})
 }
@@ -351,21 +358,19 @@ function parseArchiveStream(inputStream, options = {}) {
  * Downloads and parses repository archive from GitHub.
  */
 async function fetchRepoArchive(owner, repo, ref, options = {}) {
-	const cacheKey = `${owner}/${repo}/${ref}`
-	const now = Date.now()
-	const cached = ARCHIVE_CACHE.get(cacheKey)
-	if (cached && now < cached.expiresAt) {
-		return cached.data
-	}
-
 	const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tarball/${encodeURIComponent(ref)}`
 	const fetchFn = options.fetchFn || globalThis.fetch
 	const headers = getGithubHeaders()
 
+	const abortController = new AbortController()
+	if (options.signal) {
+		options.signal.addEventListener('abort', () => abortController.abort(), { once: true })
+	}
+
 	const response = await fetchFn(url, {
 		headers,
 		redirect: 'follow',
-		signal: options.signal || AbortSignal.timeout(30000),
+		signal: abortController.signal,
 	})
 
 	if (
@@ -389,6 +394,14 @@ async function fetchRepoArchive(owner, repo, ref, options = {}) {
 		throw error
 	}
 
+	const contentLength = Number(response.headers?.get?.('content-length'))
+	if (contentLength && contentLength > MAX_COMPRESSED_BYTES) {
+		abortController.abort()
+		const error = new Error('Repository archive exceeds compressed size limit of 30MB')
+		error.status = 413
+		throw error
+	}
+
 	let nodeStream
 	if (Buffer.isBuffer(response.body)) {
 		nodeStream = Readable.from(response.body)
@@ -400,30 +413,19 @@ async function fetchRepoArchive(owner, repo, ref, options = {}) {
 		nodeStream = Readable.from(response.body)
 	}
 
-	const result = await parseArchiveStream(nodeStream, { isGzip: true })
-
-	if (ARCHIVE_CACHE.size >= MAX_ARCHIVE_CACHE_ENTRIES) {
-		const oldestKey = ARCHIVE_CACHE.keys().next().value
-		ARCHIVE_CACHE.delete(oldestKey)
-	}
-	ARCHIVE_CACHE.set(cacheKey, {
-		data: result,
-		expiresAt: Date.now() + ARCHIVE_CACHE_TTL_MS,
+	const result = await parseArchiveStream(nodeStream, {
+		isGzip: true,
+		onAbort: () => {
+			abortController.abort()
+		},
 	})
 
 	return result
 }
 
-function clearArchiveCache() {
-	ARCHIVE_CACHE.clear()
-}
+function clearArchiveCache() {}
 
-function setArchiveCache(owner, repo, ref, data, ttlMs = ARCHIVE_CACHE_TTL_MS) {
-	ARCHIVE_CACHE.set(`${owner}/${repo}/${ref}`, {
-		data,
-		expiresAt: Date.now() + ttlMs,
-	})
-}
+function setArchiveCache() {}
 
 module.exports = {
 	fetchRepoArchive,

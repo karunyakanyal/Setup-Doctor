@@ -139,40 +139,53 @@ test('graphLimiter: allows 5 requests and blocks 6th with 429', async () => {
 	})
 })
 
-test('POST /api/repository/graph: returns complete graph payload with cached archive', async () => {
-	clearArchiveCache()
+const { setCachedGraph, getCachedGraph, clearGraphCache } = require('./services/graph')
+
+test('POST /api/repository/graph: returns complete graph payload with cached graph', async () => {
+	clearGraphCache()
 
 	const owner = 'test-org'
 	const repo = 'sample-repo'
 	const branch = 'main'
 
-	// Mock archive content
-	const files = new Map()
-	files.set('src/index.js', {
-		size: 40,
-		lang: 'javascript',
-		text: 'const { helper } = require("./utils");\nhelper();',
-	})
-	files.set('src/utils.js', {
-		size: 35,
-		lang: 'javascript',
-		text: 'exports.helper = () => console.log(1);',
-	})
-
-	const inventory = {
-		byLanguage: { javascript: 2 },
-		byFolder: { src: 2 },
-		largest: [{ path: 'src/index.js', size: 40, lang: 'javascript' }],
-		totalFiles: 2,
-		analyzedFiles: 2,
-		skipped: {},
+	const payload = {
+		inventory: {
+			byLanguage: { javascript: 2 },
+			byFolder: { src: 2 },
+			largest: [{ path: 'src/index.js', size: 40, lang: 'javascript' }],
+			totalFiles: 2,
+			analyzedFiles: 2,
+			skipped: {},
+		},
+		graph: {
+			nodes: [
+				{ id: 0, path: 'src/index.js', lang: 'javascript', size: 40, loc: 2, fanIn: 0, fanOut: 1, isEntry: true, isOrphan: false },
+				{ id: 1, path: 'src/utils.js', lang: 'javascript', size: 35, loc: 1, fanIn: 1, fanOut: 0, isEntry: false, isOrphan: false },
+			],
+			edges: [[0, 1]],
+			externals: [],
+		},
+		summary: {
+			entryPoints: ['src/index.js'],
+			cycles: [],
+			orphans: [],
+			hotspots: { byFanIn: [], byTransitiveImpact: [] },
+			declaredButUnused: [],
+			usedButUndeclared: [],
+			longestChain: 2,
+			unresolvedCount: 0,
+			parsedFiles: 2,
+		},
+		coverage: {
+			analyzedFiles: 2,
+			totalFiles: 2,
+			skipped: {},
+			truncated: false,
+			approximate: true,
+		},
 	}
 
-	setArchiveCache(owner, repo, branch, {
-		files,
-		inventory,
-		truncated: false,
-	})
+	setCachedGraph(owner, repo, branch, payload)
 
 	const mock = createMockReqRes({
 		body: { owner, repo, branch },
@@ -192,13 +205,24 @@ test('POST /api/repository/graph: returns complete graph payload with cached arc
 	assert.ok(body.graph)
 	assert.equal(body.graph.nodes.length, 2)
 	assert.equal(body.graph.edges.length, 1)
+
+	// Summary contains only the other parts, without approximate
 	assert.ok(body.summary)
 	assert.equal(body.summary.parsedFiles, 2)
+	assert.equal(body.summary.approximate, undefined)
+
+	// Coverage contains all required fields: analyzedFiles, totalFiles, skipped, truncated, approximate
+	assert.ok(body.coverage)
 	assert.equal(body.coverage.analyzedFiles, 2)
 	assert.equal(body.coverage.totalFiles, 2)
+	assert.deepEqual(body.coverage.skipped, {})
+	assert.equal(body.coverage.truncated, false)
 	assert.equal(body.coverage.approximate, true)
 
-	clearArchiveCache()
+	// No raw file text retained
+	assert.equal(body.files, undefined)
+
+	clearGraphCache()
 })
 
 test('POST /api/repository/graph: error propagation passes error to central handler', async () => {

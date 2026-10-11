@@ -3,7 +3,7 @@ const { rateLimit } = require('express-rate-limit')
 const { runDiagnostics } = require('../rules')
 const { ghFetch } = require('../services/github')
 const { fetchRepoArchive } = require('../services/archive')
-const { buildGraph } = require('../services/graph')
+const { buildGraph, getCachedGraph, setCachedGraph } = require('../services/graph')
 
 const router = express.Router()
 
@@ -345,11 +345,26 @@ const handleGraph = async (req, res, next) => {
 	}
 
 	try {
+		const cached = getCachedGraph(owner, repo, targetBranch)
+		if (cached) {
+			return res.json({
+				success: true,
+				...cached,
+			})
+		}
+
 		const archiveResult = await fetchRepoArchive(owner, repo, targetBranch)
 		const graphResult = buildGraph(archiveResult.files)
 
-		return res.json({
-			success: true,
+		const coverage = {
+			analyzedFiles: archiveResult.inventory.analyzedFiles,
+			totalFiles: archiveResult.inventory.totalFiles,
+			skipped: archiveResult.inventory.skipped,
+			truncated: Boolean(archiveResult.truncated || graphResult.truncated),
+			approximate: true,
+		}
+
+		const responsePayload = {
 			inventory: archiveResult.inventory,
 			graph: {
 				nodes: graphResult.nodes,
@@ -357,13 +372,14 @@ const handleGraph = async (req, res, next) => {
 				externals: graphResult.externals,
 			},
 			summary: graphResult.summary,
-			coverage: {
-				analyzedFiles: archiveResult.inventory.analyzedFiles,
-				totalFiles: archiveResult.inventory.totalFiles,
-				skipped: archiveResult.inventory.skipped,
-				truncated: Boolean(archiveResult.truncated || graphResult.truncated),
-				approximate: Boolean(graphResult.summary.approximate),
-			},
+			coverage,
+		}
+
+		setCachedGraph(owner, repo, targetBranch, responsePayload)
+
+		return res.json({
+			success: true,
+			...responsePayload,
 		})
 	} catch (error) {
 		if (error && (error.status === 429 || error.status === 404 || error.status === 413 || error.status === 400)) {

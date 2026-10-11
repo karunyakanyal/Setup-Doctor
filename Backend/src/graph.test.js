@@ -218,7 +218,54 @@ test('graph builder: detects cycles (Tarjan SCC), orphans, longest chain, and ho
 	// Hotspots by fanIn and transitive impact
 	assert.ok(Array.isArray(result.summary.hotspots.byFanIn))
 	assert.ok(Array.isArray(result.summary.hotspots.byTransitiveImpact))
-	assert.equal(result.summary.approximate, true)
+	assert.equal(result.summary.approximate, undefined) // approximate moved to coverage
+})
+
+test('graph cache: stores only built graph and inventory with max 3 entries (LRU eviction)', () => {
+	const {
+		setCachedGraph,
+		getCachedGraph,
+		clearGraphCache,
+		getGraphCacheSize,
+		MAX_GRAPH_CACHE_ENTRIES,
+	} = require('./services/graph')
+
+	clearGraphCache()
+	assert.equal(MAX_GRAPH_CACHE_ENTRIES, 3)
+
+	const dummyPayload = (name) => ({
+		inventory: { totalFiles: 1, analyzedFiles: 1 },
+		graph: { nodes: [{ id: 0, path: `${name}.js` }], edges: [], externals: [] },
+		summary: { parsedFiles: 1 },
+		coverage: { analyzedFiles: 1, totalFiles: 1, skipped: {}, truncated: false, approximate: true },
+	})
+
+	setCachedGraph('o1', 'r1', 'main', dummyPayload('repo1'))
+	setCachedGraph('o2', 'r2', 'main', dummyPayload('repo2'))
+	setCachedGraph('o3', 'r3', 'main', dummyPayload('repo3'))
+
+	assert.equal(getGraphCacheSize(), 3)
+	assert.ok(getCachedGraph('o1', 'r1', 'main'))
+	assert.ok(getCachedGraph('o2', 'r2', 'main'))
+	assert.ok(getCachedGraph('o3', 'r3', 'main'))
+
+	// Adding a 4th repo should evict the oldest entry ('o1/r1/main')
+	setCachedGraph('o4', 'r4', 'main', dummyPayload('repo4'))
+	assert.equal(getGraphCacheSize(), 3)
+	assert.equal(getCachedGraph('o1', 'r1', 'main'), null, 'o1 should be evicted')
+	assert.ok(getCachedGraph('o2', 'r2', 'main'))
+	assert.ok(getCachedGraph('o3', 'r3', 'main'))
+	assert.ok(getCachedGraph('o4', 'r4', 'main'))
+
+	// Cached payload contains no raw file text
+	const cached = getCachedGraph('o4', 'r4', 'main')
+	assert.equal(cached.files, undefined)
+
+	// Expired entries return null
+	setCachedGraph('o5', 'r5', 'main', dummyPayload('repo5'), -1) // expired
+	assert.equal(getCachedGraph('o5', 'r5', 'main'), null)
+
+	clearGraphCache()
 })
 
 test('getImpact: computes direct, transitive impact and percentOfRepo via reverse BFS', () => {
