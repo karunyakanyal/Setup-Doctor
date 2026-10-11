@@ -1,6 +1,9 @@
 const express = require('express')
+const { rateLimit } = require('express-rate-limit')
 const { runDiagnostics } = require('../rules')
 const { ghFetch } = require('../services/github')
+const { fetchRepoArchive } = require('../services/archive')
+const { buildGraph } = require('../services/graph')
 
 const router = express.Router()
 
@@ -310,6 +313,70 @@ const handleBuildCheck = async (req, res, next) => {
 		return next(err)
 	}
 }
+ 
+const graphLimiter = rateLimit({
+	windowMs: 60 * 1000,
+	limit: 5,
+	standardHeaders: true,
+	legacyHeaders: false,
+	handler: (req, res, next) => {
+		const error = new Error('Too many requests, please try again later.')
+		error.status = 429
+		next(error)
+	},
+})
+
+const handleGraph = async (req, res, next) => {
+	const { owner, repo, branch, ref } = req.body || {}
+	const targetBranch = branch || ref
+
+	if (!owner || !repo || !targetBranch) {
+		return res.status(400).json({
+			success: false,
+			message: 'owner, repo, and branch are required',
+		})
+	}
+
+	if (!isValidIdentifier(owner) || !isValidIdentifier(repo) || !isValidIdentifier(targetBranch)) {
+		return res.status(400).json({
+			success: false,
+			message: 'owner, repo, and branch must be valid identifiers',
+		})
+	}
+
+	try {
+		const archiveResult = await fetchRepoArchive(owner, repo, targetBranch)
+		const graphResult = buildGraph(archiveResult.files)
+
+		return res.json({
+			success: true,
+			inventory: archiveResult.inventory,
+			graph: {
+				nodes: graphResult.nodes,
+				edges: graphResult.edges,
+				externals: graphResult.externals,
+			},
+			summary: graphResult.summary,
+			coverage: {
+				analyzedFiles: archiveResult.inventory.analyzedFiles,
+				totalFiles: archiveResult.inventory.totalFiles,
+				skipped: archiveResult.inventory.skipped,
+				truncated: Boolean(archiveResult.truncated || graphResult.truncated),
+				approximate: Boolean(graphResult.summary.approximate),
+			},
+		})
+	} catch (error) {
+		if (error && (error.status === 429 || error.status === 404 || error.status === 413 || error.status === 400)) {
+			return next(error)
+		}
+		if (error && error.status) {
+			return next(error)
+		}
+		const err = new Error(error?.message || 'Unable to connect to the GitHub API')
+		err.status = 502
+		return next(err)
+	}
+}
 
 router.get('/tree', handleTree)
 router.get('/repository/tree', handleTree)
@@ -323,4 +390,9 @@ router.post('/repository/diagnose', handleDiagnose)
 router.post('/build-check', handleBuildCheck)
 router.post('/repository/build-check', handleBuildCheck)
 
+router.post('/graph', graphLimiter, handleGraph)
+router.post('/repository/graph', graphLimiter, handleGraph)
+
 module.exports = router
+module.exports.handleGraph = handleGraph
+module.exports.graphLimiter = graphLimiter
