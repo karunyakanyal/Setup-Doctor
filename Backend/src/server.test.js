@@ -1,5 +1,6 @@
 const { test, before, after } = require('node:test')
 const assert = require('node:assert/strict')
+const { keepAlive } = require('./testUtils')
 const { app } = require('./server')
 const {
 	checkNodeEngine,
@@ -247,6 +248,7 @@ test('POST /api/repository/diagnose: returns 502 with timeout message when GitHu
 })
 
 test('POST /api/repository/diagnose: overall deadline returns 502 with timeout message and never 500', async () => {
+	const releaseKeepAlive = keepAlive()
 	let fetchCalls = 0
 	const originalFetch = globalThis.fetch
 	globalThis.fetch = async (url, options) => {
@@ -291,10 +293,12 @@ test('POST /api/repository/diagnose: overall deadline returns 502 with timeout m
 		assert.equal(fetchCalls, 1, 'Should not retry after overall deadline')
 	} finally {
 		globalThis.fetch = originalFetch
+		releaseKeepAlive()
 	}
 })
 
 test('POST /api/repository/diagnose: client abort is quiet without 500', async () => {
+	const releaseKeepAlive = keepAlive()
 	const originalFetch = globalThis.fetch
 	const clientController = new AbortController()
 	globalThis.fetch = async (url, options) => {
@@ -334,6 +338,7 @@ test('POST /api/repository/diagnose: client abort is quiet without 500', async (
 		})
 	} finally {
 		globalThis.fetch = originalFetch
+		releaseKeepAlive()
 	}
 })
 

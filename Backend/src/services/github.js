@@ -78,7 +78,14 @@ const ghFetch = async (url, options = {}) => {
 			throw options.signal.reason || new Error('Request aborted')
 		}
 
-		const timeoutSignal = AbortSignal.timeout(timeoutDuration)
+		const timeoutController = new AbortController()
+		const timeoutTimer = setTimeout(() => {
+			const err = new Error('The operation was aborted due to timeout')
+			err.name = 'TimeoutError'
+			err.status = 502
+			timeoutController.abort(err)
+		}, timeoutDuration)
+		const timeoutSignal = timeoutController.signal
 		let requestSignal = timeoutSignal
 		if (options.signal) {
 			if (typeof AbortSignal.any === 'function') {
@@ -181,6 +188,8 @@ const ghFetch = async (url, options = {}) => {
 			error.status = 502
 			error.cause = lastError
 			throw error
+		} finally {
+			clearTimeout(timeoutTimer)
 		}
 	}
 }

@@ -3,6 +3,7 @@ const test = require('node:test')
 const zlib = require('zlib')
 const tar = require('tar-stream')
 const { Readable } = require('stream')
+const { keepAlive } = require('./testUtils')
 const {
 	parseArchiveStream,
 	stripTopLevelFolder,
@@ -264,38 +265,44 @@ test('archive parser cap: aborts expanded bytes when exceeding 120MB', async () 
 })
 
 test('fetchRepoArchive: stalled headers response hits timeout and rejects with 504', async () => {
-	const mockFetch = async (url, options) => {
-		return new Promise((resolve, reject) => {
-			if (options.signal) {
-				options.signal.addEventListener(
-					'abort',
-					() => {
-						const err = new Error('The operation was aborted due to timeout')
-						err.name = 'TimeoutError'
-						reject(err)
-					},
-					{ once: true },
-				)
-			}
-		})
-	}
-
-	await assert.rejects(
-		async () => {
-			await fetchRepoArchive('owner', 'repo', 'main', {
-				fetchFn: mockFetch,
-				connectTimeoutMs: 50,
+	const releaseKeepAlive = keepAlive()
+	try {
+		const mockFetch = async (url, options) => {
+			return new Promise((resolve, reject) => {
+				if (options.signal) {
+					options.signal.addEventListener(
+						'abort',
+						() => {
+							const err = new Error('The operation was aborted due to timeout')
+							err.name = 'TimeoutError'
+							reject(err)
+						},
+						{ once: true },
+					)
+				}
 			})
-		},
-		(err) => {
-			assert.equal(err.status, 504)
-			assert.equal(err.message, 'Repository download took too long.')
-			return true
-		},
-	)
+		}
+
+		await assert.rejects(
+			async () => {
+				await fetchRepoArchive('owner', 'repo', 'main', {
+					fetchFn: mockFetch,
+					connectTimeoutMs: 50,
+				})
+			},
+			(err) => {
+				assert.equal(err.status, 504)
+				assert.equal(err.message, 'Repository download took too long.')
+				return true
+			},
+		)
+	} finally {
+		releaseKeepAlive()
+	}
 })
 
 test('fetchRepoArchive: stalled archive stream hits deadline, destroys stream, and rejects with 504', async () => {
+	const releaseKeepAlive = keepAlive()
 	let streamDestroyed = false
 	const stalledStream = new Readable({
 		read() {
@@ -307,29 +314,36 @@ test('fetchRepoArchive: stalled archive stream hits deadline, destroys stream, a
 		},
 	})
 
-	const mockFetch = async () => {
-		return {
-			ok: true,
-			status: 200,
-			headers: { get: () => null },
-			body: stalledStream,
+	try {
+		const mockFetch = async () => {
+			return {
+				ok: true,
+				status: 200,
+				headers: { get: () => null },
+				body: stalledStream,
+			}
 		}
+
+		await assert.rejects(
+			async () => {
+				await fetchRepoArchive('owner', 'repo', 'main', {
+					fetchFn: mockFetch,
+					totalTimeoutMs: 50,
+				})
+			},
+			(err) => {
+				assert.equal(err.status, 504)
+				assert.equal(err.message, 'Repository download took too long.')
+				return true
+			},
+		)
+
+		assert.equal(streamDestroyed, true)
+	} finally {
+		if (!stalledStream.destroyed) {
+			stalledStream.destroy()
+		}
+		releaseKeepAlive()
 	}
-
-	await assert.rejects(
-		async () => {
-			await fetchRepoArchive('owner', 'repo', 'main', {
-				fetchFn: mockFetch,
-				totalTimeoutMs: 50,
-			})
-		},
-		(err) => {
-			assert.equal(err.status, 504)
-			assert.equal(err.message, 'Repository download took too long.')
-			return true
-		},
-	)
-
-	assert.equal(streamDestroyed, true)
 })
 

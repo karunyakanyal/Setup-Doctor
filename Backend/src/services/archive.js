@@ -490,12 +490,17 @@ async function fetchRepoArchive(owner, repo, ref, options = {}) {
 			destroyStreams(err)
 			reject(err)
 		}, totalTimeoutMs)
-		if (totalTimer && typeof totalTimer.unref === 'function') {
-			totalTimer.unref()
-		}
 	})
 
-	const headersTimeoutSignal = AbortSignal.timeout(connectTimeoutMs)
+	const headersAbortController = new AbortController()
+	const headersTimer = setTimeout(() => {
+		const err = new Error(ARCHIVE_TIMEOUT_MESSAGE)
+		err.name = 'TimeoutError'
+		err.status = 504
+		headersAbortController.abort(err)
+	}, connectTimeoutMs)
+	const headersTimeoutSignal = headersAbortController.signal
+
 	let fetchSignal
 	if (typeof AbortSignal.any === 'function') {
 		fetchSignal = AbortSignal.any([abortController.signal, headersTimeoutSignal])
@@ -584,6 +589,7 @@ async function fetchRepoArchive(owner, repo, ref, options = {}) {
 		}
 		throw err
 	} finally {
+		clearTimeout(headersTimer)
 		clearTimeout(totalTimer)
 	}
 }

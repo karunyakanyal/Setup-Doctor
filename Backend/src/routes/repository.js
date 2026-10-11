@@ -168,7 +168,14 @@ const handleDiagnose = async (req, res, next) => {
 	}
 
 	const overallTimeoutMs = req.diagnoseTimeout || req.timeout || req.body?.diagnoseTimeout || 40000
-	const overallSignal = AbortSignal.timeout(overallTimeoutMs)
+	const overallAbortController = new AbortController()
+	const overallTimer = setTimeout(() => {
+		const err = new Error(TIMEOUT_ERROR_MESSAGE)
+		err.name = 'TimeoutError'
+		err.status = 502
+		overallAbortController.abort(err)
+	}, overallTimeoutMs)
+	const overallSignal = overallAbortController.signal
 
 	let clientDisconnected = false
 	const clientAbortController = new AbortController()
@@ -309,6 +316,8 @@ const handleDiagnose = async (req, res, next) => {
 				message: TIMEOUT_ERROR_MESSAGE,
 			})
 		}
+	} finally {
+		clearTimeout(overallTimer)
 	}
 }
 
