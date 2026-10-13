@@ -332,3 +332,376 @@ test('graph builder: under 3000 nodes sets truncated: false and graphNodesOmitte
 	assert.equal(result.truncated, false)
 	assert.equal(result.graphNodesOmitted, 0)
 })
+
+test('graph builder: config files, test setup, entry points, and declaration files are not orphans and excluded from hotspots', () => {
+	const files = {
+		'vite.config.js': 'export default {};',
+		'.eslintrc.js': 'module.exports = {};',
+		'src/setupTests.ts': 'import "@testing-library/jest-dom";',
+		'src/types.d.ts': 'declare type ID = string;',
+		'src/index.js': 'console.log("entry");',
+		'src/utils.test.js': 'console.log("test");',
+		'tests/integration.spec.ts': 'console.log("spec");',
+		'src/__tests__/unit.js': 'console.log("unit");',
+		'src/regular-orphan.js': 'const isolated = 1;',
+	}
+
+	const result = buildGraph(files)
+
+	// Regular orphan is flagged
+	assert.ok(result.summary.orphans.includes('src/regular-orphan.js'))
+
+	// Config, setup, entry, declaration, and test files are NOT orphans
+	assert.equal(result.summary.orphans.includes('vite.config.js'), false)
+	assert.equal(result.summary.orphans.includes('.eslintrc.js'), false)
+	assert.equal(result.summary.orphans.includes('src/setupTests.ts'), false)
+	assert.equal(result.summary.orphans.includes('src/types.d.ts'), false)
+	assert.equal(result.summary.orphans.includes('src/index.js'), false)
+	assert.equal(result.summary.orphans.includes('src/utils.test.js'), false)
+	assert.equal(result.summary.orphans.includes('tests/integration.spec.ts'), false)
+	assert.equal(result.summary.orphans.includes('src/__tests__/unit.js'), false)
+
+	// isOrphan and isTest property on nodes
+	const viteNode = result.nodes.find((n) => n.path === 'vite.config.js')
+	const eslintNode = result.nodes.find((n) => n.path === '.eslintrc.js')
+	const setupNode = result.nodes.find((n) => n.path === 'src/setupTests.ts')
+	const typesNode = result.nodes.find((n) => n.path === 'src/types.d.ts')
+	const indexNode = result.nodes.find((n) => n.path === 'src/index.js')
+	const testNode = result.nodes.find((n) => n.path === 'src/utils.test.js')
+	const specNode = result.nodes.find((n) => n.path === 'tests/integration.spec.ts')
+	const unitNode = result.nodes.find((n) => n.path === 'src/__tests__/unit.js')
+	const orphanNode = result.nodes.find((n) => n.path === 'src/regular-orphan.js')
+
+	assert.equal(viteNode.isOrphan, false)
+	assert.equal(viteNode.isConfig, true)
+	assert.equal(eslintNode.isOrphan, false)
+	assert.equal(eslintNode.isConfig, true)
+	assert.equal(setupNode.isOrphan, false)
+	assert.equal(typesNode.isOrphan, false)
+	assert.equal(indexNode.isOrphan, false)
+	assert.equal(testNode.isOrphan, false)
+	assert.equal(testNode.isTest, true)
+	assert.equal(specNode.isOrphan, false)
+	assert.equal(specNode.isTest, true)
+	assert.equal(unitNode.isOrphan, false)
+	assert.equal(unitNode.isTest, true)
+	assert.equal(orphanNode.isOrphan, true)
+
+	// configFiles list in summary
+	assert.ok(result.summary.configFiles.includes('vite.config.js'))
+	assert.ok(result.summary.configFiles.includes('.eslintrc.js'))
+
+	// Hotspots exclude config files
+	assert.equal(result.summary.hotspots.byFanIn.some((h) => h.path === 'vite.config.js'), false)
+	assert.equal(result.summary.hotspots.byTransitiveImpact.some((h) => h.path === 'vite.config.js'), false)
+})
+
+test('graph builder: declaredButUnused ignores @types/*, tooling packages, and packages referenced in scripts/configs', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			scripts: {
+				build: 'vite build',
+				lint: 'eslint .',
+				test: 'vitest run',
+				clean: 'rimraf dist',
+				format: 'prettier --write .',
+			},
+			dependencies: {
+				react: '^18.0.0',
+				lodash: '^4.17.21',
+				rimraf: '^5.0.0',
+			},
+			devDependencies: {
+				'@types/node': '^20.0.0',
+				'@types/react': '^18.0.0',
+				'eslint': '^8.0.0',
+				'prettier': '^3.0.0',
+				'vite': '^5.0.0',
+				'@vitejs/plugin-react': '^4.0.0',
+				'vitest': '^1.0.0',
+				'jest': '^29.0.0',
+			},
+		}),
+		'src/index.js': `
+			import React from 'react';
+			console.log(React);
+		`,
+		'vite.config.js': `
+			import { defineConfig } from 'vite';
+			import react from '@vitejs/plugin-react';
+			export default defineConfig({});
+		`,
+	}
+
+	const result = buildGraph(files)
+
+	// react is used in src/index.js
+	assert.equal(result.summary.declaredButUnused.includes('react'), false)
+
+	// lodash is unused and not tooling -> must be flagged
+	assert.ok(result.summary.declaredButUnused.includes('lodash'))
+
+	// @types must be ignored unconditionally
+	assert.equal(result.summary.declaredButUnused.includes('@types/node'), false)
+	assert.equal(result.summary.declaredButUnused.includes('@types/react'), false)
+
+	// Tooling packages referenced in scripts or configs must be ignored
+	assert.equal(result.summary.declaredButUnused.includes('eslint'), false)
+	assert.equal(result.summary.declaredButUnused.includes('prettier'), false)
+	assert.equal(result.summary.declaredButUnused.includes('vite'), false)
+	assert.equal(result.summary.declaredButUnused.includes('@vitejs/plugin-react'), false)
+	assert.equal(result.summary.declaredButUnused.includes('vitest'), false)
+	assert.equal(result.summary.declaredButUnused.includes('rimraf'), false)
+
+	// jest is NOT referenced in scripts or configs -> must be flagged
+	assert.ok(result.summary.declaredButUnused.includes('jest'))
+})
+
+test('graph builder: entry heuristics limit depth and multi-package scripts support .mjs/.cjs/.mts', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			name: 'root',
+			scripts: {
+				start: 'node src/server.mjs',
+			},
+		}),
+		'packages/pkgA/package.json': JSON.stringify({
+			name: 'pkg-a',
+			scripts: {
+				run: 'node src/runner.cjs',
+			},
+		}),
+		'index.js': 'console.log("root index");',
+		'src/index.js': 'console.log("src index");',
+		'src/server.mjs': 'console.log("server");',
+		'packages/pkgA/src/runner.cjs': 'console.log("runner");',
+		'packages/pkgA/main.js': 'console.log("pkg main");',
+		'src/components/button/index.js': 'console.log("nested index");',
+	}
+
+	const result = buildGraph(files)
+
+	const rootIndex = result.nodes.find((n) => n.path === 'index.js')
+	const srcIndex = result.nodes.find((n) => n.path === 'src/index.js')
+	const serverMjs = result.nodes.find((n) => n.path === 'src/server.mjs')
+	const runnerCjs = result.nodes.find((n) => n.path === 'packages/pkgA/src/runner.cjs')
+	const pkgMain = result.nodes.find((n) => n.path === 'packages/pkgA/main.js')
+	const nestedIndex = result.nodes.find((n) => n.path === 'src/components/button/index.js')
+
+	assert.equal(rootIndex.isEntry, true)
+	assert.equal(srcIndex.isEntry, true)
+	assert.equal(serverMjs.isEntry, true)
+	assert.equal(runnerCjs.isEntry, true)
+	assert.equal(pkgMain.isEntry, true)
+	// Nested index (> 1 level below package root) is NOT an entry heuristic
+	assert.equal(nestedIndex.isEntry, false)
+})
+
+test('graph builder: detects shortest cycle via BFS and produces hint when containing app root file', () => {
+	const files = {
+		'src/App.jsx': `
+			import { childA } from './childA';
+			export const appVal = 1;
+		`,
+		'src/childA.js': `
+			import { appVal } from './App';
+			import { childB } from './childB';
+			export const childA = 2;
+		`,
+		'src/childB.js': `
+			import { childA } from './childA';
+			export const childB = 3;
+		`,
+	}
+
+	const result = buildGraph(files)
+
+	assert.equal(result.summary.cycles.length, 1)
+	const cycle = result.summary.cycles[0]
+
+	// Cycle object array compatibility
+	assert.ok(cycle.includes('src/App.jsx'))
+	assert.ok(cycle.includes('src/childA.js'))
+	assert.ok(cycle.includes('src/childB.js'))
+
+	// Shortest loop via BFS: App.jsx <-> childA.js (length 2)
+	assert.ok(Array.isArray(cycle.shortest))
+	assert.equal(cycle.shortest.length, 2)
+	assert.ok(cycle.shortest.includes('src/App.jsx'))
+	assert.ok(cycle.shortest.includes('src/childA.js'))
+
+	// Root file hint
+	assert.equal(
+		cycle.hint,
+		'Shared exports in App.jsx are imported back by children; move them to a separate module.'
+	)
+
+	// JSON serialization
+	const serialized = JSON.parse(JSON.stringify(cycle))
+	assert.ok(Array.isArray(serialized.files))
+	assert.ok(Array.isArray(serialized.shortest))
+	assert.equal(serialized.shortest.length, 2)
+	assert.equal(
+		serialized.hint,
+		'Shared exports in App.jsx are imported back by children; move them to a separate module.'
+	)
+})
+
+test('graph builder: computes language coverage, inventory-only languages, and graphFiles', () => {
+	const files = {
+		'src/main.ts': 'export const x = 1;',
+		'src/index.js': 'import "./main";',
+		'scripts/deploy.py': 'print("deploy")',
+		'docs/readme.md': '# Docs',
+	}
+
+	const result = buildGraph(files)
+
+	assert.equal(result.graphFiles, 2)
+	assert.equal(result.coverage.graphFiles, 2)
+	assert.deepEqual(result.coverage.graphLanguages, {
+		typescript: 1,
+		javascript: 1,
+	})
+	assert.equal(result.coverage.inventoryOnlyLanguages['python'], 1)
+	assert.equal(result.coverage.inventoryOnlyLanguages['markdown'], 1)
+})
+
+test('graph builder: postcss.config.js with plugins: { tailwindcss: {}, autoprefixer: {} } marks both referenced', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			dependencies: {
+				tailwindcss: '^3.4.0',
+				autoprefixer: '^10.4.0',
+				unreferenced: '^1.0.0',
+			},
+		}),
+		'postcss.config.js': `
+			module.exports = {
+				plugins: {
+					tailwindcss: {},
+					autoprefixer: {},
+				},
+			};
+		`,
+		'src/index.js': 'console.log("app");',
+	}
+
+	const result = buildGraph(files)
+	assert.equal(result.summary.declaredButUnused.includes('tailwindcss'), false)
+	assert.equal(result.summary.declaredButUnused.includes('autoprefixer'), false)
+	assert.ok(result.summary.declaredButUnused.includes('unreferenced'))
+})
+
+test('graph builder: script "tsc -b" references typescript', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			scripts: {
+				build: 'tsc -b',
+			},
+			devDependencies: {
+				typescript: '^5.0.0',
+			},
+		}),
+		'src/index.js': 'console.log("app");',
+	}
+
+	const result = buildGraph(files)
+	assert.equal(result.summary.declaredButUnused.includes('typescript'), false)
+})
+
+test('graph builder: script bin aliases for ng and playwright', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			scripts: {
+				serve: 'ng serve',
+				test: 'playwright test',
+			},
+			devDependencies: {
+				'@angular/cli': '^17.0.0',
+				'@playwright/test': '^1.40.0',
+			},
+		}),
+		'src/index.js': 'console.log("app");',
+	}
+
+	const result = buildGraph(files)
+	assert.equal(result.summary.declaredButUnused.includes('@angular/cli'), false)
+	assert.equal(result.summary.declaredButUnused.includes('@playwright/test'), false)
+})
+
+test('graph builder: "vitest run" in scripts does NOT hide an unused vite', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			scripts: {
+				test: 'vitest run',
+			},
+			devDependencies: {
+				vitest: '^1.0.0',
+				vite: '^5.0.0',
+			},
+		}),
+		'src/index.js': 'console.log("app");',
+	}
+
+	const result = buildGraph(files)
+	assert.equal(result.summary.declaredButUnused.includes('vitest'), false)
+	assert.ok(result.summary.declaredButUnused.includes('vite'))
+})
+
+test('graph builder: src/components/deep/index.js is orphan-eligible while src/index.js is an entry', () => {
+	const files = {
+		'src/index.js': 'const x = 1;',
+		'src/components/deep/index.js': 'const y = 2;',
+	}
+
+	const result = buildGraph(files)
+	const srcIndex = result.nodes.find((n) => n.path === 'src/index.js')
+	const deepIndex = result.nodes.find((n) => n.path === 'src/components/deep/index.js')
+
+	assert.ok(srcIndex)
+	assert.ok(deepIndex)
+
+	assert.equal(srcIndex.isEntry, true)
+	assert.equal(srcIndex.isOrphan, false)
+	assert.equal(result.summary.orphans.includes('src/index.js'), false)
+
+	assert.equal(deepIndex.isEntry, false)
+	assert.equal(deepIndex.isOrphan, true)
+	assert.ok(result.summary.orphans.includes('src/components/deep/index.js'))
+})
+
+test('graph builder: a *.test.js file has isTest true and is not an orphan', () => {
+	const files = {
+		'src/index.js': 'const x = 1;',
+		'src/utils.test.js': 'const y = 2;',
+	}
+
+	const result = buildGraph(files)
+	const testNode = result.nodes.find((n) => n.path === 'src/utils.test.js')
+
+	assert.ok(testNode)
+	assert.equal(testNode.isTest, true)
+	assert.equal(testNode.isOrphan, false)
+	assert.equal(result.summary.orphans.includes('src/utils.test.js'), false)
+})
+
+test('graph builder: "node ../scripts/x.js" resolves correctly', () => {
+	const files = {
+		'packages/pkgA/package.json': JSON.stringify({
+			name: 'pkg-a',
+			scripts: {
+				build: 'node ../scripts/x.js',
+			},
+		}),
+		'packages/scripts/x.js': 'console.log("script");',
+	}
+
+	const result = buildGraph(files)
+	const scriptNode = result.nodes.find((n) => n.path === 'packages/scripts/x.js')
+
+	assert.ok(scriptNode)
+	assert.equal(scriptNode.isEntry, true)
+	assert.equal(scriptNode.isOrphan, false)
+})
+

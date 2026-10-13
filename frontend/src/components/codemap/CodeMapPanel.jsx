@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { getImpact, getFileConnections } from '../../utils/graphImpact.js'
+import { getImpact, getFileConnections, getCycleOverstatedImpact } from '../../utils/graphImpact.js'
 import NeighborhoodGraph from './NeighborhoodGraph.jsx'
 
 function formatBytes(bytes) {
@@ -7,6 +7,43 @@ function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function formatLanguageName(lang) {
+  if (!lang) return ''
+  const map = {
+    js: 'JavaScript',
+    javascript: 'JavaScript',
+    ts: 'TypeScript',
+    typescript: 'TypeScript',
+    jsx: 'JSX',
+    tsx: 'TSX',
+    vue: 'Vue',
+    py: 'Python',
+    python: 'Python',
+    rb: 'Ruby',
+    ruby: 'Ruby',
+    go: 'Go',
+    rs: 'Rust',
+    rust: 'Rust',
+    cpp: 'C++',
+    c: 'C',
+    java: 'Java',
+    php: 'PHP',
+    sh: 'Shell',
+    shell: 'Shell',
+    html: 'HTML',
+    css: 'CSS',
+    json: 'JSON',
+    yaml: 'YAML',
+    md: 'Markdown',
+    markdown: 'Markdown',
+    svg: 'SVG',
+    sql: 'SQL',
+    xml: 'XML',
+    graphql: 'GraphQL',
+  }
+  return map[lang.toLowerCase()] || (lang.charAt(0).toUpperCase() + lang.slice(1))
 }
 
 export default function CodeMapPanel({
@@ -36,14 +73,106 @@ export default function CodeMapPanel({
   const summary = data?.summary || {}
   const graph = useMemo(() => data?.graph || { nodes: [], edges: [], externals: [] }, [data?.graph])
 
-  const totalFiles = coverage.totalFiles ?? inventory.totalFiles ?? 0
-  const analyzedFiles = coverage.analyzedFiles ?? inventory.analyzedFiles ?? 0
-  const languageCount = Object.keys(inventory.byLanguage || {}).length
+  const skippedCount = useMemo(() => {
+    const skippedObj = coverage.skipped || inventory.skipped || {}
+    return Object.values(skippedObj).reduce((sum, count) => sum + (Number(count) || 0), 0)
+  }, [coverage.skipped, inventory.skipped])
+
+  const graphFilesCount = coverage.graphFiles ?? data?.graphFiles ?? graph.nodes?.length ?? 0
+  const totalFiles = coverage.totalFiles ?? inventory.totalFiles ?? (graphFilesCount + skippedCount)
+  const analyzedFiles = coverage.analyzedFiles ?? inventory.analyzedFiles ?? Math.max(0, totalFiles - skippedCount)
+
+  const otherFilesCount = Math.max(0, analyzedFiles - graphFilesCount)
+
+  const languageCount = useMemo(() => {
+    const rawKeys = new Set()
+    if (inventory.byLanguage) {
+      for (const k of Object.keys(inventory.byLanguage)) {
+        rawKeys.add(k.toLowerCase())
+      }
+    }
+    if (coverage.graphLanguages) {
+      for (const k of Object.keys(coverage.graphLanguages)) {
+        rawKeys.add(k.toLowerCase())
+      }
+    }
+    if (coverage.inventoryOnlyLanguages) {
+      for (const k of Object.keys(coverage.inventoryOnlyLanguages)) {
+        rawKeys.add(k.toLowerCase())
+      }
+    }
+    return Array.from(rawKeys).filter((l) => {
+      return l !== 'binary' && l !== 'other' && l !== 'gitignore' && l !== 'txt'
+    }).length
+  }, [inventory.byLanguage, coverage.graphLanguages, coverage.inventoryOnlyLanguages])
+
   const entryPoints = summary.entryPoints || []
-  const cycles = summary.cycles || []
-  const orphans = summary.orphans || []
+  const cycles = useMemo(() => summary.cycles || [], [summary.cycles])
+  const configFiles = useMemo(() => summary.configFiles || [], [summary.configFiles])
+  const orphans = (summary.orphans || []).filter((p) => !configFiles.includes(p))
   const unresolvedCount = summary.unresolvedCount ?? 0
-  const hotspots = summary.hotspots || { byFanIn: [], byTransitiveImpact: [] }
+  const hotspots = useMemo(() => {
+    const raw = summary.hotspots || { byFanIn: [], byTransitiveImpact: [] }
+    return {
+      byFanIn: (raw.byFanIn || []).filter((item) => !configFiles.includes(item.path)),
+      byTransitiveImpact: (raw.byTransitiveImpact || []).filter((item) => !configFiles.includes(item.path)),
+    }
+  }, [summary.hotspots, configFiles])
+
+  const unsupportedList = useMemo(() => {
+    const list = []
+    const raw = coverage.inventoryOnlyLanguages || {}
+    const inventoryLangs = (Object.keys(raw).length > 0)
+      ? raw
+      : (inventory.byLanguage || {})
+
+    const graphLangKeys = new Set(
+      Object.keys(coverage.graphLanguages || {}).map((k) => k.toLowerCase())
+    )
+    if (graphLangKeys.size === 0 && graph.nodes?.length) {
+      for (const node of graph.nodes) {
+        if (node.lang) graphLangKeys.add(node.lang.toLowerCase())
+      }
+    }
+
+    for (const [lang, count] of Object.entries(inventoryLangs)) {
+      if (lang === 'binary' || lang === 'other' || lang === 'gitignore' || lang === 'txt') continue
+      if (!graphLangKeys.has(lang.toLowerCase())) {
+        list.push({
+          lang,
+          name: formatLanguageName(lang),
+          count,
+        })
+      }
+    }
+    return list
+  }, [coverage.inventoryOnlyLanguages, coverage.graphLanguages, inventory.byLanguage, graph.nodes])
+
+  const unsupportedSummaryText = useMemo(() => {
+    if (!unsupportedList.length) return ''
+    return unsupportedList
+      .map((item) => `${item.name}: ${item.count} ${item.count === 1 ? 'file' : 'files'}, not mapped`)
+      .join(', ')
+  }, [unsupportedList])
+
+  const inventoryByLanguageList = useMemo(() => {
+    if (!inventory.byLanguage) return []
+    const map = new Map()
+    for (const [rawLang, rawCount] of Object.entries(inventory.byLanguage)) {
+      const count = Number(rawCount) || 0
+      const l = rawLang.toLowerCase()
+      let label = rawLang
+      if (l === 'binary') {
+        label = 'Binary'
+      } else if (l === 'other' || l === 'gitignore' || l === 'txt') {
+        label = 'Other'
+      } else if (l === 'svg') {
+        label = 'SVG'
+      }
+      map.set(label, (map.get(label) || 0) + count)
+    }
+    return Array.from(map.entries()).map(([label, count]) => ({ label, count }))
+  }, [inventory.byLanguage])
 
   // Filtered files for File Explorer
   const filteredNodes = useMemo(() => {
@@ -57,6 +186,10 @@ export default function CodeMapPanel({
   const activeFile = (selectedFile && graph.nodes?.some((node) => node.path === selectedFile))
     ? selectedFile
     : defaultFile || (filteredNodes[0] ? filteredNodes[0].path : '')
+  const activeNode = useMemo(() => {
+    return graph.nodes?.find((node) => node.path === activeFile) || null
+  }, [graph.nodes, activeFile])
+
   const fileConnections = useMemo(() => {
     return getFileConnections(graph, activeFile)
   }, [graph, activeFile])
@@ -64,6 +197,11 @@ export default function CodeMapPanel({
   const fileImpact = useMemo(() => {
     return getImpact(graph, activeFile)
   }, [graph, activeFile])
+
+  const cycleImpact = useMemo(() => {
+    return getCycleOverstatedImpact(graph, cycles, activeFile)
+  }, [graph, cycles, activeFile])
+
 
   // Legacy state: analysis without a scan data and not currently scanning
   if (!hasData && !isScanning) {
@@ -123,7 +261,7 @@ export default function CodeMapPanel({
                 </>
               )}
               {!isScanning && !isError && hasData && (
-                `Scanned ${analyzedFiles} of ${totalFiles} files`
+                `Mapped connections for ${graphFilesCount} code files; ${otherFilesCount} other files inventoried only; ${skippedCount} skipped.${unsupportedSummaryText ? ` (${unsupportedSummaryText})` : ''}`
               )}
               {!isScanning && isError && (
                 error
@@ -157,9 +295,17 @@ export default function CodeMapPanel({
           {/* Summary Cards */}
           <div className="codemap-summary-cards" aria-label="Code Map summary metrics">
             <div className="codemap-card">
-              <span className="codemap-card-label">Files Analyzed</span>
+              <span className="codemap-card-label">Code Files Mapped</span>
+              <strong className="codemap-card-value">{graphFilesCount}</strong>
+            </div>
+
+            <div className="codemap-card">
+              <span className="codemap-card-label">Other Files Inventoried</span>
               <strong className="codemap-card-value">
-                {analyzedFiles} <span className="codemap-card-sub">/ {totalFiles}</span>
+                {otherFilesCount}
+                {skippedCount > 0 && (
+                  <span className="codemap-card-sub"> ({skippedCount} skipped)</span>
+                )}
               </strong>
             </div>
 
@@ -198,22 +344,31 @@ export default function CodeMapPanel({
             <div className="notice-icon-title">
               <span className="notice-badge">Approximate analysis</span>
               <p className="notice-text">
-                Coverage: Analyzed {analyzedFiles} of {totalFiles} files.
-                {coverage.skipped && Object.keys(coverage.skipped).length > 0 && (
-                  <span>
-                    {' '}Skipped: {Object.entries(coverage.skipped)
-                      .map(([reason, count]) => `${count} ${reason.replace('_', ' ')}`)
-                      .join(', ')}.
-                  </span>
-                )}
                 {coverage.graphNodesOmitted > 0 && (
                   <strong className="notice-omitted-warning">
-                    {' '}{coverage.graphNodesOmitted} code files omitted from graph due to the 3,000-node cap.
+                    {coverage.graphNodesOmitted} code files omitted from graph due to the 3,000-node cap.{' '}
                   </strong>
+                )}
+                {coverage.skipped && Object.keys(coverage.skipped).length > 0 && (
+                  <span>
+                    Skipped: {Object.entries(coverage.skipped)
+                      .map(([reason, count]) => `${count} ${reason.replace('_', ' ')}`)
+                      .join(', ')}.{' '}
+                  </span>
+                )}
+                {unsupportedSummaryText ? (
+                  <span>
+                    Non-code and unsupported language files are inventoried only without dependency mapping ({unsupportedSummaryText}).
+                  </span>
+                ) : (
+                  <span>
+                    Dependency mapping is limited to supported code files; all other files are inventoried only.
+                  </span>
                 )}
               </p>
             </div>
           </div>
+
 
           {/* SECTION 1: Hotspots */}
           <section className="codemap-section" aria-labelledby="heading-hotspots">
@@ -311,27 +466,41 @@ export default function CodeMapPanel({
               <p className="codemap-success-note">&#10003; No circular dependencies detected.</p>
             ) : (
               <div className="codemap-cycles-list">
-                {cycles.map((cycle, cIdx) => (
-                  <details key={`cycle-${cIdx}`} className="codemap-cycle-item">
-                    <summary className="codemap-cycle-summary">
-                      <strong>Cycle {cIdx + 1}</strong>: {cycle.length} files involved
-                    </summary>
-                    <ol className="codemap-cycle-files">
-                      {cycle.map((filePath, fIdx) => (
-                        <li key={`cycle-${cIdx}-${filePath}-${fIdx}`}>
-                          <button
-                            type="button"
-                            className="codemap-link-button"
-                            onClick={() => setSelectedFile(filePath)}
-                            aria-label={`Inspect ${filePath}`}
-                          >
-                            {filePath}
-                          </button>
-                        </li>
-                      ))}
-                    </ol>
-                  </details>
-                ))}
+                {cycles.map((cycle, cIdx) => {
+                  const cycleFiles = Array.isArray(cycle) ? cycle : (cycle?.files || [])
+                  const shortest = (Array.isArray(cycle?.shortest) && cycle.shortest.length > 0)
+                    ? cycle.shortest
+                    : cycleFiles
+                  const hint = cycle?.hint
+                  const loopDisplay = (shortest.length > 1 && shortest[0] !== shortest[shortest.length - 1])
+                    ? [...shortest, shortest[0]]
+                    : shortest
+                  const loopStr = loopDisplay.join(' → ')
+
+                  return (
+                    <details key={`cycle-${cIdx}`} className="codemap-cycle-item">
+                      <summary className="codemap-cycle-summary">
+                        <strong>Cycle {cIdx + 1}</strong>: <span className="cycle-loop font-mono">{loopStr}</span>
+                        {hint && <span className="cycle-hint"> — {hint}</span>}
+                      </summary>
+                      <ol className="codemap-cycle-files">
+                        {cycleFiles.map((filePath, fIdx) => (
+                          <li key={`cycle-${cIdx}-${filePath}-${fIdx}`}>
+                            <button
+                              type="button"
+                              className="codemap-link-button"
+                              onClick={() => setSelectedFile(filePath)}
+                              aria-label={`Inspect ${filePath}`}
+                            >
+                              {filePath}
+                            </button>
+                          </li>
+                        ))}
+                      </ol>
+                    </details>
+                  )
+                })}
+
               </div>
             )}
           </section>
@@ -442,11 +611,11 @@ export default function CodeMapPanel({
             <div className="codemap-three-col">
               <div className="codemap-subcard">
                 <h5>By Language</h5>
-                {inventory.byLanguage && Object.keys(inventory.byLanguage).length > 0 ? (
+                {inventoryByLanguageList.length > 0 ? (
                   <ul className="codemap-simple-list">
-                    {Object.entries(inventory.byLanguage).map(([lang, count]) => (
-                      <li key={`lang-${lang}`}>
-                        <span>{lang}</span>
+                    {inventoryByLanguageList.map(({ label, count }) => (
+                      <li key={`lang-${label}`}>
+                        <span>{label}</span>
                         <strong className="count-badge">{count}</strong>
                       </li>
                     ))}
@@ -542,7 +711,15 @@ export default function CodeMapPanel({
                         onClick={() => setSelectedFile(node.path)}
                       >
                         <span className="file-path">{node.path}</span>
-                        <span className="file-meta">{node.lang}</span>
+                        <span className="file-meta">
+                          {node.isConfig && (
+                            <span className="file-tag config-tag">config</span>
+                          )}
+                          {node.isTest && (
+                            <span className="file-tag test-tag">test</span>
+                          )}
+                          {' '}{node.lang?.toLowerCase() === 'svg' ? 'SVG' : node.lang}
+                        </span>
                       </button>
                     ))
                   )}
@@ -555,14 +732,30 @@ export default function CodeMapPanel({
                   <>
                     <div className="codemap-file-header">
                       <p className="eyebrow">Inspecting file</p>
-                      <h5 className="active-file-title font-mono">{activeFile}</h5>
+                      <div className="active-file-title-wrap">
+                        <h5 className="active-file-title font-mono">{activeFile}</h5>
+                        {activeNode?.isConfig && (
+                          <span className="file-tag config-tag">config</span>
+                        )}
+                        {activeNode?.isTest && (
+                          <span className="file-tag test-tag">test</span>
+                        )}
+                      </div>
                     </div>
+
+                    {cycleImpact.inCycle && (
+                      <div className="codemap-cycle-note" role="note" aria-label="Circular dependency warning">
+                        <p>
+                          This file is part of a circular dependency; impact may be overstated by {cycleImpact.overstatedCount} file{cycleImpact.overstatedCount === 1 ? '' : 's'}.
+                        </p>
+                      </div>
+                    )}
 
                     {/* Impact Notice */}
                     <div className="codemap-impact-box" aria-label="Downstream modification impact">
                       <div className="impact-header-row">
                         <strong className="impact-headline">
-                          Changing this file affects {fileImpact.transitive.length} files, {fileImpact.percentOfRepo}% of the repo
+                          Changing this file directly or transitively affects {fileImpact.totalAffected ?? (fileImpact.direct.length + fileImpact.transitive.length)} files, {fileImpact.percentOfRepo}% of the repo
                         </strong>
                       </div>
 
@@ -591,8 +784,8 @@ export default function CodeMapPanel({
 
                         <div>
                           <h6>Transitively affected by folder:</h6>
-                          {Object.keys(fileImpact.transitiveByFolder).length === 0 ? (
-                            <p className="codemap-muted-note">None</p>
+                          {fileImpact.transitive.length === 0 ? (
+                            <p className="codemap-muted-note">No additional files beyond the direct importers.</p>
                           ) : (
                             <div className="transitive-folders-list">
                               {Object.entries(fileImpact.transitiveByFolder).map(([folder, files]) => (
@@ -622,6 +815,7 @@ export default function CodeMapPanel({
                             </div>
                           )}
                         </div>
+
                       </div>
                     </div>
 

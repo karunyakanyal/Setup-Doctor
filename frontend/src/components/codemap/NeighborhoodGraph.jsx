@@ -34,7 +34,7 @@ export default function NeighborhoodGraph({
   const rightCount = importsToShow.length + (extraImports > 0 ? 1 : 0)
   const maxSide = Math.max(leftCount, rightCount, 1)
 
-  const height = Math.max(340, maxSide * 34 + 60)
+  const height = Math.max(100, maxSide * 34 + 50)
   const width = 760
   const centerX = 380
   const centerY = height / 2
