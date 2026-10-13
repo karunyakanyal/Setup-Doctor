@@ -87,13 +87,16 @@ export function getImpact(graph, targetFile) {
     }
   }
 
+  const directSet = new Set(directIds)
   const transitive = Array.from(visited)
+    .filter((id) => !directSet.has(id))
     .map((id) => idToNode.get(id)?.path)
     .filter(Boolean)
 
+  const totalAffected = direct.length + transitive.length
   const totalNodes = nodes.length
   const percentOfRepo = totalNodes > 0
-    ? Number(((transitive.length / totalNodes) * 100).toFixed(1))
+    ? Number(((totalAffected / totalNodes) * 100).toFixed(1))
     : 0
 
   // Group transitive files by folder
@@ -111,10 +114,96 @@ export function getImpact(graph, targetFile) {
     targetNode,
     direct,
     transitive,
+    totalAffected,
     percentOfRepo,
     transitiveByFolder,
   }
 }
+
+/**
+ * Computes whether targetFile is part of a circular dependency, and if so,
+ * how many files are affected ONLY through the cycle (overstated impact).
+ *
+ * @param {Object} graph - { nodes: Array<{ id, path }>, edges: Array<[fromId, toId]> }
+ * @param {Array} cycles - List of cycles from graph summary
+ * @param {string|number} targetFile - File path or node id
+ * @returns {Object} { inCycle: boolean, overstatedCount: number }
+ */
+export function getCycleOverstatedImpact(graph, cycles, targetFile) {
+  if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges) || !Array.isArray(cycles) || !targetFile) {
+    return { inCycle: false, overstatedCount: 0 }
+  }
+
+  const clean = typeof targetFile === 'string' ? targetFile.replace(/^\.\//, '') : targetFile
+  const targetNode = graph.nodes.find((n) => n.path === targetFile || n.path === clean || n.id === targetFile)
+  if (!targetNode) {
+    return { inCycle: false, overstatedCount: 0 }
+  }
+
+  const cycle = cycles.find((c) => {
+    const files = Array.isArray(c) ? c : (c.files || c.shortest || [])
+    return files.includes(targetNode.path) || files.includes(targetFile) || files.includes(clean)
+  })
+
+  if (!cycle) {
+    return { inCycle: false, overstatedCount: 0 }
+  }
+
+  const cycleFiles = Array.isArray(cycle) ? cycle : (cycle.files || cycle.shortest || [])
+  const cycleNodeIds = new Set(
+    cycleFiles
+      .map((p) => graph.nodes.find((n) => n.path === p)?.id)
+      .filter((id) => id !== undefined)
+  )
+
+  const incoming = new Map()
+  for (const [fromId, toId] of graph.edges) {
+    if (!incoming.has(toId)) incoming.set(toId, [])
+    incoming.get(toId).push(fromId)
+  }
+
+  // 1. Full affected set (reverse BFS)
+  const fullAffected = new Set()
+  const fullQueue = [targetNode.id]
+  while (fullQueue.length > 0) {
+    const curr = fullQueue.shift()
+    for (const parent of incoming.get(curr) || []) {
+      if (!fullAffected.has(parent) && parent !== targetNode.id) {
+        fullAffected.add(parent)
+        fullQueue.push(parent)
+      }
+    }
+  }
+
+  // 2. Non-cycle affected set: reverse BFS without expanding past other cycle members
+  const nonCycleAffected = new Set()
+  const nonCycleQueue = [targetNode.id]
+  while (nonCycleQueue.length > 0) {
+    const curr = nonCycleQueue.shift()
+    if (curr !== targetNode.id && cycleNodeIds.has(curr)) {
+      continue
+    }
+    for (const parent of incoming.get(curr) || []) {
+      if (!nonCycleAffected.has(parent) && parent !== targetNode.id) {
+        nonCycleAffected.add(parent)
+        nonCycleQueue.push(parent)
+      }
+    }
+  }
+
+  let overstatedCount = 0
+  for (const id of fullAffected) {
+    if (!nonCycleAffected.has(id)) {
+      overstatedCount++
+    }
+  }
+
+  return {
+    inCycle: true,
+    overstatedCount,
+  }
+}
+
 
 /**
  * Returns outgoing imports and incoming importers for targetFile.

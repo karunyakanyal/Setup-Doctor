@@ -1,49 +1,23 @@
 const express = require('express')
 const { ghFetch } = require('../services/github')
+const { parseRepository } = require('../../../shared/repository')
 
 const router = express.Router()
-
-const identifierPattern = /^[\w.-]{1,100}$/
-const isValidIdentifier = (value) => typeof value === 'string' && identifierPattern.test(value)
 
 const handleAnalyze = async (req, res, next) => {
 	const { repositoryUrl } = req.body || {}
 
-	if (typeof repositoryUrl !== 'string' || !repositoryUrl.trim()) {
-		return res.status(400).json({
-			success: false,
-			message: 'repositoryUrl is required',
-		})
-	}
-
-	let githubUrl
+	let parsed
 	try {
-		githubUrl = new URL(repositoryUrl.trim())
-	} catch {
+		parsed = parseRepository(repositoryUrl)
+	} catch (err) {
 		return res.status(400).json({
 			success: false,
-			message: 'repositoryUrl must be a valid GitHub repository URL',
+			message: err.message,
 		})
 	}
 
-	const isGithubHost = ['github.com', 'www.github.com'].includes(githubUrl.hostname.toLowerCase())
-	const pathParts = githubUrl.pathname.split('/').filter(Boolean)
-
-	if (githubUrl.protocol !== 'https:' || !isGithubHost || pathParts.length !== 2) {
-		return res.status(400).json({
-			success: false,
-			message: 'repositoryUrl must be a valid GitHub repository URL',
-		})
-	}
-
-	const [owner, repo] = pathParts
-
-	if (!isValidIdentifier(owner) || !isValidIdentifier(repo)) {
-		return res.status(400).json({
-			success: false,
-			message: 'owner and repo must be valid identifiers',
-		})
-	}
+	const { owner, repo } = parsed
 
 	try {
 		const githubResponse = await ghFetch(

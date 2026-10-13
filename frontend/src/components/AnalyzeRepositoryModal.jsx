@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useHistory } from '../hooks/useHistory'
 import { resolveLatestAnalysis, extractAnalysisState } from '../utils/diagnosisFormatters'
+import { parseRepository } from '../utils/repository'
 
 function extractOwnerRepo(repoInput) {
   if (!repoInput) return null
   if (typeof repoInput === 'string') {
-    const parts = repoInput.trim().split('/')
-    if (parts.length >= 2 && parts[0] && parts[1]) {
-      return { owner: parts[0], repo: parts[1] }
+    try {
+      return parseRepository(repoInput)
+    } catch {
+      return null
     }
-    return null
   }
   if (typeof repoInput === 'object') {
     const owner =
@@ -20,7 +21,11 @@ function extractOwnerRepo(repoInput) {
       repoInput.repo ||
       (typeof repoInput.fullName === 'string' ? repoInput.fullName.split('/')[1] : '')
     if (owner && repo) {
-      return { owner: String(owner).trim(), repo: String(repo).trim() }
+      try {
+        return parseRepository(`${String(owner).trim()}/${String(repo).trim()}`)
+      } catch {
+        return { owner: String(owner).trim(), repo: String(repo).trim() }
+      }
     }
   }
   return null
@@ -125,22 +130,14 @@ function AnalyzeRepositoryModal({
     }
   }, [onClose])
 
-  function validateRepositoryUrl(value) {
-    const githubUrlPattern = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/?$/i
-    return githubUrlPattern.test(value.trim())
-  }
-
   async function handleSubmit(event) {
     event.preventDefault()
     const trimmedUrl = repositoryUrl.trim()
 
-    if (!trimmedUrl) {
-      setError('Enter a GitHub repository URL.')
-      return
-    }
-
-    if (!validateRepositoryUrl(trimmedUrl)) {
-      setError('Enter a valid GitHub repository URL, such as https://github.com/owner/repository.')
+    try {
+      parseRepository(trimmedUrl)
+    } catch (err) {
+      setError(err.message)
       return
     }
 

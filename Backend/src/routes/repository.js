@@ -508,6 +508,36 @@ const handleGraph = async (req, res, next) => {
 		const archiveResult = await fetchRepoArchive(owner, repo, targetBranch, archiveOptions)
 		const graphResult = buildGraph(archiveResult.files)
 
+		const graphLanguages = {}
+		for (const node of graphResult.nodes) {
+			const lang = node.lang || 'other'
+			graphLanguages[lang] = (graphLanguages[lang] || 0) + 1
+		}
+
+		const STANDARD_INVENTORY_LANGUAGES = new Set([
+			'javascript', 'jsx', 'typescript', 'tsx', 'vue',
+			'json', 'markdown', 'html', 'css', 'scss', 'sass', 'less',
+			'python', 'go', 'rust', 'java', 'c', 'cpp', 'ruby', 'php',
+			'shell', 'yaml', 'sql', 'xml', 'graphql', 'svg'
+		])
+
+		const inventoryOnlyLanguages = {}
+		if (archiveResult.inventory && archiveResult.inventory.byLanguage) {
+			for (const [rawLang, count] of Object.entries(archiveResult.inventory.byLanguage)) {
+				const lang = rawLang.toLowerCase()
+				if (lang !== 'binary' && !graphLanguages[lang]) {
+					const canonical = STANDARD_INVENTORY_LANGUAGES.has(lang) ? lang : 'other'
+					inventoryOnlyLanguages[canonical] = (inventoryOnlyLanguages[canonical] || 0) + count
+				}
+			}
+		} else if (graphResult.coverage?.inventoryOnlyLanguages) {
+			for (const [rawLang, count] of Object.entries(graphResult.coverage.inventoryOnlyLanguages)) {
+				const lang = rawLang.toLowerCase()
+				const canonical = STANDARD_INVENTORY_LANGUAGES.has(lang) ? lang : 'other'
+				inventoryOnlyLanguages[canonical] = (inventoryOnlyLanguages[canonical] || 0) + count
+			}
+		}
+
 		const coverage = {
 			analyzedFiles: archiveResult.inventory.analyzedFiles,
 			totalFiles: archiveResult.inventory.totalFiles,
@@ -515,6 +545,9 @@ const handleGraph = async (req, res, next) => {
 			truncated: Boolean(archiveResult.truncated || graphResult.truncated),
 			graphNodesOmitted: graphResult.graphNodesOmitted || 0,
 			approximate: true,
+			graphLanguages,
+			inventoryOnlyLanguages,
+			graphFiles: graphResult.nodes.length,
 		}
 
 		const responsePayload = {
@@ -526,7 +559,9 @@ const handleGraph = async (req, res, next) => {
 			},
 			summary: graphResult.summary,
 			coverage,
+			graphFiles: graphResult.nodes.length,
 		}
+
 
 		setCachedGraph(owner, repo, targetBranch, responsePayload)
 

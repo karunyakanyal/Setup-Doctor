@@ -37,6 +37,138 @@ function normalizeExternalPackageName(specifier) {
 	return clean.split('/')[0]
 }
 
+const CONFIG_TOOLS = ['eslint', 'vite', 'tailwind', 'postcss', 'babel', 'jest', 'vitest', 'prettier']
+
+const BIN_ALIASES = {
+	tsc: 'typescript',
+	ng: '@angular/cli',
+	playwright: '@playwright/test',
+}
+
+function isConfigFile(filePath) {
+	if (!filePath) return false
+	const base = path.posix.basename(filePath).toLowerCase()
+	// *.config.* (e.g. vite.config.js, tailwind.config.ts)
+	if (base.includes('.config.')) return true
+	// rc or dotfile configs for eslint, vite, tailwind, postcss, babel, jest, vitest, prettier
+	for (const tool of CONFIG_TOOLS) {
+		if (
+			base.startsWith(`.${tool}rc`) ||
+			base.startsWith(`${tool}rc`) ||
+			base.startsWith(`.${tool}.`) ||
+			base.startsWith(`${tool}.`) ||
+			base === `.${tool}` ||
+			base === tool
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+function isTestFile(filePath) {
+	if (!filePath) return false
+	const clean = filePath.replace(/\\/g, '/')
+	const base = path.posix.basename(clean).toLowerCase()
+	// *.test.* and *.spec.*
+	if (base.includes('.test.') || base.includes('.spec.')) return true
+	// folder in __tests__/ or tests/
+	const parts = clean.split('/')
+	for (let i = 0; i < parts.length - 1; i++) {
+		const part = parts[i].toLowerCase()
+		if (part === '__tests__' || part === 'tests') {
+			return true
+		}
+	}
+	return false
+}
+
+function isTestSetupFile(filePath) {
+	if (!filePath) return false
+	const base = path.posix.basename(filePath).toLowerCase()
+	return (
+		base.includes('.setup.') ||
+		base.startsWith('setup-tests.') ||
+		base.startsWith('setuptests.') ||
+		base.startsWith('test-setup.') ||
+		base.startsWith('test.setup.') ||
+		base === 'setup.js' ||
+		base === 'setup.ts'
+	)
+}
+
+function isDeclarationFile(filePath) {
+	if (!filePath) return false
+	const lower = filePath.toLowerCase()
+	return lower.endsWith('.d.ts') || lower.endsWith('.d.mts') || lower.endsWith('.d.cts')
+}
+
+/**
+ * Packages ignored in declaredButUnused:
+ * - @types/*: TypeScript type declaration packages stay ignored unconditionally.
+ * Tooling packages (typescript, vite, vitest, jest, eslint, prettier, etc.)
+ * are only ignored if referenced in package.json scripts or config files.
+ */
+function isIgnoredToolingPackage(pkgName) {
+	if (!pkgName) return false
+	return pkgName.startsWith('@types/')
+}
+
+function detectLanguage(filePath) {
+	const ext = filePath.split('.').pop().toLowerCase()
+	switch (ext) {
+		case 'js':
+		case 'mjs':
+		case 'cjs':
+			return 'javascript'
+		case 'jsx':
+			return 'jsx'
+		case 'ts':
+		case 'mts':
+		case 'cts':
+			return 'typescript'
+		case 'tsx':
+			return 'tsx'
+		case 'vue':
+			return 'vue'
+		case 'json':
+			return 'json'
+		case 'md':
+		case 'markdown':
+			return 'markdown'
+		case 'py':
+			return 'python'
+		case 'go':
+			return 'go'
+		case 'rs':
+			return 'rust'
+		case 'java':
+			return 'java'
+		case 'c':
+		case 'h':
+			return 'c'
+		case 'cpp':
+		case 'hpp':
+		case 'cc':
+		case 'cxx':
+			return 'cpp'
+		case 'rb':
+			return 'ruby'
+		case 'php':
+			return 'php'
+		case 'sh':
+		case 'bash':
+			return 'shell'
+		case 'yml':
+		case 'yaml':
+			return 'yaml'
+		default:
+			return ext || 'other'
+	}
+}
+
+
+
 /**
  * Tokenizes source code to extract import/require specifiers while ignoring comments and strings.
  */
@@ -404,12 +536,16 @@ function buildGraph(files, packageJsons = []) {
 			filesMap.set(p, {
 				text: val,
 				size: Buffer.byteLength(val, 'utf8'),
-				lang: path.posix.extname(p).slice(1) || 'javascript',
+				lang: detectLanguage(p),
 			})
 		} else if (val && typeof val === 'object') {
-			filesMap.set(p, val)
+			filesMap.set(p, {
+				...val,
+				lang: val.lang || detectLanguage(p),
+			})
 		}
 	}
+
 
 	// Collect all package.json files
 	const parsedPackageJsons = []
@@ -511,48 +647,113 @@ function buildGraph(files, packageJsons = []) {
 			fanOut: 0,
 			isEntry: false,
 			isOrphan: false,
+			isConfig: isConfigFile(filePath),
+			isTest: isTestFile(filePath),
 		})
 	})
 
+
 	// Detect entry points
 	const entryPointsSet = new Set()
-	const rootPkg = parsedPackageJsons.find((p) => (p.path || '') === 'package.json')
-	if (rootPkg && rootPkg.content) {
-		const p = rootPkg.content
-		if (p.main) entryPointsSet.add(path.posix.normalize(p.main).replace(/^\.\//, ''))
-		if (p.module) entryPointsSet.add(path.posix.normalize(p.module).replace(/^\.\//, ''))
+	const packageDirs = parsedPackageJsons.map((p) => {
+		const pkgPath = p.path || 'package.json'
+		return path.posix.dirname(pkgPath)
+	})
+	if (!packageDirs.includes('.')) {
+		packageDirs.push('.')
+	}
+	packageDirs.sort((a, b) => b.length - a.length)
+
+	const resolvePkgRelative = (dir, target) => {
+		if (!target || typeof target !== 'string') return null
+		let clean = target.trim().replace(/^['"]+|['"]+$/g, '').replace(/\\/g, '/')
+		if (clean.startsWith('./')) {
+			clean = clean.slice(2)
+		}
+		if (!clean) return null
+		const joined = dir === '.' ? clean : path.posix.join(dir, clean)
+		const normalized = path.posix.normalize(joined)
+		if (normalized === '.' || normalized === '..' || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) {
+			return null
+		}
+		return normalized
+	}
+
+	const SCRIPT_EXTENSIONS = new Set(['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs', '.mts'])
+
+	for (const pkgItem of parsedPackageJsons) {
+		const p = pkgItem.content || pkgItem
+		const pkgPath = pkgItem.path || 'package.json'
+		const dir = path.posix.dirname(pkgPath)
+
+		if (p.main) {
+			const resolved = resolvePkgRelative(dir, p.main)
+			if (resolved) entryPointsSet.add(resolved)
+		}
+		if (p.module) {
+			const resolved = resolvePkgRelative(dir, p.module)
+			if (resolved) entryPointsSet.add(resolved)
+		}
 		if (p.bin) {
 			if (typeof p.bin === 'string') {
-				entryPointsSet.add(path.posix.normalize(p.bin).replace(/^\.\//, ''))
+				const resolved = resolvePkgRelative(dir, p.bin)
+				if (resolved) entryPointsSet.add(resolved)
 			} else if (typeof p.bin === 'object') {
 				for (const binPath of Object.values(p.bin)) {
 					if (typeof binPath === 'string') {
-						entryPointsSet.add(path.posix.normalize(binPath).replace(/^\.\//, ''))
+						const resolved = resolvePkgRelative(dir, binPath)
+						if (resolved) entryPointsSet.add(resolved)
 					}
 				}
 			}
 		}
 		if (p.scripts && typeof p.scripts === 'object') {
 			for (const script of Object.values(p.scripts)) {
+				if (typeof script !== 'string') continue
 				const scriptTokens = script.split(/\s+/)
 				for (const token of scriptTokens) {
-					if (token.endsWith('.js') || token.endsWith('.ts') || token.endsWith('.jsx') || token.endsWith('.tsx')) {
-						entryPointsSet.add(path.posix.normalize(token).replace(/^\.\//, ''))
+					let cleanToken = token.trim().replace(/^['"]+|['"]+$/g, '').replace(/\\/g, '/')
+					if (cleanToken.startsWith('./')) {
+						cleanToken = cleanToken.slice(2)
+					}
+					const ext = path.posix.extname(cleanToken).toLowerCase()
+					if (SCRIPT_EXTENSIONS.has(ext)) {
+						const resolved = resolvePkgRelative(dir, cleanToken)
+						if (resolved) entryPointsSet.add(resolved)
 					}
 				}
 			}
 		}
 	}
 
-	// Also common entry point file patterns
+	// Heuristic entry points: index./main./app./server. count as entry
+	// ONLY at package root or one level below it (e.g. src/), not in deeper folders.
+	const isAtPackageRootOrOneLevelBelow = (filePath) => {
+		let bestPkgDir = '.'
+		for (const pkgDir of packageDirs) {
+			if (pkgDir === '.') continue
+			if (filePath === pkgDir || filePath.startsWith(pkgDir + '/')) {
+				if (pkgDir.length > bestPkgDir.length || bestPkgDir === '.') {
+					bestPkgDir = pkgDir
+				}
+			}
+		}
+		const rel = bestPkgDir === '.' ? filePath : filePath.slice(bestPkgDir.length + 1)
+		const dirPart = path.posix.dirname(rel)
+		return dirPart === '.' || !dirPart.includes('/')
+	}
+
 	for (const node of nodes) {
 		const base = path.posix.basename(node.path).toLowerCase()
-		const isCommonEntry =
+		const isCommonEntryName =
 			base.startsWith('index.') ||
 			base.startsWith('main.') ||
 			base.startsWith('app.') ||
 			base.startsWith('server.')
-		if (isCommonEntry || entryPointsSet.has(node.path)) {
+
+		const isHeuristicEntry = isCommonEntryName && isAtPackageRootOrOneLevelBelow(node.path)
+
+		if (isHeuristicEntry || entryPointsSet.has(node.path)) {
 			node.isEntry = true
 		}
 	}
@@ -664,16 +865,36 @@ function buildGraph(files, packageJsons = []) {
 		if (nodes[toId]) nodes[toId].fanIn++
 	}
 
-	// Identify orphans
+	// Collect config files
+	const configFilesSet = new Set(nodes.filter((n) => n.isConfig).map((n) => n.path))
+	for (const filePath of filesMap.keys()) {
+		if (isConfigFile(filePath)) {
+			configFilesSet.add(filePath)
+		}
+	}
+	const configFiles = Array.from(configFilesSet)
+
+	// Identify orphans (isOrphan false for config files, test files, test setup, entry points, and declaration files)
 	const orphans = []
 	for (const node of nodes) {
-		if (node.fanIn === 0 && node.fanOut === 0 && !node.isEntry) {
+		const isSpecial =
+			node.isEntry ||
+			node.isConfig ||
+			node.isTest ||
+			isConfigFile(node.path) ||
+			isTestFile(node.path) ||
+			isTestSetupFile(node.path) ||
+			isDeclarationFile(node.path)
+
+		if (node.fanIn === 0 && node.fanOut === 0 && !isSpecial) {
 			node.isOrphan = true
 			orphans.push(node.path)
+		} else {
+			node.isOrphan = false
 		}
 	}
 
-	// Detect Cycles using Tarjan's SCC algorithm
+	// Detect Cycles using Tarjan's SCC algorithm + BFS for shortest loop
 	const cycles = []
 	const adj = new Map()
 	for (const node of nodes) adj.set(node.id, [])
@@ -711,7 +932,100 @@ function buildGraph(files, packageJsons = []) {
 			} while (w !== u)
 
 			if (scc.length > 1 && cycles.length < 20) {
-				cycles.push(scc.map((id) => nodes[id].path))
+				const sccSet = new Set(scc)
+				let bestLoop = null
+				let bestLoopLength = Infinity
+
+				const isAppRootNode = (nodeId) => {
+					const p = nodes[nodeId]?.path || ''
+					const base = path.posix.basename(p).toLowerCase()
+					return /^(app|index|main)\.(jsx?|tsx?)$/i.test(base) || Boolean(nodes[nodeId]?.isEntry)
+				}
+
+				const sortedScc = [...scc].sort((a, b) => {
+					const aRoot = isAppRootNode(a) ? 1 : 0
+					const bRoot = isAppRootNode(b) ? 1 : 0
+					return bRoot - aRoot
+				})
+
+				for (const startId of sortedScc) {
+					const queue = []
+					const visited = new Map()
+
+					for (const v of adj.get(startId) || []) {
+						if (sccSet.has(v)) {
+							queue.push([startId, v])
+							visited.set(v, 2)
+						}
+					}
+
+					while (queue.length > 0) {
+						const currentPath = queue.shift()
+						if (currentPath.length > bestLoopLength) {
+							break
+						}
+						const lastNode = currentPath[currentPath.length - 1]
+						for (const nxt of adj.get(lastNode) || []) {
+							if (nxt === startId) {
+								if (currentPath.length < bestLoopLength) {
+									bestLoop = currentPath
+									bestLoopLength = currentPath.length
+								} else if (
+									currentPath.length === bestLoopLength &&
+									!bestLoop?.some(isAppRootNode) &&
+									currentPath.some(isAppRootNode)
+								) {
+									bestLoop = currentPath
+								}
+								break
+							}
+							if (sccSet.has(nxt) && !visited.has(nxt)) {
+								visited.set(nxt, currentPath.length + 1)
+								queue.push([...currentPath, nxt])
+							}
+						}
+					}
+				}
+
+				if (!bestLoop) {
+					bestLoop = [...scc]
+				}
+
+				const rootIdx = bestLoop.findIndex(isAppRootNode)
+				if (rootIdx > 0) {
+					bestLoop = [...bestLoop.slice(rootIdx), ...bestLoop.slice(0, rootIdx)]
+				}
+
+
+				const shortestLoopPaths = bestLoop.map((id) => nodes[id].path)
+				const sccPaths = scc.map((id) => nodes[id].path)
+
+				const appFile = sccPaths.find((p) => /^app\.(jsx?|tsx?)$/i.test(path.posix.basename(p)))
+				const indexFile = sccPaths.find((p) => /^index\.(jsx?|tsx?)$/i.test(path.posix.basename(p)))
+				const mainFile = sccPaths.find((p) => /^main\.(jsx?|tsx?)$/i.test(path.posix.basename(p)))
+				const entryFile = sccPaths.find((p) => nodes[pathToId.get(p)]?.isEntry)
+				const rootFileForHint = appFile || indexFile || mainFile || entryFile || null
+
+				let hint = null
+				if (rootFileForHint) {
+					const rootName = path.posix.basename(rootFileForHint)
+					hint = `Shared exports in ${rootName} are imported back by children; move them to a separate module.`
+				}
+
+				const cycleObj = Object.assign([...sccPaths], {
+					files: sccPaths,
+					shortest: shortestLoopPaths,
+					hint,
+					toJSON() {
+						return {
+							files: this.files,
+							shortest: this.shortest,
+							hint: this.hint,
+						}
+					},
+				})
+
+				cycles.push(cycleObj)
 			}
 		}
 	}
@@ -763,9 +1077,56 @@ function buildGraph(files, packageJsons = []) {
 
 	externals.sort((a, b) => b.count - a.count)
 
+	// Collect packages referenced in scripts or config files
+	const referencedInScriptsOrConfigs = new Set()
+
+	// 1. Script matching: tokens equal dep or start with dep + '/' (plus bin alias map)
+	for (const pkgItem of parsedPackageJsons) {
+		const p = pkgItem.content || pkgItem
+		if (p.scripts && typeof p.scripts === 'object') {
+			for (const script of Object.values(p.scripts)) {
+				if (typeof script !== 'string') continue
+				const tokens = script.split(/\s+/)
+				for (const rawToken of tokens) {
+					const token = rawToken.replace(/^['"]+|['"]+$/g, '')
+					const aliased = BIN_ALIASES[token] || BIN_ALIASES[path.posix.basename(token)]
+					if (aliased) {
+						referencedInScriptsOrConfigs.add(aliased)
+					}
+					for (const dep of allDeclaredDependencies) {
+						if (token === dep || token.startsWith(dep + '/')) {
+							referencedInScriptsOrConfigs.add(dep)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Config files matching: match quoted specifiers and unquoted object keys
+	for (const [filePath, fileData] of filesMap.entries()) {
+		if (isConfigFile(filePath) && fileData.text) {
+			const text = fileData.text
+			for (const dep of allDeclaredDependencies) {
+				if (referencedInScriptsOrConfigs.has(dep)) continue
+				const escaped = dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+				const quotedRegex = new RegExp(`['"\`]${escaped}(?:/[^'"\`]*)?['"\`]`)
+				const keyRegex = new RegExp('(^|[\\s{,])' + escaped + '\\s*:')
+				if (quotedRegex.test(text) || keyRegex.test(text)) {
+					referencedInScriptsOrConfigs.add(dep)
+				}
+			}
+		}
+	}
+
 	const declaredButUnused = []
 	for (const dep of allDeclaredDependencies) {
-		if (!externalsMap.has(dep) && !isNodeBuiltin(dep)) {
+		if (
+			!externalsMap.has(dep) &&
+			!isNodeBuiltin(dep) &&
+			!isIgnoredToolingPackage(dep) &&
+			!referencedInScriptsOrConfigs.has(dep)
+		) {
 			declaredButUnused.push(dep)
 		}
 	}
@@ -777,21 +1138,22 @@ function buildGraph(files, packageJsons = []) {
 		}
 	}
 
-	// Calculate hotspots
+	// Calculate hotspots (excluding config files)
 	// 1. Top 10 by fanIn
 	const sortedByFanIn = [...nodes]
-		.filter((n) => n.fanIn > 0)
+		.filter((n) => n.fanIn > 0 && !n.isConfig)
 		.sort((a, b) => b.fanIn - a.fanIn)
 		.slice(0, 10)
 		.map((n) => ({ id: n.id, path: n.path, fanIn: n.fanIn }))
 
-	// 2. Top 10 by transitive impact (reverse BFS)
+	// 2. Top 10 by transitive impact (reverse BFS, excluding config files)
 	const incomingAdj = new Map()
 	for (const node of nodes) incomingAdj.set(node.id, [])
 	for (const [fromId, toId] of edges) incomingAdj.get(toId).push(fromId)
 
 	const impactScores = []
 	for (const node of nodes) {
+		if (node.isConfig) continue
 		let count = 0
 		const visited = new Set([node.id])
 		const queue = [node.id]
@@ -818,6 +1180,38 @@ function buildGraph(files, packageJsons = []) {
 	impactScores.sort((a, b) => b.transitiveCount - a.transitiveCount)
 	const sortedByTransitiveImpact = impactScores.slice(0, 10)
 
+	// Language coverage metrics
+	const graphLanguages = {}
+	for (const node of nodes) {
+		const lang = node.lang || 'other'
+		graphLanguages[lang] = (graphLanguages[lang] || 0) + 1
+	}
+
+	const STANDARD_INVENTORY_LANGUAGES = new Set([
+		'javascript', 'jsx', 'typescript', 'tsx', 'vue',
+		'json', 'markdown', 'html', 'css', 'scss', 'sass', 'less',
+		'python', 'go', 'rust', 'java', 'c', 'cpp', 'ruby', 'php',
+		'shell', 'yaml', 'sql', 'xml', 'graphql', 'svg'
+	])
+
+	const inventoryOnlyLanguages = {}
+	for (const [filePath, fileData] of filesMap.entries()) {
+		if (!pathToId.has(filePath)) {
+			let lang = fileData.lang || path.posix.extname(filePath).slice(1) || 'other'
+			if (lang !== 'binary') {
+				const lower = lang.toLowerCase()
+				const canonicalLang = STANDARD_INVENTORY_LANGUAGES.has(lower) ? lower : 'other'
+				inventoryOnlyLanguages[canonicalLang] = (inventoryOnlyLanguages[canonicalLang] || 0) + 1
+			}
+		}
+	}
+
+	const coverage = {
+		graphLanguages,
+		inventoryOnlyLanguages,
+		graphFiles: nodes.length,
+	}
+
 	const graphResult = {
 		nodes,
 		edges,
@@ -835,7 +1229,10 @@ function buildGraph(files, packageJsons = []) {
 			longestChain,
 			unresolvedCount,
 			parsedFiles: nodes.length,
+			configFiles,
 		},
+		coverage,
+		graphFiles: nodes.length,
 		truncated,
 		graphNodesOmitted,
 	}
@@ -958,4 +1355,11 @@ module.exports = {
 	MAX_GRAPH_CACHE_ENTRIES,
 	extractImportSpecifiers,
 	normalizeExternalPackageName,
+	isConfigFile,
+	isTestFile,
+	isTestSetupFile,
+	isDeclarationFile,
+	isIgnoredToolingPackage,
+	BIN_ALIASES,
 }
+
