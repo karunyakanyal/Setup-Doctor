@@ -24,6 +24,8 @@ import {
   extractAnalysisState,
   normalizeTechnologyStack,
   createCodeMapSummary,
+  countAnalyzedProjects,
+  getShortFailureReason,
 } from '../utils/diagnosisFormatters'
 import { getBugRepositoryName } from '../utils/bugVaultData'
 
@@ -284,10 +286,15 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     }
   }
 
-  // Repository card analysis status text
-  const repoAnalysisStatus = useMemo(() => {
+  // Repository card analysis status text and failure badge
+  const repoAnalysisBadge = useMemo(() => {
     if (!repository?.fullName) {
-      return 'Ready for analysis'
+      return { text: 'Ready for analysis', isFailed: false }
+    }
+
+    if (diagnosticsError) {
+      const reason = getShortFailureReason(diagnosticsError)
+      return { text: `Analysis failed: ${reason}`, isFailed: true }
     }
 
     const historyMatch = analysisHistory.find(
@@ -300,7 +307,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     const timestamp = historyMatch?.analyzedAt
 
     if (!activeHealth) {
-      return 'Ready for analysis'
+      return { text: 'Ready for analysis', isFailed: false }
     }
 
     const grade = getGrade(activeHealth)
@@ -318,17 +325,22 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     }
 
     if (timeStr && grade && grade !== 'N/A') {
-      return `Analyzed at ${timeStr} • Grade ${grade}`
+      return { text: `Analyzed at ${timeStr} • Grade ${grade}`, isFailed: false }
     }
     if (timeStr) {
-      return `Analyzed at ${timeStr}`
+      return { text: `Analyzed at ${timeStr}`, isFailed: false }
     }
     if (grade && grade !== 'N/A') {
-      return `Grade ${grade}`
+      return { text: `Grade ${grade}`, isFailed: false }
     }
 
-    return 'Ready for analysis'
-  }, [repository, health, analysisHistory])
+    return { text: 'Ready for analysis', isFailed: false }
+  }, [repository, health, diagnosticsError, analysisHistory])
+
+  // Count only repositories with successful diagnostics (has an analysis record with a score)
+  const analyzedProjectsCount = useMemo(() => {
+    return countAnalyzedProjects(projects, analysisHistory)
+  }, [projects, analysisHistory])
 
   // Filter calculations
   const filterCounts = useMemo(() => {
@@ -385,7 +397,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
       <section className="stats-grid" aria-label="Dashboard statistics">
         <StatCard
           label="Projects Analyzed"
-          value={projects.length}
+          value={analyzedProjectsCount}
           icon="projects"
           tone="blue"
         />
@@ -418,7 +430,9 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
               <p className="eyebrow">Latest repository</p>
               <h2 id="repository-summary-title">{repository.fullName}</h2>
             </div>
-            <span className="repository-ready">{repoAnalysisStatus}</span>
+            <span className={`repository-ready ${repoAnalysisBadge.isFailed ? 'repository-failed' : ''}`}>
+              {repoAnalysisBadge.text}
+            </span>
           </div>
 
           <div className="repository-details">

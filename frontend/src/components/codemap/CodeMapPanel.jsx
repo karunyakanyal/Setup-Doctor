@@ -1,6 +1,29 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import { getImpact, getFileConnections, getCycleOverstatedImpact } from '../../utils/graphImpact.js'
 import NeighborhoodGraph from './NeighborhoodGraph.jsx'
+
+const REASON_METADATA = {
+  'relative-not-found': {
+    title: 'Relative not found',
+    explanation: 'relative path does not exist on disk',
+  },
+  'directory-index-not-found': {
+    title: 'Directory index not found',
+    explanation: 'directory exists or was specified, but directory index file (index.js/ts) was not found',
+  },
+  'alias-unresolved': {
+    title: 'Alias unresolved',
+    explanation: 'alias could not be read from tsconfig, vite or webpack config',
+  },
+  'package-imports-unresolved': {
+    title: 'Package imports unresolved',
+    explanation: 'subpath import (#) could not be resolved from package.json imports',
+  },
+  'other': {
+    title: 'Other unresolved imports',
+    explanation: 'unresolved import or unrecognized module specifier',
+  },
+}
 
 function formatBytes(bytes) {
   if (bytes == null || Number.isNaN(bytes)) return '0 B'
@@ -51,6 +74,9 @@ export default function CodeMapPanel({
   status = 'idle',
   error = null,
   onRerun,
+  initialShowUnresolvedPanel = false,
+  initialIncludeNonProd = false,
+  initialExpandedReasons = {},
 }) {
   const isScanning = status === 'scanning'
   const isError = status === 'error' && Boolean(error)
@@ -66,11 +92,50 @@ export default function CodeMapPanel({
 
   const [selectedFile, setSelectedFile] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const [showUnresolvedPanel, setShowUnresolvedPanel] = useState(initialShowUnresolvedPanel)
+  const [includeNonProd, setIncludeNonProd] = useState(initialIncludeNonProd)
+  const [expandedReasons, setExpandedReasons] = useState(initialExpandedReasons)
+  const unresolvedPanelRef = useRef(null)
+
+  const toggleUnresolvedPanel = () => {
+    setShowUnresolvedPanel((prev) => {
+      const next = !prev
+      if (next) {
+        setTimeout(() => {
+          unresolvedPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+        }, 50)
+      }
+      return next
+    })
+  }
+
+  const toggleExpandReason = (reasonKey) => {
+    setExpandedReasons((prev) => ({
+      ...prev,
+      [reasonKey]: !prev[reasonKey],
+    }))
+  }
+
+  const scrollToSection = (id) => {
+    const el = document.getElementById(id)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      el.focus?.()
+    }
+  }
+
+  const handleInspectFile = (filePath) => {
+    setSelectedFile(filePath)
+    const el = document.getElementById('heading-file-explorer')
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }
 
   // Computed metrics from data
   const coverage = data?.coverage || {}
   const inventory = data?.inventory || {}
-  const summary = data?.summary || {}
+  const summary = useMemo(() => data?.summary || {}, [data?.summary])
   const graph = useMemo(() => data?.graph || { nodes: [], edges: [], externals: [] }, [data?.graph])
 
   const skippedCount = useMemo(() => {
@@ -84,13 +149,33 @@ export default function CodeMapPanel({
 
   const otherFilesCount = Math.max(0, analyzedFiles - graphFilesCount)
 
-  const languageCount = useMemo(() => {
-    const rawKeys = new Set()
-    if (inventory.byLanguage) {
-      for (const k of Object.keys(inventory.byLanguage)) {
-        rawKeys.add(k.toLowerCase())
+  const inventoryByLanguageList = useMemo(() => {
+    if (!inventory.byLanguage) return []
+    const map = new Map()
+    for (const [rawLang, rawCount] of Object.entries(inventory.byLanguage)) {
+      const count = Number(rawCount) || 0
+      const l = rawLang.toLowerCase()
+      let label = rawLang
+      if (l === 'binary') {
+        label = 'Binary'
+      } else if (l === 'other' || l === 'gitignore' || l === 'txt') {
+        label = 'Other'
+      } else if (l === 'svg') {
+        label = 'SVG'
       }
+      map.set(label, (map.get(label) || 0) + count)
     }
+    return Array.from(map.entries()).map(([label, count]) => ({ label, count }))
+  }, [inventory.byLanguage])
+
+  const languageCount = useMemo(() => {
+    const nonOtherNonBinary = inventoryByLanguageList.filter(
+      (item) => item.label !== 'Binary' && item.label !== 'Other'
+    )
+    if (inventory.byLanguage && Object.keys(inventory.byLanguage).length > 0) {
+      return nonOtherNonBinary.length
+    }
+    const rawKeys = new Set()
     if (coverage.graphLanguages) {
       for (const k of Object.keys(coverage.graphLanguages)) {
         rawKeys.add(k.toLowerCase())
@@ -104,13 +189,45 @@ export default function CodeMapPanel({
     return Array.from(rawKeys).filter((l) => {
       return l !== 'binary' && l !== 'other' && l !== 'gitignore' && l !== 'txt'
     }).length
-  }, [inventory.byLanguage, coverage.graphLanguages, coverage.inventoryOnlyLanguages])
+  }, [inventoryByLanguageList, inventory.byLanguage, coverage.graphLanguages, coverage.inventoryOnlyLanguages])
 
   const entryPoints = summary.entryPoints || []
   const cycles = useMemo(() => summary.cycles || [], [summary.cycles])
   const configFiles = useMemo(() => summary.configFiles || [], [summary.configFiles])
   const orphans = (summary.orphans || []).filter((p) => !configFiles.includes(p))
-  const unresolvedCount = summary.unresolvedCount ?? 0
+  const unresolvedCount = summary.unresolvedCount ?? data?.unresolvedCount ?? (data?.unresolvedImports?.length ?? 0)
+
+  const rawUnresolvedImports = useMemo(() => {
+    return data?.unresolvedImports || summary?.unresolvedImports || data?.graph?.unresolvedImports || []
+  }, [data, summary])
+
+  const unresolvedTruncated = Boolean(
+    data?.unresolvedTruncated ||
+    summary?.unresolvedTruncated ||
+    rawUnresolvedImports?.truncated
+  )
+
+  const displayedUnresolved = useMemo(() => {
+    if (includeNonProd) {
+      return rawUnresolvedImports
+    }
+    return rawUnresolvedImports.filter((item) => item.category !== 'non-production')
+  }, [rawUnresolvedImports, includeNonProd])
+
+  const groupedByReason = useMemo(() => {
+    const groups = {
+      'relative-not-found': [],
+      'directory-index-not-found': [],
+      'alias-unresolved': [],
+      'package-imports-unresolved': [],
+      'other': [],
+    }
+    for (const item of displayedUnresolved) {
+      const r = groups[item.reason] ? item.reason : 'other'
+      groups[r].push(item)
+    }
+    return groups
+  }, [displayedUnresolved])
   const hotspots = useMemo(() => {
     const raw = summary.hotspots || { byFanIn: [], byTransitiveImpact: [] }
     return {
@@ -135,9 +252,16 @@ export default function CodeMapPanel({
       }
     }
 
-    for (const [lang, count] of Object.entries(inventoryLangs)) {
-      if (lang === 'binary' || lang === 'other' || lang === 'gitignore' || lang === 'txt') continue
-      if (!graphLangKeys.has(lang.toLowerCase())) {
+    let otherCount = 0
+    for (const [lang, rawCount] of Object.entries(inventoryLangs)) {
+      const count = Number(rawCount) || 0
+      const l = lang.toLowerCase()
+      if (l === 'binary') continue
+      if (l === 'other' || l === 'gitignore' || l === 'txt') {
+        otherCount += count
+        continue
+      }
+      if (!graphLangKeys.has(l)) {
         list.push({
           lang,
           name: formatLanguageName(lang),
@@ -145,8 +269,19 @@ export default function CodeMapPanel({
         })
       }
     }
+
+    const sumLangs = list.reduce((sum, item) => sum + item.count, 0)
+    const effectiveOther = Math.max(otherCount, otherFilesCount - sumLangs)
+    if (effectiveOther > 0) {
+      list.push({
+        lang: 'other',
+        name: 'Other',
+        count: effectiveOther,
+      })
+    }
+
     return list
-  }, [coverage.inventoryOnlyLanguages, coverage.graphLanguages, inventory.byLanguage, graph.nodes])
+  }, [coverage.inventoryOnlyLanguages, coverage.graphLanguages, inventory.byLanguage, graph.nodes, otherFilesCount])
 
   const unsupportedSummaryText = useMemo(() => {
     if (!unsupportedList.length) return ''
@@ -154,25 +289,6 @@ export default function CodeMapPanel({
       .map((item) => `${item.name}: ${item.count} ${item.count === 1 ? 'file' : 'files'}, not mapped`)
       .join(', ')
   }, [unsupportedList])
-
-  const inventoryByLanguageList = useMemo(() => {
-    if (!inventory.byLanguage) return []
-    const map = new Map()
-    for (const [rawLang, rawCount] of Object.entries(inventory.byLanguage)) {
-      const count = Number(rawCount) || 0
-      const l = rawLang.toLowerCase()
-      let label = rawLang
-      if (l === 'binary') {
-        label = 'Binary'
-      } else if (l === 'other' || l === 'gitignore' || l === 'txt') {
-        label = 'Other'
-      } else if (l === 'svg') {
-        label = 'SVG'
-      }
-      map.set(label, (map.get(label) || 0) + count)
-    }
-    return Array.from(map.entries()).map(([label, count]) => ({ label, count }))
-  }, [inventory.byLanguage])
 
   // Filtered files for File Explorer
   const filteredNodes = useMemo(() => {
@@ -314,30 +430,178 @@ export default function CodeMapPanel({
               <strong className="codemap-card-value">{languageCount}</strong>
             </div>
 
-            <div className="codemap-card">
-              <span className="codemap-card-label">Entry Points</span>
-              <strong className="codemap-card-value">{entryPoints.length}</strong>
-            </div>
+            {entryPoints.length > 0 ? (
+              <button
+                type="button"
+                className="codemap-card codemap-card-button"
+                onClick={() => scrollToSection('heading-entry-points')}
+                aria-label={`View ${entryPoints.length} entry points`}
+              >
+                <span className="codemap-card-label">Entry Points</span>
+                <strong className="codemap-card-value">{entryPoints.length}</strong>
+              </button>
+            ) : (
+              <div className="codemap-card">
+                <span className="codemap-card-label">Entry Points</span>
+                <strong className="codemap-card-value">none</strong>
+              </div>
+            )}
 
-            <div className="codemap-card">
-              <span className="codemap-card-label">Cycles</span>
-              <strong className={`codemap-card-value ${cycles.length > 0 ? 'text-warn' : ''}`}>
-                {cycles.length}
-              </strong>
-            </div>
+            {cycles.length > 0 ? (
+              <button
+                type="button"
+                className="codemap-card codemap-card-button"
+                onClick={() => scrollToSection('heading-cycles')}
+                aria-label={`View ${cycles.length} circular dependencies`}
+              >
+                <span className="codemap-card-label">Cycles</span>
+                <strong className="codemap-card-value text-warn">{cycles.length}</strong>
+              </button>
+            ) : (
+              <div className="codemap-card">
+                <span className="codemap-card-label">Cycles</span>
+                <strong className="codemap-card-value">0</strong>
+              </div>
+            )}
 
-            <div className="codemap-card">
-              <span className="codemap-card-label">Orphans</span>
-              <strong className="codemap-card-value">{orphans.length}</strong>
-            </div>
+            {orphans.length > 0 ? (
+              <button
+                type="button"
+                className="codemap-card codemap-card-button"
+                onClick={() => scrollToSection('heading-orphans')}
+                aria-label={`View ${orphans.length} orphan files`}
+              >
+                <span className="codemap-card-label">Orphans</span>
+                <strong className="codemap-card-value">{orphans.length}</strong>
+              </button>
+            ) : (
+              <div className="codemap-card">
+                <span className="codemap-card-label">Orphans</span>
+                <strong className="codemap-card-value">0</strong>
+              </div>
+            )}
 
-            <div className="codemap-card">
-              <span className="codemap-card-label">Unresolved Imports</span>
-              <strong className={`codemap-card-value ${unresolvedCount > 0 ? 'text-warn' : ''}`}>
-                {unresolvedCount}
-              </strong>
-            </div>
+            {unresolvedCount > 0 ? (
+              <button
+                type="button"
+                className="codemap-card codemap-card-button"
+                onClick={toggleUnresolvedPanel}
+                aria-expanded={showUnresolvedPanel}
+                aria-controls="codemap-unresolved-panel"
+                aria-label={`Toggle unresolved imports panel (${unresolvedCount} unresolved)`}
+              >
+                <span className="codemap-card-label">Unresolved Imports</span>
+                <strong className="codemap-card-value text-warn">{unresolvedCount}</strong>
+              </button>
+            ) : (
+              <div className="codemap-card">
+                <span className="codemap-card-label">Unresolved Imports</span>
+                <strong className="codemap-card-value">none</strong>
+              </div>
+            )}
           </div>
+
+          {/* Unresolved Imports Panel */}
+          {showUnresolvedPanel && (
+            <div
+              id="codemap-unresolved-panel"
+              ref={unresolvedPanelRef}
+              className="codemap-unresolved-panel"
+              role="region"
+              aria-label="Unresolved imports breakdown"
+            >
+              <div className="codemap-unresolved-header">
+                <h4 className="codemap-unresolved-title">
+                  Unresolved imports ({displayedUnresolved.length})
+                </h4>
+                <label className="codemap-toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={includeNonProd}
+                    onChange={(e) => setIncludeNonProd(e.target.checked)}
+                    aria-label="Include tests, fixtures and playground"
+                  />
+                  <span>Include tests, fixtures and playground</span>
+                </label>
+              </div>
+
+              {unresolvedTruncated && (
+                <div className="codemap-truncated-notice" role="alert">
+                  Analysis capped at 500 unresolved imports. Additional imports omitted.
+                </div>
+              )}
+
+              {displayedUnresolved.length === 0 ? (
+                <p className="codemap-empty-note">No unresolved imports match the current filter.</p>
+              ) : (
+                <div className="codemap-reasons-container">
+                  {Object.entries(groupedByReason).map(([reasonKey, items]) => {
+                    if (items.length === 0) return null
+                    const meta = REASON_METADATA[reasonKey] || {
+                      title: reasonKey,
+                      explanation: 'unresolved import',
+                    }
+                    const isExpanded = Boolean(expandedReasons[reasonKey])
+                    const displayedItems = isExpanded ? items : items.slice(0, 30)
+                    const hasMore = items.length > 30
+
+                    return (
+                      <details key={`reason-grp-${reasonKey}`} open className="codemap-reason-group">
+                        <summary className="codemap-reason-summary">
+                          <strong>{meta.title} ({items.length})</strong>
+                          <span className="codemap-reason-explanation"> — {meta.explanation}</span>
+                        </summary>
+                        <div className="codemap-reason-table-wrap">
+                          <table className="codemap-unresolved-table">
+                            <thead>
+                              <tr>
+                                <th scope="col">Importing File</th>
+                                <th scope="col">Specifier</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {displayedItems.map((item, idx) => (
+                                <tr key={`unres-${reasonKey}-${item.from}-${item.specifier}-${idx}`}>
+                                  <td className="unresolved-from-cell">
+                                    <button
+                                      type="button"
+                                      className="codemap-link-button"
+                                      onClick={() => handleInspectFile(item.from)}
+                                      aria-label={`Inspect ${item.from}`}
+                                      title={item.from}
+                                    >
+                                      {item.from}
+                                    </button>
+                                  </td>
+                                  <td className="unresolved-specifier-cell">
+                                    <code className="unresolved-specifier-code font-mono" title={item.specifier}>
+                                      {item.specifier}
+                                    </code>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          {hasMore && (
+                            <div className="codemap-show-more-wrap">
+                              <button
+                                type="button"
+                                className="codemap-show-more-btn"
+                                onClick={() => toggleExpandReason(reasonKey)}
+                                aria-label={isExpanded ? `Show fewer ${meta.title}` : `Show all ${items.length} ${meta.title}`}
+                              >
+                                {isExpanded ? 'Show fewer' : `Show all ${items.length}`}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </details>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Approximate Analysis Notice */}
           <div className="codemap-approximate-notice" role="note" aria-label="Coverage overview">
@@ -458,7 +722,7 @@ export default function CodeMapPanel({
           </section>
 
           {/* SECTION 2: Circular Dependencies */}
-          <section className="codemap-section" aria-labelledby="heading-cycles">
+          <section className="codemap-section" aria-labelledby="heading-cycles" id="section-cycles">
             <h4 id="heading-cycles" className="codemap-section-title">
               Circular Dependencies ({cycles.length})
             </h4>
@@ -506,7 +770,7 @@ export default function CodeMapPanel({
           </section>
 
           {/* SECTION 3: Orphan Files */}
-          <section className="codemap-section" aria-labelledby="heading-orphans">
+          <section className="codemap-section" aria-labelledby="heading-orphans" id="section-orphans">
             <h4 id="heading-orphans" className="codemap-section-title">
               Orphan Files ({orphans.length})
             </h4>
@@ -527,6 +791,37 @@ export default function CodeMapPanel({
                         aria-label={`Inspect orphan file ${orphan}`}
                       >
                         {orphan}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
+
+          {/* SECTION: Entry Points */}
+          <section className="codemap-section" aria-labelledby="heading-entry-points" id="section-entry-points">
+            <h4 id="heading-entry-points" className="codemap-section-title">
+              Entry Points ({entryPoints.length})
+            </h4>
+            {entryPoints.length === 0 ? (
+              <p className="codemap-empty-note">No entry points detected.</p>
+            ) : (
+              <div className="codemap-entrypoints-wrap">
+                <p className="codemap-muted-note">
+                  Conventional roots, HTML files, binaries, scripts, and exported targets:
+                </p>
+                <ul className="codemap-tags-list">
+                  {entryPoints.map((ep) => (
+                    <li key={`entrypoint-${ep}`}>
+                      <button
+                        type="button"
+                        className="codemap-file-chip"
+                        onClick={() => handleInspectFile(ep)}
+                        aria-label={`Inspect entry point ${ep}`}
+                        title={ep}
+                      >
+                        {ep}
                       </button>
                     </li>
                   ))}
@@ -706,11 +1001,12 @@ export default function CodeMapPanel({
                         type="button"
                         key={node.path}
                         role="option"
+                        title={node.path}
                         aria-selected={node.path === activeFile}
                         className={`codemap-file-entry ${node.path === activeFile ? 'active' : ''}`}
                         onClick={() => setSelectedFile(node.path)}
                       >
-                        <span className="file-path">{node.path}</span>
+                        <span className="file-path" title={node.path}>{node.path}</span>
                         <span className="file-meta">
                           {node.isConfig && (
                             <span className="file-tag config-tag">config</span>

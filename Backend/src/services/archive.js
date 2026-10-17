@@ -1,3 +1,4 @@
+const path = require('path')
 const zlib = require('zlib')
 const tar = require('tar-stream')
 const { Readable, Transform } = require('stream')
@@ -71,65 +72,64 @@ function containsNullByte(buffer) {
 	return false
 }
 
+const EXTENSION_LANGUAGE_MAP = {
+	js: 'javascript',
+	mjs: 'javascript',
+	cjs: 'javascript',
+	jsx: 'jsx',
+	ts: 'typescript',
+	mts: 'typescript',
+	cts: 'typescript',
+	tsx: 'tsx',
+	vue: 'vue',
+	json: 'json',
+	md: 'markdown',
+	markdown: 'markdown',
+	html: 'html',
+	htm: 'html',
+	css: 'css',
+	scss: 'css',
+	sass: 'css',
+	less: 'css',
+	py: 'python',
+	go: 'go',
+	rs: 'rust',
+	java: 'java',
+	c: 'c',
+	h: 'c',
+	cpp: 'cpp',
+	hpp: 'cpp',
+	cc: 'cpp',
+	cxx: 'cpp',
+	rb: 'ruby',
+	php: 'php',
+	sh: 'shell',
+	bash: 'shell',
+	yml: 'yaml',
+	yaml: 'yaml',
+	sql: 'sql',
+	xml: 'xml',
+	svg: 'svg',
+	graphql: 'graphql',
+	gql: 'graphql',
+}
+
 function detectLanguage(filePath) {
-	const ext = filePath.split('.').pop().toLowerCase()
-	switch (ext) {
-		case 'js':
-		case 'mjs':
-		case 'cjs':
-			return 'javascript'
-		case 'jsx':
-			return 'jsx'
-		case 'ts':
-		case 'mts':
-		case 'cts':
-			return 'typescript'
-		case 'tsx':
-			return 'tsx'
-		case 'vue':
-			return 'vue'
-		case 'json':
-			return 'json'
-		case 'md':
-		case 'markdown':
-			return 'markdown'
-		case 'html':
-		case 'htm':
-			return 'html'
-		case 'css':
-		case 'scss':
-		case 'sass':
-		case 'less':
-			return 'css'
-		case 'py':
-			return 'python'
-		case 'go':
-			return 'go'
-		case 'rs':
-			return 'rust'
-		case 'java':
-			return 'java'
-		case 'c':
-		case 'h':
-			return 'c'
-		case 'cpp':
-		case 'hpp':
-		case 'cc':
-		case 'cxx':
-			return 'cpp'
-		case 'rb':
-			return 'ruby'
-		case 'php':
-			return 'php'
-		case 'sh':
-		case 'bash':
-			return 'shell'
-		case 'yml':
-		case 'yaml':
-			return 'yaml'
-		default:
-			return ext || 'other'
+	if (!filePath || typeof filePath !== 'string') return 'config/other'
+	const clean = filePath.replace(/\\/g, '/').trim()
+	const base = path.posix.basename(clean).toLowerCase()
+
+	// Extensionless files and dotfiles (.gitignore, _headers, license, etc.) map to "config/other"
+	if (base.startsWith('.') || !base.includes('.')) {
+		return 'config/other'
 	}
+
+	const ext = path.posix.extname(base).slice(1).toLowerCase()
+	if (!ext) {
+		return 'config/other'
+	}
+
+	return EXTENSION_LANGUAGE_MAP[ext] || ext
 }
 
 function stripTopLevelFolder(tarPath) {

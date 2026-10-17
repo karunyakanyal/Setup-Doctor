@@ -599,3 +599,455 @@ test('CodeMapPanel: Inventory -> By Language lists every inventoried file type l
   assert.equal(totalCount, data.inventory.analyzedFiles + 5)
 })
 
+test('CodeMapPanel: file explorer buttons and path elements have title attribute holding full path', () => {
+  const data = {
+    coverage: { graphFiles: 2, totalFiles: 2, analyzedFiles: 2 },
+    inventory: { totalFiles: 2, analyzedFiles: 2, byLanguage: { javascript: 2 } },
+    graph: {
+      nodes: [
+        { id: 0, path: 'packages/vite/src/node/server/index.ts', lang: 'typescript', size: 100, loc: 10, fanIn: 0, fanOut: 0, isEntry: true, isOrphan: false },
+        { id: 1, path: 'packages/vite/src/client/overlay.ts', lang: 'typescript', size: 80, loc: 8, fanIn: 0, fanOut: 0, isEntry: false, isOrphan: false },
+      ],
+      edges: [],
+      externals: [],
+    },
+    summary: { entryPoints: ['packages/vite/src/node/server/index.ts'], cycles: [], orphans: [], configFiles: [] },
+  }
+
+  const html = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+    }),
+  )
+
+  assert.ok(
+    html.includes('title="packages/vite/src/node/server/index.ts"'),
+    'File explorer button/span has title attribute holding full path',
+  )
+  assert.ok(
+    html.includes('title="packages/vite/src/client/overlay.ts"'),
+    'File explorer button/span has title attribute holding full path',
+  )
+})
+
+test('CodeMapPanel: header sentence lists every bucket so numbers add up (mapped code files + inventoried by type + "Other")', () => {
+  const data = {
+    coverage: {
+      graphFiles: 45,
+      totalFiles: 80,
+      analyzedFiles: 77,
+      skipped: { binary: 3 },
+      graphLanguages: { javascript: 45 },
+      inventoryOnlyLanguages: { python: 20, other: 12 },
+    },
+    inventory: {
+      totalFiles: 80,
+      analyzedFiles: 77,
+      skipped: { binary: 3 },
+      byLanguage: { javascript: 45, python: 20, other: 7, gitignore: 3, txt: 2, binary: 3 },
+    },
+    graph: {
+      nodes: [{ id: 0, path: 'src/main.js', lang: 'javascript', size: 100, loc: 10, fanIn: 0, fanOut: 0, isEntry: true, isOrphan: false }],
+      edges: [],
+      externals: [],
+    },
+    summary: { entryPoints: ['src/main.js'], cycles: [], orphans: [], configFiles: [] },
+  }
+
+  const html = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+    }),
+  )
+
+  // Header lists 45 code files; 32 other files (20 Python + 12 Other); 3 skipped
+  // 45 + 20 + 12 = 77 analyzed files!
+  assert.ok(html.includes('Mapped connections for 45 code files; 32 other files inventoried only; 3 skipped.'))
+  assert.ok(html.includes('Python: 20 files, not mapped, Other: 12 files, not mapped'))
+})
+
+test('CodeMapPanel: Languages card number strictly equals the number of languages listed under By Language', () => {
+  const data = {
+    coverage: {
+      graphFiles: 10,
+      totalFiles: 35,
+      analyzedFiles: 30,
+      skipped: { binary: 5 },
+      graphLanguages: { javascript: 10 },
+      inventoryOnlyLanguages: { python: 8, json: 5, other: 7 },
+    },
+    inventory: {
+      totalFiles: 35,
+      analyzedFiles: 30,
+      skipped: { binary: 5 },
+      byLanguage: {
+        javascript: 10,
+        python: 8,
+        json: 5,
+        binary: 5,
+        other: 4,
+        gitignore: 2,
+        txt: 1,
+      },
+    },
+    graph: {
+      nodes: [{ id: 0, path: 'src/main.js', lang: 'javascript', size: 100, loc: 10, fanIn: 0, fanOut: 0, isEntry: true, isOrphan: false }],
+      edges: [],
+      externals: [],
+    },
+    summary: { entryPoints: ['src/main.js'], cycles: [], orphans: [], configFiles: [] },
+  }
+
+  const html = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+    }),
+  )
+
+  // In By Language: javascript, python, json (3 languages), Binary, Other
+  // Languages card must be 3
+  const langCardMatch = html.match(/<span class="codemap-card-label">Languages<\/span>\s*<strong class="codemap-card-value">(\d+)<\/strong>/)
+  assert.ok(langCardMatch)
+  assert.equal(langCardMatch[1], '3')
+
+  // Count items listed in By Language list that are not Binary and not Other
+  const byLangSectionMatch = html.match(/<h5>By Language<\/h5>\s*<ul class="codemap-simple-list">([\s\S]*?)<\/ul>/)
+  assert.ok(byLangSectionMatch)
+  const items = [...byLangSectionMatch[1].matchAll(/<span>([^<]+)<\/span>/g)].map(m => m[1])
+  const languagesListed = items.filter(label => label !== 'Binary' && label !== 'Other')
+  assert.equal(languagesListed.length, 3)
+  assert.equal(Number(langCardMatch[1]), languagesListed.length, 'Languages card must equal the number of languages listed')
+})
+
+test('CodeMapPanel: unresolved imports stat card is a button when count > 0 with aria attributes, and toggles panel below stat cards', () => {
+  const data = {
+    coverage: { graphFiles: 1, totalFiles: 2, analyzedFiles: 2 },
+    inventory: { totalFiles: 2, analyzedFiles: 2, byLanguage: { javascript: 1 } },
+    graph: {
+      nodes: [{ id: 0, path: 'src/main.js', lang: 'javascript', size: 100, loc: 10, fanIn: 0, fanOut: 0, isEntry: true, isOrphan: false }],
+      edges: [],
+      externals: [],
+    },
+    summary: {
+      entryPoints: ['src/main.js'],
+      cycles: [],
+      orphans: [],
+      unresolvedCount: 3,
+      unresolvedImports: [
+        { from: 'src/main.js', specifier: './missing', reason: 'relative-not-found', category: 'production' },
+      ],
+    },
+  }
+
+  // When panel is closed (default)
+  const htmlClosed = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+      initialShowUnresolvedPanel: false,
+    }),
+  )
+
+  assert.ok(
+    htmlClosed.includes('aria-expanded="false"'),
+    'Unresolved card is a button with aria-expanded="false"',
+  )
+  assert.ok(
+    htmlClosed.includes('aria-controls="codemap-unresolved-panel"'),
+    'Unresolved card is a button with aria-controls="codemap-unresolved-panel"',
+  )
+  assert.equal(htmlClosed.includes('id="codemap-unresolved-panel"'), false, 'Unresolved panel is not rendered when closed')
+
+  // When panel is open
+  const htmlOpen = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+      initialShowUnresolvedPanel: true,
+    }),
+  )
+
+  assert.ok(
+    htmlOpen.includes('aria-expanded="true"'),
+    'Unresolved card button has aria-expanded="true" when panel is open',
+  )
+  assert.ok(
+    htmlOpen.includes('id="codemap-unresolved-panel"'),
+    'Unresolved panel is rendered when open',
+  )
+})
+
+test('CodeMapPanel: zero-count unresolved imports card is not clickable (div) and displays "none"', () => {
+  const data = {
+    coverage: { graphFiles: 1, totalFiles: 1, analyzedFiles: 1 },
+    inventory: { totalFiles: 1, analyzedFiles: 1, byLanguage: { javascript: 1 } },
+    graph: {
+      nodes: [{ id: 0, path: 'src/main.js', lang: 'javascript', size: 100, loc: 10, fanIn: 0, fanOut: 0, isEntry: true, isOrphan: false }],
+      edges: [],
+      externals: [],
+    },
+    summary: {
+      entryPoints: ['src/main.js'],
+      cycles: [],
+      orphans: [],
+      unresolvedCount: 0,
+      unresolvedImports: [],
+    },
+  }
+
+  const html = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+    }),
+  )
+
+  assert.equal(
+    html.includes('aria-controls="codemap-unresolved-panel"'),
+    false,
+    'Zero-count unresolved card is not a button with aria-controls',
+  )
+
+  const cardMatch = html.match(/<div class="codemap-card">\s*<span class="codemap-card-label">Unresolved Imports<\/span>\s*<strong class="codemap-card-value">none<\/strong>\s*<\/div>/)
+  assert.ok(cardMatch, 'Zero-count card renders as a div with value "none"')
+})
+
+test('CodeMapPanel: unresolved imports panel displays title with count, truncated notice when capped, and groups by reason with explanations', () => {
+  const data = {
+    coverage: { graphFiles: 1, totalFiles: 1, analyzedFiles: 1 },
+    inventory: { totalFiles: 1, analyzedFiles: 1, byLanguage: { javascript: 1 } },
+    graph: {
+      nodes: [{ id: 0, path: 'src/main.js', lang: 'javascript', size: 100, loc: 10, fanIn: 0, fanOut: 0, isEntry: true, isOrphan: false }],
+      edges: [],
+      externals: [],
+    },
+    unresolvedTruncated: true,
+    unresolvedCount: 5,
+    unresolvedImports: [
+      { from: 'src/main.js', specifier: './relative-missing', reason: 'relative-not-found', category: 'production' },
+      { from: 'src/main.js', specifier: './dir-missing', reason: 'directory-index-not-found', category: 'production' },
+      { from: 'src/main.js', specifier: '@/components/foo', reason: 'alias-unresolved', category: 'production' },
+      { from: 'src/main.js', specifier: '#subpath/bar', reason: 'package-imports-unresolved', category: 'production' },
+      { from: 'src/main.js', specifier: 'strange?query', reason: 'other', category: 'production' },
+    ],
+    summary: {
+      entryPoints: ['src/main.js'],
+      cycles: [],
+      orphans: [],
+      unresolvedCount: 5,
+    },
+  }
+
+  const html = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+      initialShowUnresolvedPanel: true,
+    }),
+  )
+
+  assert.ok(html.includes('Unresolved imports (5)'), 'Panel has title with count')
+  assert.ok(
+    html.includes('Analysis capped at 500 unresolved imports. Additional imports omitted.'),
+    'Truncated notice is rendered',
+  )
+
+  assert.ok(html.includes('Relative not found (1)'))
+  assert.ok(html.includes('relative path does not exist on disk'))
+  assert.ok(html.includes('Directory index not found (1)'))
+  assert.ok(html.includes('directory exists or was specified, but directory index file (index.js/ts) was not found'))
+  assert.ok(html.includes('Alias unresolved (1)'))
+  assert.ok(html.includes('alias could not be read from tsconfig, vite or webpack config'))
+  assert.ok(html.includes('Package imports unresolved (1)'))
+  assert.ok(html.includes('subpath import (#) could not be resolved from package.json imports'))
+  assert.ok(html.includes('Other unresolved imports (1)'))
+  assert.ok(html.includes('unresolved import or unrecognized module specifier'))
+
+  assert.ok(html.includes('class="unresolved-specifier-code font-mono"'))
+  assert.ok(html.includes('title="./relative-missing"'))
+  assert.ok(html.includes('aria-label="Inspect src/main.js"'))
+})
+
+test('CodeMapPanel: unresolved imports panel filter toggle excludes non-production by default, includes when checked', () => {
+  const data = {
+    coverage: { graphFiles: 1, totalFiles: 1, analyzedFiles: 1 },
+    inventory: { totalFiles: 1, analyzedFiles: 1, byLanguage: { javascript: 1 } },
+    graph: {
+      nodes: [{ id: 0, path: 'src/main.js', lang: 'javascript', size: 100, loc: 10, fanIn: 0, fanOut: 0, isEntry: true, isOrphan: false }],
+      edges: [],
+      externals: [],
+    },
+    unresolvedCount: 2,
+    unresolvedImports: [
+      { from: 'src/prod.js', specifier: './prod-dep', reason: 'relative-not-found', category: 'production' },
+      { from: 'test/test.js', specifier: './test-dep', reason: 'relative-not-found', category: 'non-production' },
+    ],
+    summary: {
+      entryPoints: ['src/main.js'],
+      cycles: [],
+      orphans: [],
+      unresolvedCount: 2,
+    },
+  }
+
+  const htmlFiltered = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+      initialShowUnresolvedPanel: true,
+      initialIncludeNonProd: false,
+    }),
+  )
+
+  assert.ok(htmlFiltered.includes('Unresolved imports (1)'))
+  assert.ok(htmlFiltered.includes('src/prod.js'))
+  assert.equal(htmlFiltered.includes('test/test.js'), false, 'Non-production import excluded by default')
+
+  const htmlAll = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+      initialShowUnresolvedPanel: true,
+      initialIncludeNonProd: true,
+    }),
+  )
+
+  assert.ok(htmlAll.includes('Unresolved imports (2)'))
+  assert.ok(htmlAll.includes('src/prod.js'))
+  assert.ok(htmlAll.includes('test/test.js'), 'Non-production import included when toggle is on')
+})
+
+test('CodeMapPanel: reason groups with >30 rows show "Show all N" button, and show all rows when expanded', () => {
+  const items = []
+  for (let i = 1; i <= 35; i++) {
+    items.push({
+      from: `src/file${i}.js`,
+      specifier: `./missing-${i}`,
+      reason: 'relative-not-found',
+      category: 'production',
+    })
+  }
+
+  const data = {
+    coverage: { graphFiles: 1, totalFiles: 1, analyzedFiles: 1 },
+    inventory: { totalFiles: 1, analyzedFiles: 1, byLanguage: { javascript: 1 } },
+    graph: {
+      nodes: [{ id: 0, path: 'src/main.js', lang: 'javascript', size: 100, loc: 10, fanIn: 0, fanOut: 0, isEntry: true, isOrphan: false }],
+      edges: [],
+      externals: [],
+    },
+    unresolvedCount: 35,
+    unresolvedImports: items,
+    summary: {
+      entryPoints: ['src/main.js'],
+      cycles: [],
+      orphans: [],
+      unresolvedCount: 35,
+    },
+  }
+
+  const htmlCollapsed = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+      initialShowUnresolvedPanel: true,
+      initialExpandedReasons: {},
+    }),
+  )
+
+  assert.ok(htmlCollapsed.includes('Show all 35'), 'Displays "Show all 35" button')
+  assert.ok(htmlCollapsed.includes('src/file30.js'), '30th row is rendered')
+  assert.equal(htmlCollapsed.includes('src/file31.js'), false, '31st row is omitted when not expanded')
+
+  const htmlExpanded = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data,
+      status: 'success',
+      onRerun: () => {},
+      initialShowUnresolvedPanel: true,
+      initialExpandedReasons: { 'relative-not-found': true },
+    }),
+  )
+
+  assert.ok(htmlExpanded.includes('Show fewer'), 'Displays "Show fewer" button when expanded')
+  assert.ok(htmlExpanded.includes('src/file31.js'), '31st row is rendered when expanded')
+  assert.ok(htmlExpanded.includes('src/file35.js'), '35th row is rendered when expanded')
+})
+
+test('CodeMapPanel: Entry Points, Cycles, and Orphans stat cards are buttons when count > 0 and divs when 0', () => {
+  const dataWithCounts = {
+    coverage: { graphFiles: 2, totalFiles: 2, analyzedFiles: 2 },
+    inventory: { totalFiles: 2, analyzedFiles: 2, byLanguage: { javascript: 2 } },
+    graph: {
+      nodes: [
+        { id: 0, path: 'src/entry.js', lang: 'javascript', size: 100, loc: 10, fanIn: 0, fanOut: 0, isEntry: true, isOrphan: false },
+        { id: 1, path: 'src/orphan.js', lang: 'javascript', size: 80, loc: 8, fanIn: 0, fanOut: 0, isEntry: false, isOrphan: true },
+      ],
+      edges: [],
+      externals: [],
+    },
+    summary: {
+      entryPoints: ['src/entry.js'],
+      cycles: [['src/a.js', 'src/b.js']],
+      orphans: ['src/orphan.js'],
+    },
+  }
+
+  const htmlButtons = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data: dataWithCounts,
+      status: 'success',
+      onRerun: () => {},
+    }),
+  )
+
+  assert.ok(htmlButtons.includes('aria-label="View 1 entry points"'))
+  assert.ok(htmlButtons.includes('aria-label="View 1 circular dependencies"'))
+  assert.ok(htmlButtons.includes('aria-label="View 1 orphan files"'))
+
+  const dataZero = {
+    coverage: { graphFiles: 1, totalFiles: 1, analyzedFiles: 1 },
+    inventory: { totalFiles: 1, analyzedFiles: 1, byLanguage: { javascript: 1 } },
+    graph: {
+      nodes: [{ id: 0, path: 'src/main.js', lang: 'javascript', size: 100, loc: 10, fanIn: 0, fanOut: 0, isEntry: false, isOrphan: false }],
+      edges: [],
+      externals: [],
+    },
+    summary: {
+      entryPoints: [],
+      cycles: [],
+      orphans: [],
+    },
+  }
+
+  const htmlZero = renderToStaticMarkup(
+    React.createElement(CodeMapPanel, {
+      data: dataZero,
+      status: 'success',
+      onRerun: () => {},
+    }),
+  )
+
+  assert.equal(htmlZero.includes('aria-label="View 0 entry points"'), false)
+  assert.equal(htmlZero.includes('aria-label="View 0 circular dependencies"'), false)
+  assert.equal(htmlZero.includes('aria-label="View 0 orphan files"'), false)
+
+  assert.ok(htmlZero.includes('<span class="codemap-card-label">Entry Points</span><strong class="codemap-card-value">none</strong>'))
+  assert.ok(htmlZero.includes('<span class="codemap-card-label">Cycles</span><strong class="codemap-card-value">0</strong>'))
+  assert.ok(htmlZero.includes('<span class="codemap-card-label">Orphans</span><strong class="codemap-card-value">0</strong>'))
+})
+
+

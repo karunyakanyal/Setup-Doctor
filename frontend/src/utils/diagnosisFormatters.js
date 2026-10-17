@@ -431,7 +431,10 @@ export function createCodeMapSummary(data) {
     entryPointsCount: (data.summary?.entryPoints || []).length,
     cyclesCount: (data.summary?.cycles || []).length,
     orphansCount: (data.summary?.orphans || []).length,
-    unresolvedCount: data.summary?.unresolvedCount ?? 0,
+    unresolvedCount: data.summary?.unresolvedCount ?? data.unresolvedCount ?? 0,
+    unresolvedImports: data.unresolvedImports || data.summary?.unresolvedImports || [],
+    unresolvedTruncated: data.unresolvedTruncated ?? data.summary?.unresolvedTruncated ?? false,
+    unresolvedByReason: data.summary?.unresolvedByReason || null,
     cycles: (data.summary?.cycles || []).slice(0, 10),
     orphans: (data.summary?.orphans || []).slice(0, 20),
     topHotspots: {
@@ -441,3 +444,77 @@ export function createCodeMapSummary(data) {
     coverage: data.coverage || null,
   }
 }
+
+/**
+ * Counts repositories with a successful analysis (has a valid numeric score).
+ * Repositories whose diagnostics failed (no analysis record with a score) are not counted.
+ */
+export function countAnalyzedProjects(projects = [], analysisHistory = []) {
+  const scoredRepos = new Set()
+
+  if (Array.isArray(projects)) {
+    for (const p of projects) {
+      const repoKey = p?.repository?.fullName || p?.repository?.name
+      if (!repoKey) continue
+      if (typeof p?.health?.score === 'number' && !Number.isNaN(p.health.score)) {
+        scoredRepos.add(repoKey)
+      }
+    }
+  }
+
+  if (Array.isArray(analysisHistory)) {
+    for (const h of analysisHistory) {
+      const repoKey = h?.repository?.fullName || h?.repository?.name
+      if (!repoKey) continue
+      if (typeof h?.health?.score === 'number' && !Number.isNaN(h.health.score)) {
+        scoredRepos.add(repoKey)
+      }
+    }
+  }
+
+  return scoredRepos.size
+}
+
+/**
+ * Returns a short, readable failure reason for failed diagnostics.
+ */
+export function getShortFailureReason(error) {
+  if (!error) return 'Analysis failed'
+  if (typeof error === 'string') {
+    if (/no package\.json/i.test(error)) return 'No package.json'
+    if (/rate limit/i.test(error)) return 'Rate limit exceeded'
+    if (/not found/i.test(error)) return 'Repository not found'
+    if (/timeout|timed out/i.test(error)) return 'Request timed out'
+    if (/network/i.test(error)) return 'Network error'
+    return error.length <= 35 ? error : 'Check failed'
+  }
+  if (error.code === 'NO_PACKAGE_JSON') {
+    return 'No package.json'
+  }
+  if (error.status === 429 || /rate limit/i.test(error.message || '')) {
+    return 'Rate limit exceeded'
+  }
+  if (error.status === 404 || /not found/i.test(error.message || '')) {
+    return 'Repository not found'
+  }
+  if (error.status === 403 || /forbidden|access denied/i.test(error.message || '')) {
+    return 'Access denied'
+  }
+  if (/no package\.json/i.test(error.message || '')) {
+    return 'No package.json'
+  }
+  if (error.code && typeof error.code === 'string') {
+    const formatted = error.code.replace(/_/g, ' ').toLowerCase()
+    return formatted.charAt(0).toUpperCase() + formatted.slice(1)
+  }
+  if (error.backendMessage && typeof error.backendMessage === 'string' && error.backendMessage.length <= 35) {
+    return error.backendMessage
+  }
+  if (error.message && typeof error.message === 'string') {
+    if (/timeout|timed out/i.test(error.message)) return 'Request timed out'
+    if (/network/i.test(error.message)) return 'Network error'
+    if (error.message.length <= 35) return error.message
+  }
+  return 'Request failed'
+}
+
