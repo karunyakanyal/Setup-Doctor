@@ -1,5 +1,7 @@
 import { useState, useMemo, useRef } from 'react'
 import { getImpact, getFileConnections, getCycleOverstatedImpact } from '../../utils/graphImpact.js'
+import { isConfigFile } from '../../utils/configFiles.js'
+import { classifyFileType, groupLanguages } from '../../utils/languages.js'
 import NeighborhoodGraph from './NeighborhoodGraph.jsx'
 
 const REASON_METADATA = {
@@ -32,41 +34,75 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function formatLanguageName(lang) {
-  if (!lang) return ''
-  const map = {
-    js: 'JavaScript',
-    javascript: 'JavaScript',
-    ts: 'TypeScript',
-    typescript: 'TypeScript',
-    jsx: 'JSX',
-    tsx: 'TSX',
-    vue: 'Vue',
-    py: 'Python',
-    python: 'Python',
-    rb: 'Ruby',
-    ruby: 'Ruby',
-    go: 'Go',
-    rs: 'Rust',
-    rust: 'Rust',
-    cpp: 'C++',
-    c: 'C',
-    java: 'Java',
-    php: 'PHP',
-    sh: 'Shell',
-    shell: 'Shell',
-    html: 'HTML',
-    css: 'CSS',
-    json: 'JSON',
-    yaml: 'YAML',
-    md: 'Markdown',
-    markdown: 'Markdown',
-    svg: 'SVG',
-    sql: 'SQL',
-    xml: 'XML',
-    graphql: 'GraphQL',
-  }
-  return map[lang.toLowerCase()] || (lang.charAt(0).toUpperCase() + lang.slice(1))
+function PaginatedList({
+  items = [],
+  limit = 30,
+  renderItem,
+  listClassName = '',
+  listTag: ListTag = 'ul',
+  label = 'items',
+}) {
+  const [expanded, setExpanded] = useState(false)
+  if (!items || items.length === 0) return null
+
+  const displayed = expanded ? items : items.slice(0, limit)
+  const hasMore = items.length > limit
+
+  return (
+    <div className="codemap-paginated-wrap">
+      <ListTag className={listClassName}>
+        {displayed.map((item, idx) => renderItem(item, idx))}
+      </ListTag>
+      {hasMore && (
+        <div className="codemap-show-more-wrap">
+          <button
+            type="button"
+            className="codemap-show-more-btn"
+            onClick={() => setExpanded((prev) => !prev)}
+            aria-label={expanded ? `Show fewer ${label}` : `Show all ${items.length} ${label}`}
+          >
+            {expanded ? 'Show fewer' : `Show all ${items.length}`}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PaginatedTableRows({
+  items = [],
+  limit = 30,
+  renderRow,
+  label = 'rows',
+  colSpan = 3,
+}) {
+  const [expanded, setExpanded] = useState(false)
+  if (!items || items.length === 0) return null
+
+  const displayed = expanded ? items : items.slice(0, limit)
+  const hasMore = items.length > limit
+
+  return (
+    <>
+      {displayed.map((item, idx) => renderRow(item, idx))}
+      {hasMore && (
+        <tr className="codemap-show-more-row">
+          <td colSpan={colSpan}>
+            <div className="codemap-show-more-wrap">
+              <button
+                type="button"
+                className="codemap-show-more-btn"
+                onClick={() => setExpanded((prev) => !prev)}
+                aria-label={expanded ? `Show fewer ${label}` : `Show all ${items.length} ${label}`}
+              >
+                {expanded ? 'Show fewer' : `Show all ${items.length}`}
+              </button>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  )
 }
 
 export default function CodeMapPanel({
@@ -81,14 +117,6 @@ export default function CodeMapPanel({
   const isScanning = status === 'scanning'
   const isError = status === 'error' && Boolean(error)
   const hasData = Boolean(data && data.graph && data.inventory)
-
-  // Default selected file for file explorer
-  const defaultFile = useMemo(() => {
-    if (!data?.graph?.nodes?.length) return ''
-    const topImpact = data.summary?.hotspots?.byTransitiveImpact?.[0]?.path
-    const topFanIn = data.summary?.hotspots?.byFanIn?.[0]?.path
-    return topImpact || topFanIn || data.graph.nodes[0].path || ''
-  }, [data])
 
   const [selectedFile, setSelectedFile] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
@@ -138,6 +166,30 @@ export default function CodeMapPanel({
   const summary = useMemo(() => data?.summary || {}, [data?.summary])
   const graph = useMemo(() => data?.graph || { nodes: [], edges: [], externals: [] }, [data?.graph])
 
+  const hasNonProdFiles = useMemo(() => {
+    if (graph.nodes?.some((n) => n.category === 'non-production' || Boolean(n.isTest))) {
+      return true
+    }
+    if (summary.nonProduction) {
+      const np = summary.nonProduction
+      if (
+        (np.packages || 0) > 0 ||
+        (np.cycles || 0) > 0 ||
+        (np.orphans || 0) > 0 ||
+        (np.unresolved || 0) > 0 ||
+        (np.declaredDependencies || 0) > 0 ||
+        (np.declaredButUnused || 0) > 0 ||
+        (np.usedButUndeclared || 0) > 0
+      ) {
+        return true
+      }
+    }
+    if (summary.packages?.some((p) => Boolean(p.isNonProduction))) {
+      return true
+    }
+    return false
+  }, [graph.nodes, summary.nonProduction, summary.packages])
+
   const skippedCount = useMemo(() => {
     const skippedObj = coverage.skipped || inventory.skipped || {}
     return Object.values(skippedObj).reduce((sum, count) => sum + (Number(count) || 0), 0)
@@ -149,57 +201,87 @@ export default function CodeMapPanel({
 
   const otherFilesCount = Math.max(0, analyzedFiles - graphFilesCount)
 
-  const inventoryByLanguageList = useMemo(() => {
-    if (!inventory.byLanguage) return []
-    const map = new Map()
-    for (const [rawLang, rawCount] of Object.entries(inventory.byLanguage)) {
-      const count = Number(rawCount) || 0
-      const l = rawLang.toLowerCase()
-      let label = rawLang
-      if (l === 'binary') {
-        label = 'Binary'
-      } else if (l === 'other' || l === 'gitignore' || l === 'txt') {
-        label = 'Other'
-      } else if (l === 'svg') {
-        label = 'SVG'
-      }
-      map.set(label, (map.get(label) || 0) + count)
-    }
-    return Array.from(map.entries()).map(([label, count]) => ({ label, count }))
+  // Language inventory parsing using shared allowlist in languages.js:
+  // - Languages: PROGRAMMING allowlist with count > 0
+  // - Data and docs: DATA_AND_DOCS allowlist with count > 0
+  // - Other file types: anything else (never title-cased)
+  const {
+    languages: realLanguages,
+    dataAndDocs,
+    otherFileTypes,
+    programmingCount,
+  } = useMemo(() => {
+    return groupLanguages(inventory.byLanguage || {})
   }, [inventory.byLanguage])
 
+  // Languages card counts only PROGRAMMING entries with count > 0
   const languageCount = useMemo(() => {
-    const nonOtherNonBinary = inventoryByLanguageList.filter(
-      (item) => item.label !== 'Binary' && item.label !== 'Other'
-    )
     if (inventory.byLanguage && Object.keys(inventory.byLanguage).length > 0) {
-      return nonOtherNonBinary.length
+      return programmingCount
     }
-    const rawKeys = new Set()
+    const combined = {}
     if (coverage.graphLanguages) {
-      for (const k of Object.keys(coverage.graphLanguages)) {
-        rawKeys.add(k.toLowerCase())
+      for (const [k, v] of Object.entries(coverage.graphLanguages)) {
+        combined[k] = (combined[k] || 0) + (Number(v) || 0)
       }
     }
     if (coverage.inventoryOnlyLanguages) {
-      for (const k of Object.keys(coverage.inventoryOnlyLanguages)) {
-        rawKeys.add(k.toLowerCase())
+      for (const [k, v] of Object.entries(coverage.inventoryOnlyLanguages)) {
+        combined[k] = (combined[k] || 0) + (Number(v) || 0)
       }
     }
-    return Array.from(rawKeys).filter((l) => {
-      return l !== 'binary' && l !== 'other' && l !== 'gitignore' && l !== 'txt'
-    }).length
-  }, [inventoryByLanguageList, inventory.byLanguage, coverage.graphLanguages, coverage.inventoryOnlyLanguages])
+    return groupLanguages(combined).programmingCount
+  }, [programmingCount, inventory.byLanguage, coverage.graphLanguages, coverage.inventoryOnlyLanguages])
 
   const entryPoints = summary.entryPoints || []
   const cycles = useMemo(() => summary.cycles || [], [summary.cycles])
+  const typeOnlyCycles = useMemo(() => summary.typeOnlyCycles || [], [summary.typeOnlyCycles])
   const configFiles = useMemo(() => summary.configFiles || [], [summary.configFiles])
-  const orphans = (summary.orphans || []).filter((p) => !configFiles.includes(p))
-  const unresolvedCount = summary.unresolvedCount ?? data?.unresolvedCount ?? (data?.unresolvedImports?.length ?? 0)
+  const orphans = useMemo(
+    () => (summary.orphans || []).filter((p) => !configFiles.includes(p)),
+    [summary.orphans, configFiles],
+  )
+
+  // Non-production counters from summary.nonProduction
+  const nonProdCycles = summary.nonProduction?.cycles ?? 0
+  const nonProdOrphans = summary.nonProduction?.orphans ?? 0
 
   const rawUnresolvedImports = useMemo(() => {
     return data?.unresolvedImports || summary?.unresolvedImports || data?.graph?.unresolvedImports || []
   }, [data, summary])
+
+  const nonProdUnresolved = summary.nonProduction?.unresolved ?? rawUnresolvedImports.filter((i) => i.category === 'non-production').length
+  const prodUnresolved = rawUnresolvedImports.length > 0
+    ? rawUnresolvedImports.filter((i) => i.category !== 'non-production').length
+    : Math.max(0, (summary.unresolvedCount ?? data?.unresolvedCount ?? 0) - nonProdUnresolved)
+
+  const displayedCyclesCount = includeNonProd ? (cycles.length + nonProdCycles) : cycles.length
+  const cyclesSuffix = (!includeNonProd && nonProdCycles > 0) ? `(+${nonProdCycles.toLocaleString()} in tests/fixtures)` : ''
+
+  const displayedOrphansCount = includeNonProd ? (orphans.length + nonProdOrphans) : orphans.length
+  const orphansSuffix = (!includeNonProd && nonProdOrphans > 0) ? `(+${nonProdOrphans.toLocaleString()} in tests/fixtures)` : ''
+
+  const displayedUnresolvedCount = includeNonProd ? (prodUnresolved + nonProdUnresolved) : prodUnresolved
+  const unresolvedSuffix = (!includeNonProd && nonProdUnresolved > 0) ? `(+${nonProdUnresolved.toLocaleString()} in tests/fixtures)` : ''
+
+  const displayedCycles = useMemo(() => {
+    if (includeNonProd) {
+      if (summary.allCycles) return summary.allCycles
+      if (summary.nonProdCycles) return [...cycles, ...summary.nonProdCycles]
+      return cycles
+    }
+    return cycles
+  }, [includeNonProd, cycles, summary.allCycles, summary.nonProdCycles])
+
+  const displayedOrphansList = useMemo(() => {
+    if (includeNonProd) {
+      if (summary.allOrphans) return summary.allOrphans
+      if (summary.nonProdOrphans) return [...orphans, ...summary.nonProdOrphans]
+      if (summary.nonProduction?.orphanFiles) return [...orphans, ...summary.nonProduction.orphanFiles]
+      return orphans
+    }
+    return orphans
+  }, [includeNonProd, orphans, summary.allOrphans, summary.nonProdOrphans, summary.nonProduction])
 
   const unresolvedTruncated = Boolean(
     data?.unresolvedTruncated ||
@@ -228,14 +310,24 @@ export default function CodeMapPanel({
     }
     return groups
   }, [displayedUnresolved])
-  const hotspots = useMemo(() => {
-    const raw = summary.hotspots || { byFanIn: [], byTransitiveImpact: [] }
-    return {
-      byFanIn: (raw.byFanIn || []).filter((item) => !configFiles.includes(item.path)),
-      byTransitiveImpact: (raw.byTransitiveImpact || []).filter((item) => !configFiles.includes(item.path)),
-    }
-  }, [summary.hotspots, configFiles])
 
+  const displayedHotspots = useMemo(() => {
+    const raw = summary.hotspots || { byFanIn: [], byTransitiveImpact: [] }
+    const filterFn = (item) => {
+      if (configFiles.includes(item.path)) return false
+      if (!includeNonProd) {
+        const node = graph.nodes?.find((n) => n.path === item.path)
+        if (node?.category === 'non-production') return false
+      }
+      return true
+    }
+    return {
+      byFanIn: (raw.byFanIn || []).filter(filterFn),
+      byTransitiveImpact: (raw.byTransitiveImpact || []).filter(filterFn),
+    }
+  }, [summary.hotspots, configFiles, includeNonProd, graph.nodes])
+
+  // Unsupported list for approximate analysis box
   const unsupportedList = useMemo(() => {
     const list = []
     const raw = coverage.inventoryOnlyLanguages || {}
@@ -257,14 +349,15 @@ export default function CodeMapPanel({
       const count = Number(rawCount) || 0
       const l = lang.toLowerCase()
       if (l === 'binary') continue
-      if (l === 'other' || l === 'gitignore' || l === 'txt') {
+      if (l === 'other' || l === 'gitignore' || l === 'txt' || l === 'config/other' || ((lang.includes('/') || lang.includes('\\')) && l !== 'config/other')) {
         otherCount += count
         continue
       }
       if (!graphLangKeys.has(l)) {
+        const classified = classifyFileType(lang)
         list.push({
           lang,
-          name: formatLanguageName(lang),
+          name: classified.label,
           count,
         })
       }
@@ -292,16 +385,30 @@ export default function CodeMapPanel({
 
   // Filtered files for File Explorer
   const filteredNodes = useMemo(() => {
-    if (!graph.nodes) return []
+    let list = graph.nodes || []
+    if (!includeNonProd) {
+      list = list.filter((n) => n.category !== 'non-production')
+    }
     const q = searchQuery.trim().toLowerCase()
-    if (!q) return graph.nodes
-    return graph.nodes.filter((node) => node.path.toLowerCase().includes(q))
-  }, [graph.nodes, searchQuery])
+    if (!q) return list
+    return list.filter((node) => node.path.toLowerCase().includes(q))
+  }, [graph.nodes, includeNonProd, searchQuery])
+
+  // Default selected file for file explorer
+  const defaultFile = useMemo(() => {
+    if (!graph.nodes?.length) return ''
+    const candidateNodes = includeNonProd ? graph.nodes : graph.nodes.filter((n) => n.category !== 'non-production')
+    if (!candidateNodes.length) return graph.nodes[0]?.path || ''
+    const topImpact = summary.hotspots?.byTransitiveImpact?.find((h) => candidateNodes.some((n) => n.path === h.path))?.path
+    const topFanIn = summary.hotspots?.byFanIn?.find((h) => candidateNodes.some((n) => n.path === h.path))?.path
+    return topImpact || topFanIn || candidateNodes[0].path || ''
+  }, [graph.nodes, includeNonProd, summary.hotspots])
 
   // Selected file details
   const activeFile = (selectedFile && graph.nodes?.some((node) => node.path === selectedFile))
     ? selectedFile
     : defaultFile || (filteredNodes[0] ? filteredNodes[0].path : '')
+
   const activeNode = useMemo(() => {
     return graph.nodes?.find((node) => node.path === activeFile) || null
   }, [graph.nodes, activeFile])
@@ -318,6 +425,189 @@ export default function CodeMapPanel({
     return getCycleOverstatedImpact(graph, cycles, activeFile)
   }, [graph, cycles, activeFile])
 
+  // Neighborhood graph visible nodes filtered by includeNonProd so it never disagrees with the toggle
+  const activeImporters = useMemo(() => {
+    if (includeNonProd) return fileConnections.importers
+    return fileConnections.importers.filter((p) => {
+      const n = graph.nodes?.find((node) => node.path === p)
+      return n?.category !== 'non-production'
+    })
+  }, [fileConnections.importers, includeNonProd, graph.nodes])
+
+  const activeImports = useMemo(() => {
+    if (includeNonProd) return fileConnections.imports
+    return fileConnections.imports.filter((p) => {
+      const n = graph.nodes?.find((node) => node.path === p)
+      return n?.category !== 'non-production'
+    })
+  }, [fileConnections.imports, includeNonProd, graph.nodes])
+
+  // Active packages based on non-production toggle
+  const activePackages = useMemo(() => {
+    if (!Array.isArray(summary.packages) || summary.packages.length === 0) return []
+    if (includeNonProd) return summary.packages
+    return summary.packages.filter((pkg) => !pkg.isNonProduction)
+  }, [summary.packages, includeNonProd])
+
+  // Partition packages into those with issues and those with 0 issues
+  const { packagesWithIssues, zeroIssuePackages } = useMemo(() => {
+    const withIssues = []
+    const zeroIssues = []
+    for (const pkg of activePackages) {
+      const unused = pkg.declaredButUnused?.length || 0
+      const undeclared = pkg.usedButUndeclared?.length || 0
+      if (unused + undeclared > 0) {
+        withIssues.push(pkg)
+      } else {
+        zeroIssues.push(pkg)
+      }
+    }
+    // Sort packages by issue count, highest first
+    withIssues.sort((a, b) => {
+      const aCount = (a.declaredButUnused?.length || 0) + (a.usedButUndeclared?.length || 0)
+      const bCount = (b.declaredButUnused?.length || 0) + (b.usedButUndeclared?.length || 0)
+      return bCount - aCount
+    })
+    return { packagesWithIssues: withIssues, zeroIssuePackages: zeroIssues }
+  }, [activePackages])
+
+  const [showAllPackages, setShowAllPackages] = useState(false)
+  const displayedIssuesPackages = showAllPackages
+    ? packagesWithIssues
+    : packagesWithIssues.slice(0, 5)
+
+  const [showZeroIssues, setShowZeroIssues] = useState(false)
+  const [packageOpenOverrides, setPackageOpenOverrides] = useState({})
+
+  const handleTogglePackage = (pkgKey, isOpen) => {
+    setPackageOpenOverrides((prev) => ({ ...prev, [pkgKey]: isOpen }))
+  }
+
+  const handleExpandAllPackages = () => {
+    const next = { aggregate: true }
+    for (let i = 0; i < activePackages.length; i++) {
+      const pkg = activePackages[i]
+      const key = pkg.path || (pkg.dir ? `${pkg.dir}/${pkg.name || 'pkg'}` : pkg.name) || `pkg-${i}`
+      next[key] = true
+    }
+    setPackageOpenOverrides(next)
+  }
+
+  const handleCollapseAllPackages = () => {
+    setPackageOpenOverrides({ aggregate: false, __allClosed: true })
+  }
+
+  const isPackageOpen = (pkgKey, isFirstWithIssues) => {
+    if (packageOpenOverrides[pkgKey] !== undefined) {
+      return Boolean(packageOpenOverrides[pkgKey])
+    }
+    if (packageOpenOverrides.__allClosed) {
+      return false
+    }
+    return Boolean(isFirstWithIssues)
+  }
+
+  const unusedAggregateCount = includeNonProd
+    ? (summary.declaredButUnused?.length || 0) + (summary.nonProduction?.declaredButUnused || 0)
+    : (summary.declaredButUnused?.length || 0)
+  const undeclaredAggregateCount = includeNonProd
+    ? (summary.usedButUndeclared?.length || 0) + (summary.nonProduction?.usedButUndeclared || 0)
+    : (summary.usedButUndeclared?.length || 0)
+  const nonProdPackagesCount = summary.nonProduction?.packages || 0
+  const totalPackagesCount = activePackages.length > 0 ? activePackages.length : (summary.packages?.length || 1)
+  const nonProdPkgSuffix = (!includeNonProd && nonProdPackagesCount > 0)
+    ? ` (+${nonProdPackagesCount.toLocaleString()} in tests/fixtures)`
+    : ''
+  const aggregateSummaryText = `${unusedAggregateCount} unused, ${undeclaredAggregateCount} undeclared across ${totalPackagesCount} ${totalPackagesCount === 1 ? 'package' : 'packages'}${nonProdPkgSuffix}`
+
+  // Transitive impact folder grouping, test separation, and collapse controls (scoped by inspected file)
+  const [showAllFoldersByFile, setShowAllFoldersByFile] = useState({})
+  const showAllFolders = Boolean(showAllFoldersByFile[activeFile])
+
+  const [folderOpenStateByFile, setFolderOpenStateByFile] = useState({})
+  const folderOpenState = useMemo(() => folderOpenStateByFile[activeFile] || {}, [folderOpenStateByFile, activeFile])
+
+  const handleToggleFolder = (folderKey, isOpen) => {
+    setFolderOpenStateByFile((prev) => ({
+      ...prev,
+      [activeFile]: {
+        ...(prev[activeFile] || {}),
+        [folderKey]: isOpen,
+      },
+    }))
+  }
+
+  const { transitiveSortedFolders, transitiveTestsList, transitiveSourceCount } = useMemo(() => {
+    const testFiles = []
+    const sourceFolders = {}
+    let sourceCount = 0
+
+    const pathToNodeMap = new Map()
+    if (graph.nodes) {
+      for (const n of graph.nodes) {
+        pathToNodeMap.set(n.path, n)
+      }
+    }
+
+    for (const f of fileImpact.transitive) {
+      const node = pathToNodeMap.get(f)
+      const isTest = node
+        ? (node.category !== 'production' || Boolean(node.isTest))
+        : /(\.(test|spec)\.|__tests__\/|^tests?\/)/i.test(f)
+
+      if (isTest) {
+        testFiles.push(f)
+      } else {
+        sourceCount++
+        const parts = f.split('/')
+        const folder = parts.length > 1 ? parts.slice(0, -1).join('/') : '.'
+        if (!sourceFolders[folder]) {
+          sourceFolders[folder] = []
+        }
+        sourceFolders[folder].push(f)
+      }
+    }
+
+    const sortedFolders = Object.entries(sourceFolders)
+      .map(([folder, files]) => ({ folder, files, count: files.length }))
+      .sort((a, b) => b.count - a.count)
+
+    return {
+      transitiveSortedFolders: sortedFolders,
+      transitiveTestsList: testFiles,
+      transitiveSourceCount: sourceCount,
+    }
+  }, [fileImpact.transitive, graph.nodes])
+
+  const displayedTransitiveFolders = showAllFolders
+    ? transitiveSortedFolders
+    : transitiveSortedFolders.slice(0, 5)
+
+  const handleExpandAllFolders = () => {
+    const next = {}
+    for (const item of transitiveSortedFolders) {
+      next[item.folder] = true
+    }
+    next['__tests__'] = true
+    setFolderOpenStateByFile((prev) => ({
+      ...prev,
+      [activeFile]: next,
+    }))
+  }
+
+  const handleCollapseAllFolders = () => {
+    setFolderOpenStateByFile((prev) => ({
+      ...prev,
+      [activeFile]: {},
+    }))
+  }
+
+  const toggleShowAllFolders = () => {
+    setShowAllFoldersByFile((prev) => ({
+      ...prev,
+      [activeFile]: !prev[activeFile],
+    }))
+  }
 
   // Legacy state: analysis without a scan data and not currently scanning
   if (!hasData && !isScanning) {
@@ -377,7 +667,7 @@ export default function CodeMapPanel({
                 </>
               )}
               {!isScanning && !isError && hasData && (
-                `Mapped connections for ${graphFilesCount} code files; ${otherFilesCount} other files inventoried only; ${skippedCount} skipped.${unsupportedSummaryText ? ` (${unsupportedSummaryText})` : ''}`
+                `${graphFilesCount.toLocaleString()} code files mapped, ${otherFilesCount.toLocaleString()} other files inventoried, ${skippedCount.toLocaleString()} skipped`
               )}
               {!isScanning && isError && (
                 error
@@ -408,26 +698,45 @@ export default function CodeMapPanel({
 
       {hasData && (
         <>
+          {/* Top Controls Bar: Production vs Test Toggle */}
+          <div className="codemap-controls-bar">
+            <label className={`codemap-toggle-label ${!hasNonProdFiles ? 'disabled' : ''}`}>
+              <input
+                type="checkbox"
+                checked={hasNonProdFiles && includeNonProd}
+                onChange={(e) => setIncludeNonProd(e.target.checked)}
+                disabled={!hasNonProdFiles}
+                aria-label="Include tests, fixtures and playground"
+              />
+              <span>Include tests, fixtures and playground</span>
+            </label>
+            {!hasNonProdFiles && (
+              <span className="codemap-toggle-note">No test files found in this project</span>
+            )}
+          </div>
+
           {/* Summary Cards */}
           <div className="codemap-summary-cards" aria-label="Code Map summary metrics">
             <div className="codemap-card">
               <span className="codemap-card-label">Code Files Mapped</span>
-              <strong className="codemap-card-value">{graphFilesCount}</strong>
+              <strong className="codemap-card-value">{graphFilesCount.toLocaleString()}</strong>
+              <div className="codemap-card-subline">&nbsp;</div>
             </div>
 
             <div className="codemap-card">
               <span className="codemap-card-label">Other Files Inventoried</span>
               <strong className="codemap-card-value">
-                {otherFilesCount}
-                {skippedCount > 0 && (
-                  <span className="codemap-card-sub"> ({skippedCount} skipped)</span>
-                )}
+                {otherFilesCount.toLocaleString()}
               </strong>
+              <div className="codemap-card-subline">
+                {skippedCount > 0 ? `(${skippedCount.toLocaleString()} skipped)` : '\u00A0'}
+              </div>
             </div>
 
             <div className="codemap-card">
               <span className="codemap-card-label">Languages</span>
-              <strong className="codemap-card-value">{languageCount}</strong>
+              <strong className="codemap-card-value">{languageCount.toLocaleString()}</strong>
+              <div className="codemap-card-subline">&nbsp;</div>
             </div>
 
             {entryPoints.length > 0 ? (
@@ -438,65 +747,93 @@ export default function CodeMapPanel({
                 aria-label={`View ${entryPoints.length} entry points`}
               >
                 <span className="codemap-card-label">Entry Points</span>
-                <strong className="codemap-card-value">{entryPoints.length}</strong>
+                <strong className="codemap-card-value">{entryPoints.length.toLocaleString()}</strong>
+                <div className="codemap-card-subline">&nbsp;</div>
               </button>
             ) : (
               <div className="codemap-card">
                 <span className="codemap-card-label">Entry Points</span>
                 <strong className="codemap-card-value">none</strong>
+                <div className="codemap-card-subline">&nbsp;</div>
               </div>
             )}
 
-            {cycles.length > 0 ? (
+            {displayedCyclesCount > 0 ? (
               <button
                 type="button"
                 className="codemap-card codemap-card-button"
                 onClick={() => scrollToSection('heading-cycles')}
-                aria-label={`View ${cycles.length} circular dependencies`}
+                aria-label={`View ${displayedCyclesCount} circular dependencies`}
               >
                 <span className="codemap-card-label">Cycles</span>
-                <strong className="codemap-card-value text-warn">{cycles.length}</strong>
+                <strong className="codemap-card-value text-warn">
+                  {displayedCyclesCount.toLocaleString()}
+                </strong>
+                <div className="codemap-card-subline">
+                  {cyclesSuffix || '\u00A0'}
+                </div>
               </button>
             ) : (
               <div className="codemap-card">
                 <span className="codemap-card-label">Cycles</span>
                 <strong className="codemap-card-value">0</strong>
+                <div className="codemap-card-subline">
+                  {cyclesSuffix || '\u00A0'}
+                </div>
               </div>
             )}
 
-            {orphans.length > 0 ? (
+            {displayedOrphansCount > 0 ? (
               <button
                 type="button"
                 className="codemap-card codemap-card-button"
                 onClick={() => scrollToSection('heading-orphans')}
-                aria-label={`View ${orphans.length} orphan files`}
+                aria-label={`View ${displayedOrphansCount} orphan files`}
               >
                 <span className="codemap-card-label">Orphans</span>
-                <strong className="codemap-card-value">{orphans.length}</strong>
+                <strong className="codemap-card-value">
+                  {displayedOrphansCount.toLocaleString()}
+                </strong>
+                <div className="codemap-card-subline">
+                  {orphansSuffix || '\u00A0'}
+                </div>
               </button>
             ) : (
               <div className="codemap-card">
                 <span className="codemap-card-label">Orphans</span>
                 <strong className="codemap-card-value">0</strong>
+                <div className="codemap-card-subline">
+                  {orphansSuffix || '\u00A0'}
+                </div>
               </div>
             )}
 
-            {unresolvedCount > 0 ? (
+            {displayedUnresolvedCount > 0 ? (
               <button
                 type="button"
                 className="codemap-card codemap-card-button"
                 onClick={toggleUnresolvedPanel}
                 aria-expanded={showUnresolvedPanel}
                 aria-controls="codemap-unresolved-panel"
-                aria-label={`Toggle unresolved imports panel (${unresolvedCount} unresolved)`}
+                aria-label={`Toggle unresolved imports panel (${displayedUnresolvedCount} unresolved)`}
               >
                 <span className="codemap-card-label">Unresolved Imports</span>
-                <strong className="codemap-card-value text-warn">{unresolvedCount}</strong>
+                <strong className="codemap-card-value text-warn">
+                  {displayedUnresolvedCount.toLocaleString()}
+                </strong>
+                <div className="codemap-card-subline">
+                  {unresolvedSuffix || '\u00A0'}
+                </div>
               </button>
             ) : (
               <div className="codemap-card">
                 <span className="codemap-card-label">Unresolved Imports</span>
-                <strong className="codemap-card-value">none</strong>
+                <strong className="codemap-card-value">
+                  none
+                </strong>
+                <div className="codemap-card-subline">
+                  {unresolvedSuffix || '\u00A0'}
+                </div>
               </div>
             )}
           </div>
@@ -514,15 +851,19 @@ export default function CodeMapPanel({
                 <h4 className="codemap-unresolved-title">
                   Unresolved imports ({displayedUnresolved.length})
                 </h4>
-                <label className="codemap-toggle-label">
+                <label className={`codemap-toggle-label ${!hasNonProdFiles ? 'disabled' : ''}`}>
                   <input
                     type="checkbox"
-                    checked={includeNonProd}
+                    checked={hasNonProdFiles && includeNonProd}
                     onChange={(e) => setIncludeNonProd(e.target.checked)}
+                    disabled={!hasNonProdFiles}
                     aria-label="Include tests, fixtures and playground"
                   />
                   <span>Include tests, fixtures and playground</span>
                 </label>
+                {!hasNonProdFiles && (
+                  <span className="codemap-toggle-note">No test files found in this project</span>
+                )}
               </div>
 
               {unresolvedTruncated && (
@@ -633,7 +974,6 @@ export default function CodeMapPanel({
             </div>
           </div>
 
-
           {/* SECTION 1: Hotspots */}
           <section className="codemap-section" aria-labelledby="heading-hotspots">
             <h4 id="heading-hotspots" className="codemap-section-title">
@@ -643,33 +983,39 @@ export default function CodeMapPanel({
               <div className="codemap-subcard">
                 <h5>Top Fan-In (Most Imported)</h5>
                 <p className="codemap-muted-note">Files imported by the highest number of other files.</p>
-                {hotspots.byFanIn?.length ? (
+                {displayedHotspots.byFanIn?.length ? (
                   <div className="codemap-table-wrap" tabIndex={0} role="region" aria-label="Top fan-in files">
                     <table className="codemap-table">
                       <thead>
                         <tr>
                           <th scope="col">File</th>
                           <th scope="col">Fan-In</th>
-                          <th scope="col">Action</th>
+                          <th scope="col" className="col-action">Action</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {hotspots.byFanIn.slice(0, 5).map((item) => (
-                          <tr key={`fanin-${item.path}`}>
-                            <td className="font-mono">{item.path}</td>
-                            <td><span className="count-badge">{item.fanIn}</span></td>
-                            <td>
-                              <button
-                                type="button"
-                                className="codemap-link-button"
-                                onClick={() => setSelectedFile(item.path)}
-                                aria-label={`Inspect ${item.path}`}
-                              >
-                                Inspect
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
+                        <PaginatedTableRows
+                          items={displayedHotspots.byFanIn}
+                          limit={30}
+                          label="fan-in hotspots"
+                          colSpan={3}
+                          renderRow={(item) => (
+                            <tr key={`fanin-${item.path}`}>
+                              <td className="font-mono">{item.path}</td>
+                              <td><span className="count-badge">{item.fanIn}</span></td>
+                              <td className="col-action">
+                                <button
+                                  type="button"
+                                  className="codemap-link-button"
+                                  onClick={() => setSelectedFile(item.path)}
+                                  aria-label={`Inspect ${item.path}`}
+                                >
+                                  Inspect
+                                </button>
+                              </td>
+                            </tr>
+                          )}
+                        />
                       </tbody>
                     </table>
                   </div>
@@ -681,36 +1027,42 @@ export default function CodeMapPanel({
               <div className="codemap-subcard">
                 <h5>Highest Impact Files</h5>
                 <p className="codemap-muted-note">Files whose modifications affect the largest portion of the repo.</p>
-                {hotspots.byTransitiveImpact?.length ? (
+                {displayedHotspots.byTransitiveImpact?.length ? (
                   <div className="codemap-table-wrap" tabIndex={0} role="region" aria-label="Highest impact files">
                     <table className="codemap-table">
                       <thead>
                         <tr>
                           <th scope="col">File</th>
                           <th scope="col">Downstream Impact</th>
-                          <th scope="col">Action</th>
+                          <th scope="col" className="col-action">Action</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {hotspots.byTransitiveImpact.slice(0, 5).map((item) => (
-                          <tr key={`impact-${item.path}`}>
-                            <td className="font-mono">{item.path}</td>
-                            <td>
-                              <span className="count-badge">{item.transitiveCount} files</span>
-                              <span className="percent-badge"> ({item.percent}%)</span>
-                            </td>
-                            <td>
-                              <button
-                                type="button"
-                                className="codemap-link-button"
-                                onClick={() => setSelectedFile(item.path)}
-                                aria-label={`Inspect ${item.path}`}
-                              >
-                                Inspect
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
+                        <PaginatedTableRows
+                          items={displayedHotspots.byTransitiveImpact}
+                          limit={30}
+                          label="impact hotspots"
+                          colSpan={3}
+                          renderRow={(item) => (
+                            <tr key={`impact-${item.path}`}>
+                              <td className="font-mono">{item.path}</td>
+                              <td>
+                                <span className="count-badge">{item.transitiveCount} files</span>
+                                <span className="percent-badge"> ({item.percent}%)</span>
+                              </td>
+                              <td className="col-action">
+                                <button
+                                  type="button"
+                                  className="codemap-link-button"
+                                  onClick={() => setSelectedFile(item.path)}
+                                  aria-label={`Inspect ${item.path}`}
+                                >
+                                  Inspect
+                                </button>
+                              </td>
+                            </tr>
+                          )}
+                        />
                       </tbody>
                     </table>
                   </div>
@@ -724,13 +1076,18 @@ export default function CodeMapPanel({
           {/* SECTION 2: Circular Dependencies */}
           <section className="codemap-section" aria-labelledby="heading-cycles" id="section-cycles">
             <h4 id="heading-cycles" className="codemap-section-title">
-              Circular Dependencies ({cycles.length})
+              Circular Dependencies ({displayedCycles.length})
             </h4>
-            {cycles.length === 0 ? (
+            {displayedCycles.length === 0 ? (
               <p className="codemap-success-note">&#10003; No circular dependencies detected.</p>
             ) : (
-              <div className="codemap-cycles-list">
-                {cycles.map((cycle, cIdx) => {
+              <PaginatedList
+                items={displayedCycles}
+                limit={30}
+                listClassName="codemap-cycles-list"
+                listTag="div"
+                label="circular dependencies"
+                renderItem={(cycle, cIdx) => {
                   const cycleFiles = Array.isArray(cycle) ? cycle : (cycle?.files || [])
                   const shortest = (Array.isArray(cycle?.shortest) && cycle.shortest.length > 0)
                     ? cycle.shortest
@@ -763,8 +1120,58 @@ export default function CodeMapPanel({
                       </ol>
                     </details>
                   )
-                })}
+                }}
+              />
+            )}
 
+            {/* Type-only cycles reported separately with explicit label */}
+            {typeOnlyCycles.length > 0 && (
+              <div className="codemap-type-only-cycles">
+                <div className="type-only-cycles-header">
+                  <h5 className="type-only-cycles-title">Type-Only Cycles ({typeOnlyCycles.length})</h5>
+                  <span className="type-only-badge">type-only, no runtime effect</span>
+                </div>
+                <PaginatedList
+                  items={typeOnlyCycles}
+                  limit={30}
+                  listClassName="codemap-cycles-list"
+                  listTag="div"
+                  label="type-only cycles"
+                  renderItem={(cycle, cIdx) => {
+                    const cycleFiles = Array.isArray(cycle) ? cycle : (cycle?.files || [])
+                    const shortest = (Array.isArray(cycle?.shortest) && cycle.shortest.length > 0)
+                      ? cycle.shortest
+                      : cycleFiles
+                    const hint = cycle?.hint
+                    const loopDisplay = (shortest.length > 1 && shortest[0] !== shortest[shortest.length - 1])
+                      ? [...shortest, shortest[0]]
+                      : shortest
+                    const loopStr = loopDisplay.join(' → ')
+
+                    return (
+                      <details key={`type-cycle-${cIdx}`} className="codemap-cycle-item">
+                        <summary className="codemap-cycle-summary">
+                          <strong>Type Cycle {cIdx + 1}</strong>: <span className="cycle-loop font-mono">{loopStr}</span>
+                          {hint && <span className="cycle-hint"> — {hint}</span>}
+                        </summary>
+                        <ol className="codemap-cycle-files">
+                          {cycleFiles.map((filePath, fIdx) => (
+                            <li key={`type-cycle-${cIdx}-${filePath}-${fIdx}`}>
+                              <button
+                                type="button"
+                                className="codemap-link-button"
+                                onClick={() => setSelectedFile(filePath)}
+                                aria-label={`Inspect ${filePath}`}
+                              >
+                                {filePath}
+                              </button>
+                            </li>
+                          ))}
+                        </ol>
+                      </details>
+                    )
+                  }}
+                />
               </div>
             )}
           </section>
@@ -772,29 +1179,34 @@ export default function CodeMapPanel({
           {/* SECTION 3: Orphan Files */}
           <section className="codemap-section" aria-labelledby="heading-orphans" id="section-orphans">
             <h4 id="heading-orphans" className="codemap-section-title">
-              Orphan Files ({orphans.length})
+              Orphan Files ({displayedOrphansList.length})
             </h4>
-            {orphans.length === 0 ? (
+            {displayedOrphansList.length === 0 ? (
               <p className="codemap-success-note">&#10003; No orphan files detected.</p>
             ) : (
               <div className="codemap-orphans-wrap">
                 <p className="codemap-muted-note">
                   Files with zero incoming and zero outgoing project dependencies:
                 </p>
-                <ul className="codemap-tags-list">
-                  {orphans.map((orphan) => (
+                <PaginatedList
+                  items={displayedOrphansList}
+                  limit={30}
+                  listClassName="codemap-tags-list"
+                  label="orphan files"
+                  renderItem={(orphan) => (
                     <li key={`orphan-${orphan}`}>
                       <button
                         type="button"
                         className="codemap-file-chip"
                         onClick={() => setSelectedFile(orphan)}
                         aria-label={`Inspect orphan file ${orphan}`}
+                        title={orphan}
                       >
                         {orphan}
                       </button>
                     </li>
-                  ))}
-                </ul>
+                  )}
+                />
               </div>
             )}
           </section>
@@ -811,8 +1223,12 @@ export default function CodeMapPanel({
                 <p className="codemap-muted-note">
                   Conventional roots, HTML files, binaries, scripts, and exported targets:
                 </p>
-                <ul className="codemap-tags-list">
-                  {entryPoints.map((ep) => (
+                <PaginatedList
+                  items={entryPoints}
+                  limit={30}
+                  listClassName="codemap-tags-list"
+                  label="entry points"
+                  renderItem={(ep) => (
                     <li key={`entrypoint-${ep}`}>
                       <button
                         type="button"
@@ -824,78 +1240,369 @@ export default function CodeMapPanel({
                         {ep}
                       </button>
                     </li>
-                  ))}
-                </ul>
+                  )}
+                />
               </div>
             )}
           </section>
 
           {/* SECTION 4: Dependencies */}
           <section className="codemap-section" aria-labelledby="heading-dependencies">
-            <h4 id="heading-dependencies" className="codemap-section-title">
-              Dependencies
-            </h4>
-            <div className="codemap-two-col">
-              <div className="codemap-subcard">
-                <h5>Declared but Unused ({summary.declaredButUnused?.length || 0})</h5>
-                {summary.declaredButUnused?.length ? (
-                  <ul className="codemap-tags-list">
-                    {summary.declaredButUnused.map((pkg) => (
-                      <li key={`unused-${pkg}`} className="codemap-dep-tag unused">
-                        {pkg}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="codemap-success-note">&#10003; All declared dependencies are used.</p>
-                )}
-
-                <h5 className="margin-top-16">Used but Undeclared ({summary.usedButUndeclared?.length || 0})</h5>
-                {summary.usedButUndeclared?.length ? (
-                  <ul className="codemap-tags-list">
-                    {summary.usedButUndeclared.map((pkg) => (
-                      <li key={`undeclared-${pkg}`} className="codemap-dep-tag undeclared">
-                        {pkg}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="codemap-success-note">&#10003; No undeclared external dependencies used.</p>
-                )}
-              </div>
-
-              <div className="codemap-subcard">
-                <h5>External Usage Counts</h5>
-                {graph.externals?.length ? (
-                  <div className="codemap-table-wrap" tabIndex={0} role="region" aria-label="External dependency usage counts">
-                    <table className="codemap-table">
-                      <thead>
-                        <tr>
-                          <th scope="col">Package</th>
-                          <th scope="col">Import Count</th>
-                          <th scope="col">Status</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {graph.externals.slice(0, 10).map((ext) => (
-                          <tr key={`ext-${ext.name}`}>
-                            <td className="font-mono">{ext.name}</td>
-                            <td><span className="count-badge">{ext.count}</span></td>
-                            <td>
-                              <span className={`status-pill ${ext.declared ? 'pill-declared' : 'pill-undeclared'}`}>
-                                {ext.declared ? 'Declared' : 'Undeclared'}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <p className="codemap-empty-note">No external package imports detected.</p>
-                )}
-              </div>
+            <div className="codemap-section-header-row">
+              <h4 id="heading-dependencies" className="codemap-section-title">
+                Dependencies
+              </h4>
+              {activePackages.length > 0 && (
+                <div className="codemap-expand-collapse-bar">
+                  <button
+                    type="button"
+                    className="codemap-action-btn"
+                    onClick={handleExpandAllPackages}
+                  >
+                    Expand all
+                  </button>
+                  <button
+                    type="button"
+                    className="codemap-action-btn"
+                    onClick={handleCollapseAllPackages}
+                  >
+                    Collapse all
+                  </button>
+                </div>
+              )}
             </div>
+
+            {/* Aggregate section on top (closed by default) */}
+            {activePackages.length > 0 ? (
+              <details
+                className="codemap-package-group aggregate-group"
+                open={packageOpenOverrides.aggregate ? true : undefined}
+                onToggle={(e) => handleTogglePackage('aggregate', e.currentTarget.open)}
+              >
+                <summary className="codemap-package-summary">
+                  <strong>All packages (aggregate)</strong>
+                  <span className="pkg-counts-meta">
+                    {' '}— {aggregateSummaryText}
+                  </span>
+                </summary>
+                <div className="codemap-two-col">
+                  <div className="codemap-subcard">
+                    <h5>Declared but Unused ({summary.declaredButUnused?.length || 0})</h5>
+                    {summary.declaredButUnused?.length ? (
+                      <>
+                        <PaginatedList
+                          items={summary.declaredButUnused}
+                          limit={30}
+                          listClassName="codemap-tags-list"
+                          label="unused dependencies"
+                          renderItem={(pkg) => (
+                            <li key={`unused-${pkg}`} className="codemap-dep-tag unused">
+                              {pkg}
+                            </li>
+                          )}
+                        />
+                        <p className="codemap-dep-note">
+                          {summary.declaredButUnusedNote || 'may be used via config or string references'}
+                        </p>
+                      </>
+                    ) : (
+                      <p className="codemap-success-note">&#10003; All declared dependencies are used.</p>
+                    )}
+
+                    <h5 className="margin-top-16">Used but Undeclared ({summary.usedButUndeclared?.length || 0})</h5>
+                    {summary.usedButUndeclared?.length ? (
+                      <PaginatedList
+                        items={summary.usedButUndeclared}
+                        limit={30}
+                        listClassName="codemap-tags-list"
+                        label="undeclared dependencies"
+                        renderItem={(pkg) => {
+                          const sources = summary.undeclaredSources?.[pkg] || []
+                          return (
+                            <li key={`undeclared-${pkg}`} className="codemap-dep-tag undeclared">
+                              <span className="dep-name">{pkg}</span>
+                              {sources.length > 0 && (
+                                <span className="undeclared-sources-list" title={sources.join(', ')}>
+                                  {' '}(used in: {sources.slice(0, 3).join(', ')})
+                                </span>
+                              )}
+                            </li>
+                          )
+                        }}
+                      />
+                    ) : (
+                      <p className="codemap-success-note">&#10003; No undeclared external dependencies used.</p>
+                    )}
+                  </div>
+
+                  <div className="codemap-subcard">
+                    <h5>External Usage Counts</h5>
+                    {graph.externals?.length ? (
+                      <div className="codemap-table-wrap" tabIndex={0} role="region" aria-label="External dependency usage counts">
+                        <table className="codemap-table">
+                          <thead>
+                            <tr>
+                              <th scope="col">Package</th>
+                              <th scope="col">Import Count</th>
+                              <th scope="col">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <PaginatedTableRows
+                              items={graph.externals}
+                              limit={30}
+                              label="external dependencies"
+                              colSpan={3}
+                              renderRow={(ext) => (
+                                <tr key={`ext-${ext.name}`}>
+                                  <td className="font-mono">{ext.name}</td>
+                                  <td><span className="count-badge">{ext.count}</span></td>
+                                  <td>
+                                    <span className={`status-pill ${ext.declared ? 'pill-declared' : 'pill-undeclared'}`}>
+                                      {ext.declared ? 'Declared' : 'Undeclared'}
+                                    </span>
+                                  </td>
+                                </tr>
+                              )}
+                            />
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="codemap-empty-note">No external package imports detected.</p>
+                    )}
+                  </div>
+                </div>
+              </details>
+            ) : (
+              <div>
+                <p className="codemap-aggregate-summary-line font-medium mb-12">
+                  {aggregateSummaryText}
+                </p>
+                <div className="codemap-two-col">
+                  <div className="codemap-subcard">
+                    <h5>Declared but Unused ({summary.declaredButUnused?.length || 0})</h5>
+                    {summary.declaredButUnused?.length ? (
+                      <>
+                        <PaginatedList
+                          items={summary.declaredButUnused}
+                          limit={30}
+                          listClassName="codemap-tags-list"
+                          label="unused dependencies"
+                          renderItem={(pkg) => (
+                            <li key={`unused-${pkg}`} className="codemap-dep-tag unused">
+                              {pkg}
+                            </li>
+                          )}
+                        />
+                        <p className="codemap-dep-note">
+                          {summary.declaredButUnusedNote || 'may be used via config or string references'}
+                        </p>
+                      </>
+                    ) : (
+                      <p className="codemap-success-note">&#10003; All declared dependencies are used.</p>
+                    )}
+
+                    <h5 className="margin-top-16">Used but Undeclared ({summary.usedButUndeclared?.length || 0})</h5>
+                    {summary.usedButUndeclared?.length ? (
+                      <PaginatedList
+                        items={summary.usedButUndeclared}
+                        limit={30}
+                        listClassName="codemap-tags-list"
+                        label="undeclared dependencies"
+                        renderItem={(pkg) => {
+                          const sources = summary.undeclaredSources?.[pkg] || []
+                          return (
+                            <li key={`undeclared-${pkg}`} className="codemap-dep-tag undeclared">
+                              <span className="dep-name">{pkg}</span>
+                              {sources.length > 0 && (
+                                <span className="undeclared-sources-list" title={sources.join(', ')}>
+                                  {' '}(used in: {sources.slice(0, 3).join(', ')})
+                                </span>
+                              )}
+                            </li>
+                          )
+                        }}
+                      />
+                    ) : (
+                      <p className="codemap-success-note">&#10003; No undeclared external dependencies used.</p>
+                    )}
+                  </div>
+
+                  <div className="codemap-subcard">
+                    <h5>External Usage Counts</h5>
+                    {graph.externals?.length ? (
+                      <div className="codemap-table-wrap" tabIndex={0} role="region" aria-label="External dependency usage counts">
+                        <table className="codemap-table">
+                          <thead>
+                            <tr>
+                              <th scope="col">Package</th>
+                              <th scope="col">Import Count</th>
+                              <th scope="col">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <PaginatedTableRows
+                              items={graph.externals}
+                              limit={30}
+                              label="external dependencies"
+                              colSpan={3}
+                              renderRow={(ext) => (
+                                <tr key={`ext-${ext.name}`}>
+                                  <td className="font-mono">{ext.name}</td>
+                                  <td><span className="count-badge">{ext.count}</span></td>
+                                  <td>
+                                    <span className={`status-pill ${ext.declared ? 'pill-declared' : 'pill-undeclared'}`}>
+                                      {ext.declared ? 'Declared' : 'Undeclared'}
+                                    </span>
+                                  </td>
+                                </tr>
+                              )}
+                            />
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="codemap-empty-note">No external package imports detected.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Packages with issues (sorted, capped at 5, only first open by default) */}
+            {packagesWithIssues.length > 0 && (
+              <div className="codemap-packages-container">
+                {displayedIssuesPackages.map((pkg, idx) => {
+                  const pkgKey = pkg.path || (pkg.dir ? `${pkg.dir}/${pkg.name || 'pkg'}` : pkg.name) || `pkg-${idx}`
+                  const isOpen = isPackageOpen(pkgKey, idx === 0)
+                  return (
+                    <details
+                      key={pkgKey}
+                      className="codemap-package-group"
+                      open={isOpen ? true : undefined}
+                      onToggle={(e) => handleTogglePackage(pkgKey, e.currentTarget.open)}
+                    >
+                      <summary className="codemap-package-summary">
+                        <strong>{pkg.name || pkg.dir || 'package'}</strong>
+                        <span className="pkg-counts-meta">
+                          {' '}({pkg.dir || '.'}) — Unused: {pkg.declaredButUnused?.length || 0}, Undeclared: {pkg.usedButUndeclared?.length || 0}
+                        </span>
+                      </summary>
+                      <div className="codemap-package-content">
+                        <h5>Declared but Unused ({pkg.declaredButUnused?.length || 0})</h5>
+                        {pkg.declaredButUnused?.length ? (
+                          <>
+                            <PaginatedList
+                              items={pkg.declaredButUnused}
+                              limit={30}
+                              listClassName="codemap-tags-list"
+                              label="unused dependencies"
+                              renderItem={(dep) => (
+                                <li key={`pkg-unused-${pkg.name}-${dep}`} className="codemap-dep-tag unused">
+                                  {dep}
+                                </li>
+                              )}
+                            />
+                            <p className="codemap-dep-note">
+                              {pkg.declaredButUnusedNote || summary.declaredButUnusedNote || 'may be used via config or string references'}
+                            </p>
+                          </>
+                        ) : (
+                          <p className="codemap-success-note">&#10003; All declared dependencies are used.</p>
+                        )}
+
+                        <h5 className="margin-top-16">Used but Undeclared ({pkg.usedButUndeclared?.length || 0})</h5>
+                        {pkg.usedButUndeclared?.length ? (
+                          <PaginatedList
+                            items={pkg.usedButUndeclared}
+                            limit={30}
+                            listClassName="codemap-tags-list"
+                            label="undeclared dependencies"
+                            renderItem={(dep) => {
+                              const sources = pkg.undeclaredSources?.[dep] || summary.undeclaredSources?.[dep] || []
+                              return (
+                                <li key={`pkg-undec-${pkg.name}-${dep}`} className="codemap-dep-tag undeclared">
+                                  <span className="dep-name">{dep}</span>
+                                  {sources.length > 0 && (
+                                    <span className="undeclared-sources-list" title={sources.join(', ')}>
+                                      {' '}(used in: {sources.slice(0, 3).join(', ')})
+                                    </span>
+                                  )}
+                                </li>
+                              )
+                            }}
+                          />
+                        ) : (
+                          <p className="codemap-success-note">&#10003; No undeclared external dependencies used.</p>
+                        )}
+                      </div>
+                    </details>
+                  )
+                })}
+
+                {packagesWithIssues.length > 5 && (
+                  <div className="codemap-show-more-wrap">
+                    <button
+                      type="button"
+                      className="codemap-show-more-btn"
+                      onClick={() => setShowAllPackages((prev) => !prev)}
+                      aria-label={showAllPackages ? 'Show fewer packages' : `Show all ${packagesWithIssues.length} packages`}
+                    >
+                      {showAllPackages ? 'Show fewer' : `Show all ${packagesWithIssues.length} packages`}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Zero-issue packages collapsed into one line */}
+            {activePackages.length > 1 && zeroIssuePackages.length > 0 && (
+              <div className="codemap-zero-issues-section">
+                <div className="codemap-zero-issues-row">
+                  <span className="zero-issues-text">
+                    {zeroIssuePackages.length === 1
+                      ? '1 other package has no issues'
+                      : `${zeroIssuePackages.length} other packages have no issues`}
+                  </span>
+                  <button
+                    type="button"
+                    className="codemap-link-button show-zero-issues-btn"
+                    onClick={() => setShowZeroIssues((prev) => !prev)}
+                    aria-expanded={showZeroIssues}
+                  >
+                    {showZeroIssues ? 'Hide them' : 'Show them'}
+                  </button>
+                </div>
+                {showZeroIssues && (
+                  <div className="codemap-packages-container zero-issues-list">
+                    {zeroIssuePackages.map((pkg, idx) => {
+                      const pkgKey = pkg.path || (pkg.dir ? `${pkg.dir}/${pkg.name || 'pkg'}` : pkg.name) || `zero-pkg-${idx}`
+                      const isOpen = Boolean(packageOpenOverrides[pkgKey])
+                      return (
+                        <details
+                          key={pkgKey}
+                          className="codemap-package-group zero-issue-group"
+                          open={isOpen ? true : undefined}
+                          onToggle={(e) => handleTogglePackage(pkgKey, e.currentTarget.open)}
+                        >
+                          <summary className="codemap-package-summary">
+                            <strong>{pkg.name || pkg.dir || 'package'}</strong>
+                            <span className="pkg-counts-meta">
+                              {' '}({pkg.dir || '.'}) — 0 issues
+                            </span>
+                          </summary>
+                          <div className="codemap-package-content">
+                            <p className="codemap-success-note">&#10003; All declared dependencies are used.</p>
+                            <p className="codemap-success-note">&#10003; No undeclared external dependencies used.</p>
+                          </div>
+                        </details>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </section>
 
           {/* SECTION 5: Inventory */}
@@ -906,14 +1613,47 @@ export default function CodeMapPanel({
             <div className="codemap-three-col">
               <div className="codemap-subcard">
                 <h5>By Language</h5>
-                {inventoryByLanguageList.length > 0 ? (
+                {(realLanguages.length > 0 || dataAndDocs.length > 0 || otherFileTypes.length > 0) ? (
                   <ul className="codemap-simple-list">
-                    {inventoryByLanguageList.map(({ label, count }) => (
-                      <li key={`lang-${label}`}>
-                        <span>{label}</span>
-                        <strong className="count-badge">{count}</strong>
-                      </li>
-                    ))}
+                    {realLanguages.length > 0 && (
+                      <>
+                        <li className="codemap-list-section-header first-header">
+                          <h6 className="by-lang-heading">Languages</h6>
+                        </li>
+                        {realLanguages.map(({ label, count }) => (
+                          <li key={`lang-${label}`}>
+                            <span>{label}</span>
+                            <strong className="count-badge">{count}</strong>
+                          </li>
+                        ))}
+                      </>
+                    )}
+                    {dataAndDocs.length > 0 && (
+                      <>
+                        <li className="codemap-list-section-header">
+                          <h6 className="by-lang-heading">Data and docs</h6>
+                        </li>
+                        {dataAndDocs.map(({ label, count }) => (
+                          <li key={`data-${label}`}>
+                            <span>{label}</span>
+                            <strong className="count-badge">{count}</strong>
+                          </li>
+                        ))}
+                      </>
+                    )}
+                    {otherFileTypes.length > 0 && (
+                      <>
+                        <li className="codemap-list-section-header">
+                          <h6 className="by-lang-heading other-types-heading">Other file types</h6>
+                        </li>
+                        {otherFileTypes.map(({ label, count }) => (
+                          <li key={`other-type-${label}`}>
+                            <span>{label}</span>
+                            <strong className="count-badge">{count}</strong>
+                          </li>
+                        ))}
+                      </>
+                    )}
                   </ul>
                 ) : (
                   <p className="codemap-empty-note">No language data.</p>
@@ -923,14 +1663,18 @@ export default function CodeMapPanel({
               <div className="codemap-subcard">
                 <h5>By Folder</h5>
                 {inventory.byFolder && Object.keys(inventory.byFolder).length > 0 ? (
-                  <ul className="codemap-simple-list">
-                    {Object.entries(inventory.byFolder).slice(0, 8).map(([folder, count]) => (
+                  <PaginatedList
+                    items={Object.entries(inventory.byFolder)}
+                    limit={30}
+                    listClassName="codemap-simple-list"
+                    label="folders"
+                    renderItem={([folder, count]) => (
                       <li key={`folder-${folder}`}>
                         <span>{folder || '.'}</span>
                         <strong className="count-badge">{count}</strong>
                       </li>
-                    ))}
-                  </ul>
+                    )}
+                  />
                 ) : (
                   <p className="codemap-empty-note">No folder data.</p>
                 )}
@@ -948,12 +1692,18 @@ export default function CodeMapPanel({
                         </tr>
                       </thead>
                       <tbody>
-                        {inventory.largest.slice(0, 6).map((item) => (
-                          <tr key={`largest-${item.path}`}>
-                            <td className="font-mono">{item.path}</td>
-                            <td>{formatBytes(item.size)}</td>
-                          </tr>
-                        ))}
+                        <PaginatedTableRows
+                          items={inventory.largest}
+                          limit={30}
+                          label="largest files"
+                          colSpan={2}
+                          renderRow={(item) => (
+                            <tr key={`largest-${item.path}`}>
+                              <td className="font-mono">{item.path}</td>
+                              <td>{formatBytes(item.size)}</td>
+                            </tr>
+                          )}
+                        />
                       </tbody>
                     </table>
                   </div>
@@ -996,28 +1746,39 @@ export default function CodeMapPanel({
                   {filteredNodes.length === 0 ? (
                     <p className="codemap-empty-note">No files match &quot;{searchQuery}&quot;</p>
                   ) : (
-                    filteredNodes.map((node) => (
-                      <button
-                        type="button"
-                        key={node.path}
-                        role="option"
-                        title={node.path}
-                        aria-selected={node.path === activeFile}
-                        className={`codemap-file-entry ${node.path === activeFile ? 'active' : ''}`}
-                        onClick={() => setSelectedFile(node.path)}
-                      >
-                        <span className="file-path" title={node.path}>{node.path}</span>
-                        <span className="file-meta">
-                          {node.isConfig && (
-                            <span className="file-tag config-tag">config</span>
-                          )}
-                          {node.isTest && (
-                            <span className="file-tag test-tag">test</span>
-                          )}
-                          {' '}{node.lang?.toLowerCase() === 'svg' ? 'SVG' : node.lang}
-                        </span>
-                      </button>
-                    ))
+                    <PaginatedList
+                      items={filteredNodes}
+                      limit={30}
+                      listClassName="codemap-files-paginated-list"
+                      listTag="div"
+                      label="files"
+                      renderItem={(node) => {
+                        const isConfig = Boolean(node.isConfig || isConfigFile(node.path))
+                        const isTest = Boolean(node.isTest || node.category === 'non-production')
+                        return (
+                          <button
+                            type="button"
+                            key={node.path}
+                            role="option"
+                            title={node.path}
+                            aria-selected={node.path === activeFile}
+                            className={`codemap-file-entry ${node.path === activeFile ? 'active' : ''}`}
+                            onClick={() => setSelectedFile(node.path)}
+                          >
+                            <span className="file-path" title={node.path}>{node.path}</span>
+                            <span className="file-meta">
+                              {isConfig && (
+                                <span className="file-tag config-tag">CONFIG</span>
+                              )}
+                              {isTest && (
+                                <span className="file-tag test-tag">test</span>
+                              )}
+                              {' '}{node.lang?.toLowerCase() === 'svg' ? 'SVG' : node.lang}
+                            </span>
+                          </button>
+                        )
+                      }}
+                    />
                   )}
                 </div>
               </div>
@@ -1030,10 +1791,10 @@ export default function CodeMapPanel({
                       <p className="eyebrow">Inspecting file</p>
                       <div className="active-file-title-wrap">
                         <h5 className="active-file-title font-mono">{activeFile}</h5>
-                        {activeNode?.isConfig && (
-                          <span className="file-tag config-tag">config</span>
+                        {Boolean(activeNode?.isConfig || isConfigFile(activeFile)) && (
+                          <span className="file-tag config-tag">CONFIG</span>
                         )}
-                        {activeNode?.isTest && (
+                        {Boolean(activeNode?.isTest || activeNode?.category === 'non-production') && (
                           <span className="file-tag test-tag">test</span>
                         )}
                       </div>
@@ -1055,59 +1816,164 @@ export default function CodeMapPanel({
                         </strong>
                       </div>
 
+                      {/* Compact stat row (direct source, direct tests, transitive source, transitive tests) */}
+                      <div className="compact-stat-row" aria-label="Impact breakdown">
+                        <div className="compact-stat-item">
+                          <span className="compact-stat-label">Direct source</span>
+                          <strong className="compact-stat-value">{fileImpact.directBreakdown?.source ?? fileImpact.direct.length}</strong>
+                        </div>
+                        <div className="compact-stat-item">
+                          <span className="compact-stat-label">Direct tests</span>
+                          <strong className="compact-stat-value">{fileImpact.directBreakdown?.tests ?? 0}</strong>
+                        </div>
+                        <div className="compact-stat-item">
+                          <span className="compact-stat-label">Transitive source</span>
+                          <strong className="compact-stat-value">{fileImpact.transitiveBreakdown?.source ?? fileImpact.transitive.length}</strong>
+                        </div>
+                        <div className="compact-stat-item">
+                          <span className="compact-stat-label">Transitive tests</span>
+                          <strong className="compact-stat-value">{fileImpact.transitiveBreakdown?.tests ?? 0}</strong>
+                        </div>
+                      </div>
+
                       <div className="impact-details-row">
                         <div>
                           <h6>Directly affected ({fileImpact.direct.length}):</h6>
                           {fileImpact.direct.length === 0 ? (
                             <p className="codemap-muted-note">None</p>
                           ) : (
-                            <ul className="impact-file-list">
-                              {fileImpact.direct.map((f) => (
+                            <PaginatedList
+                              items={fileImpact.direct}
+                              limit={5}
+                              listClassName="impact-file-list"
+                              label="directly affected files"
+                              renderItem={(f) => (
                                 <li key={`direct-${f}`}>
                                   <button
                                     type="button"
                                     className="codemap-link-button"
                                     onClick={() => setSelectedFile(f)}
                                     aria-label={`Select ${f}`}
+                                    title={f}
                                   >
                                     {f}
                                   </button>
                                 </li>
-                              ))}
-                            </ul>
+                              )}
+                            />
                           )}
                         </div>
 
                         <div>
-                          <h6>Transitively affected by folder:</h6>
-                          {fileImpact.transitive.length === 0 ? (
+                          <div className="transitive-header-row">
+                            <h6>Transitively affected by folder ({includeNonProd ? fileImpact.transitive.length : transitiveSourceCount}):</h6>
+                            {(transitiveSortedFolders.length > 0 || (includeNonProd && transitiveTestsList.length > 0)) && (
+                              <div className="codemap-expand-collapse-bar">
+                                <button
+                                  type="button"
+                                  className="codemap-action-btn"
+                                  onClick={handleExpandAllFolders}
+                                >
+                                  Expand all
+                                </button>
+                                <button
+                                  type="button"
+                                  className="codemap-action-btn"
+                                  onClick={handleCollapseAllFolders}
+                                >
+                                  Collapse all
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+                          {fileImpact.transitive.length === 0 || (transitiveSortedFolders.length === 0 && (!includeNonProd || transitiveTestsList.length === 0)) ? (
                             <p className="codemap-muted-note">No additional files beyond the direct importers.</p>
                           ) : (
                             <div className="transitive-folders-list">
-                              {Object.entries(fileImpact.transitiveByFolder).map(([folder, files]) => (
-                                <div key={`folder-${folder}`} className="transitive-folder-group">
-                                  <strong>{folder}/ ({files.length})</strong>
-                                  <ul>
-                                    {files.slice(0, 4).map((f) => (
-                                      <li key={`trans-${f}`}>
-                                        <button
-                                          type="button"
-                                          className="codemap-link-button"
-                                          onClick={() => setSelectedFile(f)}
-                                          aria-label={`Select ${f}`}
-                                        >
-                                          {f}
-                                        </button>
-                                      </li>
-                                    ))}
-                                    {files.length > 4 && (
-                                      <li className="codemap-more-note">
-                                        +{files.length - 4} more in {folder}
-                                      </li>
-                                    )}
-                                  </ul>
+                              {displayedTransitiveFolders.map(({ folder, files }) => {
+                                const folderLabel = (folder === '.' || folder === './') ? 'project root' : `${folder}/`
+                                return (
+                                  <details
+                                    key={`folder-${folder}`}
+                                    className="transitive-folder-details"
+                                    open={Boolean(folderOpenState[folder])}
+                                    onToggle={(e) => handleToggleFolder(folder, e.currentTarget.open)}
+                                  >
+                                    <summary className="transitive-folder-summary">
+                                      <span className="folder-name">{folderLabel}</span>
+                                      <strong className="count-badge">{files.length}</strong>
+                                    </summary>
+                                  <div className="transitive-folder-content">
+                                    <PaginatedList
+                                      items={files}
+                                      limit={5}
+                                      listClassName="impact-file-list"
+                                      label="files"
+                                      renderItem={(f) => (
+                                        <li key={`trans-${f}`}>
+                                          <button
+                                            type="button"
+                                            className="codemap-link-button"
+                                            onClick={() => setSelectedFile(f)}
+                                            aria-label={`Select ${f}`}
+                                            title={f}
+                                          >
+                                            {f}
+                                          </button>
+                                        </li>
+                                      )}
+                                    />
+                                  </div>
+                                </details>
+                              )})}
+
+                              {transitiveSortedFolders.length > 5 && (
+                                <div className="codemap-show-more-wrap">
+                                  <button
+                                    type="button"
+                                    className="codemap-show-more-btn"
+                                    onClick={toggleShowAllFolders}
+                                    aria-label={showAllFolders ? 'Show fewer folders' : `Show all ${transitiveSortedFolders.length} folders`}
+                                  >
+                                    {showAllFolders ? 'Show fewer' : `Show all ${transitiveSortedFolders.length} folders`}
+                                  </button>
                                 </div>
-                              ))}
+                              )}
+
+                              {includeNonProd && transitiveTestsList.length > 0 && (
+                                <details
+                                  className="transitive-folder-details transitive-tests-group"
+                                  open={Boolean(folderOpenState['__tests__'])}
+                                  onToggle={(e) => handleToggleFolder('__tests__', e.currentTarget.open)}
+                                >
+                                  <summary className="transitive-folder-summary">
+                                    <span className="folder-name">Tests</span>
+                                    <strong className="count-badge">{transitiveTestsList.length}</strong>
+                                  </summary>
+                                  <div className="transitive-folder-content">
+                                    <PaginatedList
+                                      items={transitiveTestsList}
+                                      limit={5}
+                                      listClassName="impact-file-list"
+                                      label="test files"
+                                      renderItem={(f) => (
+                                        <li key={`trans-test-${f}`}>
+                                          <button
+                                            type="button"
+                                            className="codemap-link-button"
+                                            onClick={() => setSelectedFile(f)}
+                                            aria-label={`Select ${f}`}
+                                            title={f}
+                                          >
+                                            {f}
+                                          </button>
+                                        </li>
+                                      )}
+                                    />
+                                  </div>
+                                </details>
+                              )}
                             </div>
                           )}
                         </div>
@@ -1118,8 +1984,8 @@ export default function CodeMapPanel({
                     {/* Neighborhood Graph SVG & Text representation */}
                     <NeighborhoodGraph
                       selectedFile={activeFile}
-                      imports={fileConnections.imports}
-                      importers={fileConnections.importers}
+                      imports={activeImports}
+                      importers={activeImporters}
                       onSelectFile={(path) => setSelectedFile(path)}
                     />
                   </>

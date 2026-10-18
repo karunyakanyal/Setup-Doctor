@@ -26,6 +26,10 @@ export function getImpact(graph, targetFile) {
       transitive: [],
       percentOfRepo: 0,
       transitiveByFolder: {},
+      directBreakdown: { source: 0, tests: 0 },
+      transitiveBreakdown: { source: 0, tests: 0 },
+      directText: '0 direct: 0 source, 0 tests',
+      transitiveText: '0 transitive: 0 source, 0 tests',
     }
   }
 
@@ -58,6 +62,10 @@ export function getImpact(graph, targetFile) {
       transitive: [],
       percentOfRepo: 0,
       transitiveByFolder: {},
+      directBreakdown: { source: 0, tests: 0 },
+      transitiveBreakdown: { source: 0, tests: 0 },
+      directText: '0 direct: 0 source, 0 tests',
+      transitiveText: '0 transitive: 0 source, 0 tests',
     }
   }
 
@@ -110,6 +118,28 @@ export function getImpact(graph, targetFile) {
     transitiveByFolder[folder].push(filePath)
   }
 
+  let directSource = 0
+  let directTests = 0
+  for (const filePath of direct) {
+    const node = pathToNode.get(filePath)
+    if (node?.category === 'production') {
+      directSource++
+    } else {
+      directTests++
+    }
+  }
+
+  let transitiveSource = 0
+  let transitiveTests = 0
+  for (const filePath of transitive) {
+    const node = pathToNode.get(filePath)
+    if (node?.category === 'production') {
+      transitiveSource++
+    } else {
+      transitiveTests++
+    }
+  }
+
   return {
     targetNode,
     direct,
@@ -117,6 +147,16 @@ export function getImpact(graph, targetFile) {
     totalAffected,
     percentOfRepo,
     transitiveByFolder,
+    directBreakdown: {
+      source: directSource,
+      tests: directTests,
+    },
+    transitiveBreakdown: {
+      source: transitiveSource,
+      tests: transitiveTests,
+    },
+    directText: `${direct.length} direct: ${directSource} source, ${directTests} tests`,
+    transitiveText: `${transitive.length} transitive: ${transitiveSource} source, ${transitiveTests} tests`,
   }
 }
 
