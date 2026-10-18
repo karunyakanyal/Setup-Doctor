@@ -681,7 +681,7 @@ test('CodeMapPanel: header sentence lists every bucket so numbers add up (mapped
   // Header lists 45 code files; 32 other files (20 Python + 12 Other); 3 skipped
   // 45 + 20 + 12 = 77 analyzed files!
   assert.ok(html.includes('45 code files mapped, 32 other files inventoried, 3 skipped'))
-  assert.ok(html.includes('Python: 20 files, not mapped, Other: 12 files, not mapped'))
+  assert.ok(html.includes('Python: 20 files, not mapped, other file types: 12 files, not mapped'))
 })
 
 test('CodeMapPanel: Languages card number strictly equals the number of languages listed under By Language', () => {
@@ -1701,7 +1701,7 @@ test('CodeMapPanel: Dependencies visibility defaults, sorting, 5-cap, and zero-i
 
   // Aggregate summary on top with note:
   assert.ok(htmlOff.includes('All packages (aggregate)'), 'Aggregate header present')
-  assert.ok(htmlOff.includes('1 unused, 1 undeclared across 9 packages (+1 in tests/fixtures)'), 'Aggregate summary format with suffix')
+  assert.ok(htmlOff.includes('1 unused, 1 undeclared across 9 packages (2 with no issues) (+1 in tests/fixtures)'), 'Aggregate summary format with suffix')
 
   // Aggregate <details> is closed by default
   assert.ok(htmlOff.includes('class="codemap-package-group aggregate-group"') && !htmlOff.includes('class="codemap-package-group aggregate-group" open'), 'Aggregate is collapsed by default')
