@@ -27,6 +27,36 @@ export default function NeighborhoodGraph({
     return imports.slice(0, MAX_DISPLAY)
   }, [imports])
 
+  const visibleNodes = useMemo(() => {
+    return [selectedFile, ...importersToShow, ...importsToShow].filter(Boolean)
+  }, [selectedFile, importersToShow, importsToShow])
+
+  const basenameCounts = useMemo(() => {
+    const counts = new Map()
+    for (const f of visibleNodes) {
+      const parts = f.split('/')
+      const base = parts[parts.length - 1] || ''
+      counts.set(base, (counts.get(base) || 0) + 1)
+    }
+    return counts
+  }, [visibleNodes])
+
+  const formatNodeLabel = (fullPath, maxLen = 22) => {
+    if (!fullPath) return ''
+    const parts = fullPath.split('/')
+    const base = parts[parts.length - 1] || ''
+    const isDuplicate = (basenameCounts.get(base) || 0) > 1
+
+    if (isDuplicate && parts.length > 1) {
+      const parentFolder = parts[parts.length - 2]
+      const qualified = `${parentFolder}/${base}`
+      if (qualified.length <= maxLen) return qualified
+      return truncatePath(qualified, maxLen)
+    }
+
+    return truncatePath(fullPath, maxLen)
+  }
+
   const extraImporters = importers.length - importersToShow.length
   const extraImports = imports.length - importsToShow.length
 
@@ -121,7 +151,7 @@ export default function NeighborhoodGraph({
               textAnchor="middle"
               className="svg-text-center"
             >
-              {truncatePath(selectedFile, 24)}
+              {formatNodeLabel(selectedFile, 24)}
             </text>
           </g>
 
@@ -158,7 +188,7 @@ export default function NeighborhoodGraph({
                   textAnchor="middle"
                   className="svg-text-side"
                 >
-                  {truncatePath(file)}
+                  {formatNodeLabel(file)}
                 </text>
               </g>
             )
@@ -218,7 +248,7 @@ export default function NeighborhoodGraph({
                   textAnchor="middle"
                   className="svg-text-side"
                 >
-                  {truncatePath(file)}
+                  {formatNodeLabel(file)}
                 </text>
               </g>
             )

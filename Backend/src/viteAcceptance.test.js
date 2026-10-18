@@ -839,4 +839,162 @@ test('unresolved imports: count equals array length and truncated is false when 
 	assert.equal(graph.summary.unresolvedTruncated, false)
 })
 
+// 23. @vite/* virtual specifiers
+test('@vite/* specifiers: treated as virtual modules and excluded from graph and undeclared imports', () => {
+	assert.equal(isValidSpecifier('@vite/client'), false)
+	assert.equal(isValidSpecifier('@vite/env'), false)
+	assert.equal(isValidSpecifier('@vite'), false)
+	assert.equal(isValidSpecifier('@vitejs/plugin-vue'), true)
+
+	const files = {
+		'package.json': JSON.stringify({ name: 'vite-virtual-test', dependencies: {} }),
+		'src/client.ts': `
+			// @ts-expect-error internal virtual module
+			import '@vite/env';
+			import client from '@vite/client';
+			import { helper } from './helper';
+		`,
+		'src/helper.ts': 'export const helper = 1;',
+	}
+
+	const graph = buildGraph(files)
+	assert.deepEqual(graph.summary.usedButUndeclared, [])
+	assert.equal(graph.summary.unresolvedCount, 0)
+	assert.ok(!graph.unresolvedImports.some((u) => u.specifier.startsWith('@vite/')))
+})
+
+// 24. Relative specifier .d.ts / .d.mts / .d.cts fallback
+test('TypeScript NodeNext extension mapping: relative .js, .mjs, .cjs resolve to .d.ts, .d.mts, .d.cts', () => {
+	assert.equal(resolveFilePath('src/types.js', new Map([['src/types.d.ts', {}]])), 'src/types.d.ts')
+	assert.equal(resolveFilePath('src/module.mjs', new Map([['src/module.d.mts', {}]])), 'src/module.d.mts')
+	assert.equal(resolveFilePath('src/common.cjs', new Map([['src/common.d.cts', {}]])), 'src/common.d.cts')
+
+	const files = {
+		'package.json': JSON.stringify({ name: 'dts-resolve-test', dependencies: {} }),
+		'src/index.ts': `
+			import { A } from './types.js';
+			import { B } from './module.mjs';
+			import { C } from './common.cjs';
+		`,
+		'src/types.d.ts': 'export type A = string;',
+		'src/module.d.mts': 'export type B = number;',
+		'src/common.d.cts': 'export type C = boolean;',
+	}
+
+	const graph = buildGraph(files)
+	const indexNode = graph.nodes.find((n) => n.path === 'src/index.ts')
+	const typesNode = graph.nodes.find((n) => n.path === 'src/types.d.ts')
+	const modNode = graph.nodes.find((n) => n.path === 'src/module.d.mts')
+	const cmnNode = graph.nodes.find((n) => n.path === 'src/common.d.cts')
+
+	assert.ok(graph.edges.some((e) => e[0] === indexNode.id && e[1] === typesNode.id))
+	assert.ok(graph.edges.some((e) => e[0] === indexNode.id && e[1] === modNode.id))
+	assert.ok(graph.edges.some((e) => e[0] === indexNode.id && e[1] === cmnNode.id))
+	assert.equal(graph.summary.unresolvedCount, 0)
+})
+
+// 25. Type-only imports and declaration files are not counted as package usage
+test('type-only external imports and declaration file imports are not counted as package usage', () => {
+	const files = {
+		'package.json': JSON.stringify({ name: 'type-only-test', dependencies: {} }),
+		'packages/vite/package.json': JSON.stringify({ name: 'vite', dependencies: {} }),
+		'packages/vite/src/node/utils.ts': `
+			import type { Equal } from '@type-challenges/utils';
+			import type { DecodedSourceMap } from '@jridgewell/remapping';
+			import { realHelper } from 'undeclared-runtime-pkg';
+		`,
+		'packages/vite/src/types/package.json': JSON.stringify({ version: '0.0.0' }),
+		'packages/vite/src/types/alias.d.ts': `
+			import type { FunctionPluginHooks } from 'rolldown';
+		`,
+		'packages/vite/src/types/shims.d.ts': `
+			import type { Plugin } from 'postcss';
+		`,
+	}
+
+	const graph = buildGraph(files)
+	// @type-challenges/utils, rolldown, postcss are type-only imports and must NOT be in usedButUndeclared
+	assert.ok(!graph.summary.usedButUndeclared.includes('@type-challenges/utils'))
+	assert.ok(!graph.summary.usedButUndeclared.includes('rolldown'))
+	assert.ok(!graph.summary.usedButUndeclared.includes('postcss'))
+	assert.deepEqual(graph.summary.usedButUndeclared, ['undeclared-runtime-pkg'])
+
+	const vitePkg = graph.summary.packages.find((p) => p.dir === 'packages/vite')
+	assert.ok(vitePkg)
+	assert.deepEqual(vitePkg.usedButUndeclared, ['undeclared-runtime-pkg'])
+
+	const typesPkg = graph.summary.packages.find((p) => p.dir === 'packages/vite/src/types')
+	assert.ok(typesPkg)
+	assert.deepEqual(typesPkg.usedButUndeclared, [])
+})
+
+// 26. Nearest package.json attribution: each import counted once under its nearest package.json
+test('nearest package.json attribution: nested package.json files do not duplicate undeclared imports', () => {
+	const files = {
+		'package.json': JSON.stringify({ name: 'root-monorepo', dependencies: {} }),
+		'packages/vite/package.json': JSON.stringify({ name: 'vite', dependencies: {} }),
+		'packages/vite/src/types/package.json': JSON.stringify({ version: '0.0.0' }),
+		'packages/vite/src/node/utils.ts': `
+			import { runtimePkgA } from 'runtime-pkg-a';
+		`,
+		'packages/vite/src/types/alias.ts': `
+			import { runtimePkgB } from 'runtime-pkg-b';
+		`,
+	}
+
+	const graph = buildGraph(files)
+	const vitePkg = graph.summary.packages.find((p) => p.dir === 'packages/vite')
+	const typesPkg = graph.summary.packages.find((p) => p.dir === 'packages/vite/src/types')
+
+	assert.ok(vitePkg)
+	assert.ok(typesPkg)
+
+	// runtime-pkg-a is strictly under packages/vite
+	assert.deepEqual(vitePkg.usedButUndeclared, ['runtime-pkg-a'])
+	// runtime-pkg-b is strictly under packages/vite/src/types
+	assert.deepEqual(typesPkg.usedButUndeclared, ['runtime-pkg-b'])
+
+	// Neither repeats the other's undeclared names
+	assert.ok(!vitePkg.usedButUndeclared.includes('runtime-pkg-b'))
+	assert.ok(!typesPkg.usedButUndeclared.includes('runtime-pkg-a'))
+})
+
+// 27. Type-only imports: package used only via import type is not reported unused, and undeclared name used only via import type is not reported undeclared
+test('type-only imports: package used only via import type is not reported unused, and undeclared name used only via import type is not reported undeclared', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			name: 'type-only-usage-test',
+			dependencies: {
+				'declared-type-only-pkg': '^1.0.0',
+				'declared-unused-pkg': '^1.0.0',
+			},
+		}),
+		'src/index.ts': `
+			import type { SomeType } from 'declared-type-only-pkg';
+			import type { UndeclaredType } from 'undeclared-type-only-pkg';
+			import { runtimeHelper } from './helper';
+		`,
+		'src/helper.ts': `
+			export const runtimeHelper = 42;
+		`,
+		'src/types.d.ts': `
+			import type { Plugin } from 'declared-type-only-pkg';
+			import { AnotherUndeclared } from 'undeclared-dts-pkg';
+		`,
+	}
+
+	const graph = buildGraph(files)
+
+	// 1. package used only via import type is NOT reported unused
+	assert.ok(!graph.summary.declaredButUnused.includes('declared-type-only-pkg'))
+	// Truly unused package IS reported unused
+	assert.ok(graph.summary.declaredButUnused.includes('declared-unused-pkg'))
+
+	// 2. undeclared name used only via import type (or in .d.ts) is NOT reported undeclared
+	assert.ok(!graph.summary.usedButUndeclared.includes('undeclared-type-only-pkg'))
+	assert.ok(!graph.summary.usedButUndeclared.includes('undeclared-dts-pkg'))
+	assert.deepEqual(graph.summary.usedButUndeclared, [])
+})
+
+
 

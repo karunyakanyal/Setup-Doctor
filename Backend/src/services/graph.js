@@ -1,7 +1,7 @@
 const path = require('path')
 
 const CODE_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts', '.vue', '.html'])
-const RESOLVE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.json']
+const RESOLVE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.json', '.d.ts', '.d.mts', '.d.cts']
 const MAX_NODES = 3000
 
 // Common Node.js built-in modules
@@ -239,13 +239,15 @@ function isValidSpecifier(specifier) {
 	if (!clean) return false
 	// Drop anything with spaces, newlines, quotes, parentheses or backslashes
 	if (/[\s\r\n'"\\()]/.test(clean)) return false
-	// Drop import.meta, virtual: ids, pnpapi, and ids starting with \0
+	// Drop import.meta, virtual: ids, pnpapi, @vite/* virtual modules, and ids starting with \0
 	if (
 		clean === 'import.meta' ||
 		clean.startsWith('import.meta.') ||
 		clean.startsWith('virtual:') ||
 		clean === 'pnpapi' ||
 		clean.startsWith('pnpapi/') ||
+		clean === '@vite' ||
+		clean.startsWith('@vite/') ||
 		clean.startsWith('\0') ||
 		clean.startsWith('\\0')
 	) {
@@ -864,26 +866,38 @@ function resolveFilePath(targetPath, filesMap) {
 		return cleanNorm
 	}
 
-	// 2. TypeScript .js -> .ts / .tsx mapping
+	// 2. TypeScript .js / .jsx / .mjs / .cjs -> .ts / .tsx / .mts / .cts / .d.ts / .d.mts / .d.cts mapping
 	if (cleanNorm.endsWith('.js')) {
 		const asTs = cleanNorm.slice(0, -3) + '.ts'
 		if (filesMap.has(asTs)) return asTs
 		const asTsx = cleanNorm.slice(0, -3) + '.tsx'
 		if (filesMap.has(asTsx)) return asTsx
+		const asDts = cleanNorm.slice(0, -3) + '.d.ts'
+		if (filesMap.has(asDts)) return asDts
 	}
 	if (cleanNorm.endsWith('.jsx')) {
 		const asTsx = cleanNorm.slice(0, -4) + '.tsx'
 		if (filesMap.has(asTsx)) return asTsx
 		const asTs = cleanNorm.slice(0, -4) + '.ts'
 		if (filesMap.has(asTs)) return asTs
+		const asDts = cleanNorm.slice(0, -4) + '.d.ts'
+		if (filesMap.has(asDts)) return asDts
 	}
 	if (cleanNorm.endsWith('.mjs')) {
 		const asMts = cleanNorm.slice(0, -4) + '.mts'
 		if (filesMap.has(asMts)) return asMts
+		const asDmts = cleanNorm.slice(0, -4) + '.d.mts'
+		if (filesMap.has(asDmts)) return asDmts
+		const asDts = cleanNorm.slice(0, -4) + '.d.ts'
+		if (filesMap.has(asDts)) return asDts
 	}
 	if (cleanNorm.endsWith('.cjs')) {
 		const asCts = cleanNorm.slice(0, -4) + '.cts'
 		if (filesMap.has(asCts)) return asCts
+		const asDcts = cleanNorm.slice(0, -4) + '.d.cts'
+		if (filesMap.has(asDcts)) return asDcts
+		const asDts = cleanNorm.slice(0, -4) + '.d.ts'
+		if (filesMap.has(asDts)) return asDts
 	}
 
 	// 3. Try appending extensions
@@ -1398,11 +1412,14 @@ function buildGraph(files, packageJsons = []) {
 	const edgeMap = new Map() // key: fromId->toId -> { from, to, typeOnly: boolean }
 	const externalsMap = new Map()
 	const prodExternalsAll = new Set()
+	const prodRuntimeExternalsAll = new Set()
 	const packageImporters = new Map() // normName -> Set<filePath>
 	const pkgPackageImporters = new Map() // dir -> Map(normName -> Set<filePath>)
 	const pkgProdExternals = new Map() // dir -> Set of external pkg names
+	const pkgProdRuntimeExternals = new Map() // dir -> Set of external pkg names used at runtime
 	for (const pkgItem of parsedPackageJsons) {
 		pkgProdExternals.set(pkgItem.dir, new Set())
+		pkgProdRuntimeExternals.set(pkgItem.dir, new Set())
 		pkgPackageImporters.set(pkgItem.dir, new Map())
 	}
 
@@ -1690,28 +1707,38 @@ function buildGraph(files, packageJsons = []) {
 				) {
 					externalsMap.set(normName, (externalsMap.get(normName) || 0) + 1)
 					if (node.category === 'production') {
+						// Type-only imports and .d.ts files count as USAGE (a package used only via import type is not "declared but unused")
 						prodExternalsAll.add(normName)
 						if (nearestPkg && pkgProdExternals.has(nearestPkg.dir)) {
 							pkgProdExternals.get(nearestPkg.dir).add(normName)
 						}
 
-						// Track up to 3 source file paths per undeclared package
-						if (!packageImporters.has(normName)) {
-							packageImporters.set(normName, new Set())
-						}
-						const s = packageImporters.get(normName)
-						if (s.size < 3) {
-							s.add(node.path)
-						}
-
-						if (nearestPkg && pkgPackageImporters.has(nearestPkg.dir)) {
-							const pMap = pkgPackageImporters.get(nearestPkg.dir)
-							if (!pMap.has(normName)) {
-								pMap.set(normName, new Set())
+						// But they never produce usedButUndeclared entries
+						const isTypeContext = Boolean(typeOnly || isDeclarationFile(node.path))
+						if (!isTypeContext) {
+							prodRuntimeExternalsAll.add(normName)
+							if (nearestPkg && pkgProdRuntimeExternals.has(nearestPkg.dir)) {
+								pkgProdRuntimeExternals.get(nearestPkg.dir).add(normName)
 							}
-							const ps = pMap.get(normName)
-							if (ps.size < 3) {
-								ps.add(node.path)
+
+							// Track up to 3 source file paths per undeclared package
+							if (!packageImporters.has(normName)) {
+								packageImporters.set(normName, new Set())
+							}
+							const s = packageImporters.get(normName)
+							if (s.size < 3) {
+								s.add(node.path)
+							}
+
+							if (nearestPkg && pkgPackageImporters.has(nearestPkg.dir)) {
+								const pMap = pkgPackageImporters.get(nearestPkg.dir)
+								if (!pMap.has(normName)) {
+									pMap.set(normName, new Set())
+								}
+								const ps = pMap.get(normName)
+								if (ps.size < 3) {
+									ps.add(node.path)
+								}
 							}
 						}
 					}
@@ -1979,8 +2006,9 @@ function buildGraph(files, packageJsons = []) {
 			}
 		}
 
+		const pkgRuntimeExternals = pkgProdRuntimeExternals.get(pkgItem.dir) || new Set()
 		const pkgUsedButUndeclared = []
-		for (const dep of pkgUsedInProd) {
+		for (const dep of pkgRuntimeExternals) {
 			if (
 				!pkgDeclared.has(dep) &&
 				!isNodeBuiltin(dep) &&
@@ -2046,7 +2074,7 @@ function buildGraph(files, packageJsons = []) {
 	}
 
 	const usedButUndeclared = []
-	for (const name of prodExternalsAll) {
+	for (const name of prodRuntimeExternalsAll) {
 		if (
 			!allDeclaredDependencies.has(name) &&
 			!isNodeBuiltin(name) &&

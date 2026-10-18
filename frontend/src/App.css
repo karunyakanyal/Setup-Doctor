@@ -2495,6 +2495,17 @@ select:focus-visible {
   font-weight: 500;
 }
 
+.codemap-card-subline {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  white-space: nowrap;
+  min-height: 16px;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
 .text-warn {
   color: #b45309;
 }
@@ -2911,6 +2922,21 @@ button.codemap-card-button:focus-visible {
 .codemap-link-button:focus-visible {
   outline: 2px solid #55ae9d;
   outline-offset: 2px;
+}
+
+/* Action column styling - prevent wrapping and reserve minimum width */
+.codemap-table th.col-action,
+.codemap-table td.col-action,
+th.col-action,
+td.col-action {
+  white-space: nowrap !important;
+  min-width: 80px !important;
+  width: 1%;
+}
+
+.col-action .codemap-link-button {
+  white-space: nowrap !important;
+  word-break: normal !important;
 }
 
 /* Cycles list */
@@ -3492,6 +3518,344 @@ button.codemap-card-button:focus-visible {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/* CodeMap production vs non-production controls */
+.codemap-controls-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  margin-bottom: 12px;
+  min-width: 0;
+}
+
+.codemap-toggle-note {
+  font-size: 12px;
+  color: var(--muted, #64748b);
+  font-style: italic;
+}
+
+.codemap-toggle-label.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.codemap-toggle-label.disabled input[type="checkbox"] {
+  cursor: not-allowed;
+}
+
+/* Suffix and notes */
+.codemap-card-sub {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+/* Type-only cycles */
+.codemap-type-only-cycles {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.type-only-cycles-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.type-only-cycles-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #475569;
+}
+
+.type-only-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Dependencies by package */
+.codemap-package-group {
+  border: 1px solid #edf2f0;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+}
+
+.codemap-package-group.aggregate-group {
+  margin-top: 14px;
+  border: 1px solid #cbd5e1;
+  background: #fbfdfc;
+}
+
+.codemap-package-summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.codemap-package-content {
+  margin-top: 12px;
+  min-width: 0;
+}
+
+.codemap-dep-note {
+  font-size: 11px;
+  color: #64748b;
+  font-style: italic;
+  margin: 6px 0 0;
+}
+
+.undeclared-sources-list {
+  font-size: 10px;
+  color: #b91c1c;
+  font-weight: normal;
+}
+
+/* Section headers in By Language list */
+.codemap-list-section-header {
+  display: block !important;
+  padding-top: 10px !important;
+  border-top: 1px dashed #cbd5e1 !important;
+  margin-top: 6px !important;
+}
+
+.codemap-list-section-header:first-child,
+.codemap-list-section-header.first-header {
+  border-top: none !important;
+  padding-top: 0 !important;
+  margin-top: 0 !important;
+}
+
+.by-lang-heading,
+.other-types-heading {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Pagination container & overflow safety */
+.codemap-paginated-wrap {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.codemap-file-chip,
+.codemap-dep-tag,
+.file-path,
+.file-meta,
+.codemap-table td,
+.codemap-table th,
+.codemap-unresolved-table td,
+.codemap-unresolved-table th,
+.count-badge,
+.percent-badge,
+.font-mono,
+.status-pill,
+.undeclared-sources-list,
+.dep-name,
+.pkg-counts-meta {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+@media (max-width: 480px) {
+  .codemap-summary-cards {
+    grid-template-columns: 1fr;
+  }
+  .codemap-subcard,
+  .codemap-card,
+  .codemap-package-group {
+    min-width: 0;
+    max-width: 100%;
+  }
+}
+
+/* Expand/collapse bar for Dependencies and Transitively affected folders */
+.codemap-section-header-row,
+.transitive-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.codemap-expand-collapse-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.codemap-action-btn {
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #334155;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.codemap-action-btn:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+/* Zero issues package row */
+.codemap-zero-issues-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 6px;
+  margin-top: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #64748b;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.show-zero-issues-btn {
+  font-size: 12px;
+  color: #2563eb;
+  font-weight: 500;
+  text-decoration: underline;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.show-zero-issues-btn:hover {
+  color: #1d4ed8;
+}
+
+/* Compact stat row in impact box */
+.compact-stat-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 10px 0 14px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  box-sizing: border-box;
+}
+
+@media (max-width: 600px) {
+  .compact-stat-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.compact-stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.compact-stat-label {
+  font-size: 11px;
+  color: #64748b;
+  text-transform: capitalize;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.compact-stat-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+/* Transitive folder details */
+.transitive-folder-details {
+  border: 1px solid #edf2f0;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+}
+
+.transitive-folder-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.transitive-folder-summary .folder-name {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: #1e293b;
+}
+
+.transitive-folder-content {
+  margin-top: 8px;
+  padding-left: 8px;
+  border-left: 2px solid #e2e8f0;
+}
+
+.transitive-tests-group {
+  border-style: dashed;
+  background: #fdfefe;
+}
+
+.transitive-tests-group .folder-name {
+  font-family: inherit;
+  font-weight: 600;
+  color: #64748b;
 }
 
 
