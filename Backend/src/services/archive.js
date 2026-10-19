@@ -2,7 +2,7 @@ const path = require('path')
 const zlib = require('zlib')
 const tar = require('tar-stream')
 const { Readable, Transform } = require('stream')
-const { getGithubHeaders } = require('./github')
+const { getGithubHeaders, updateRateLimitFromHeaders, formatResetTime, redactToken } = require('./github')
 
 const MAX_COMPRESSED_BYTES = 30 * 1024 * 1024 // 30MB
 const MAX_EXPANDED_BYTES = 120 * 1024 * 1024 // 120MB
@@ -528,17 +528,30 @@ async function fetchRepoArchive(owner, repo, ref, options = {}) {
 					throw fetchErr
 				}
 
+				if (response.headers) {
+					updateRateLimitFromHeaders(response.headers)
+				}
+
+				if (response.status === 401) {
+					const error = new Error('GitHub token is invalid or expired')
+					error.status = 401
+					throw error
+				}
+
+				const remaining = response.headers?.get?.('x-ratelimit-remaining')
+				const resetHeader = response.headers?.get?.('x-ratelimit-reset')
 				if (
 					response.status === 429 ||
-					(response.status === 403 && response.headers?.get?.('x-ratelimit-remaining') === '0')
+					(response.status === 403 && (remaining === '0' || Boolean(resetHeader)))
 				) {
-					const error = new Error('GitHub API rate limit exceeded. Set GITHUB_TOKEN.')
+					const resetTime = formatResetTime(resetHeader)
+					const error = new Error(`GitHub rate limit reached, resets at ${resetTime}`)
 					error.status = 429
 					throw error
 				}
 
 				if (response.status === 404) {
-					const error = new Error('GitHub repository or ref not found')
+					const error = new Error('Repository not found or private')
 					error.status = 404
 					throw error
 				}
@@ -580,6 +593,9 @@ async function fetchRepoArchive(owner, repo, ref, options = {}) {
 			totalPromise,
 		])
 	} catch (err) {
+		if (err && typeof err.message === 'string') {
+			err.message = redactToken(err.message)
+		}
 		destroyStreams(err)
 		abortController.abort(err)
 		if (totalTimeoutTriggered || headersTimeoutSignal.aborted || isArchiveTimeoutError(err, headersTimeoutSignal)) {

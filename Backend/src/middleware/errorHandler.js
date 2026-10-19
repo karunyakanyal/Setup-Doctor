@@ -1,3 +1,5 @@
+const { redactToken } = require('../services/github')
+
 const errorHandler = (err, req, res, next) => { // eslint-disable-line no-unused-vars
 	const status = typeof err.status === 'number'
 		? err.status
@@ -5,7 +7,8 @@ const errorHandler = (err, req, res, next) => { // eslint-disable-line no-unused
 		? err.statusCode
 		: 500
 
-	const message = err.message || 'Internal server error'
+	let message = err.message || 'Internal server error'
+	message = redactToken(message)
 
 	res.status(status).json({
 		success: false,

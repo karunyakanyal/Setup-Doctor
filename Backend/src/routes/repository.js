@@ -42,10 +42,17 @@ const handleTree = async (req, res, next) => {
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
 		)
 
+		if (githubResponse.status === 401) {
+			return res.status(401).json({
+				success: false,
+				message: 'GitHub token is invalid or expired',
+			})
+		}
+
 		if (githubResponse.status === 404) {
 			return res.status(404).json({
 				success: false,
-				message: 'GitHub repository or branch not found',
+				message: 'Repository not found or private',
 			})
 		}
 
@@ -115,10 +122,17 @@ const handleFile = async (req, res, next) => {
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(branch)}`,
 		)
 
+		if (githubResponse.status === 401) {
+			return res.status(401).json({
+				success: false,
+				message: 'GitHub token is invalid or expired',
+			})
+		}
+
 		if (githubResponse.status === 404) {
 			return res.status(404).json({
 				success: false,
-				message: 'GitHub file not found',
+				message: 'Repository not found or private',
 			})
 		}
 
@@ -223,6 +237,13 @@ const handleDiagnose = async (req, res, next) => {
 			fetchOptions,
 		)
 
+		if (githubResponse.status === 401) {
+			return res.status(401).json({
+				success: false,
+				message: 'GitHub token is invalid or expired',
+			})
+		}
+
 		if (githubResponse.status === 404) {
 			return res.status(404).json({
 				success: false,
@@ -259,6 +280,20 @@ const handleDiagnose = async (req, res, next) => {
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
 			fetchOptions,
 		)
+
+		if (treeResponse.status === 401) {
+			return res.status(401).json({
+				success: false,
+				message: 'GitHub token is invalid or expired',
+			})
+		}
+
+		if (treeResponse.status === 404) {
+			return res.status(404).json({
+				success: false,
+				message: 'Repository not found or private',
+			})
+		}
 
 		if (!treeResponse.ok) {
 			return res.status(502).json({
@@ -342,6 +377,13 @@ const handleBuildCheck = async (req, res, next) => {
 		const githubResponse = await ghFetch(
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/package.json?ref=${encodeURIComponent(branch)}`,
 		)
+
+		if (githubResponse.status === 401) {
+			return res.status(401).json({
+				success: false,
+				message: 'GitHub token is invalid or expired',
+			})
+		}
 
 		if (githubResponse.status === 404) {
 			return res.status(404).json({

@@ -7,8 +7,9 @@ const getGithubHeaders = () => {
 		Accept: 'application/vnd.github+json',
 		'User-Agent': 'SetupDoctor',
 	}
-	if (process.env.GITHUB_TOKEN) {
-		headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`
+	const token = process.env.GITHUB_TOKEN ? process.env.GITHUB_TOKEN.trim() : ''
+	if (token) {
+		headers.Authorization = `Bearer ${token}`
 	}
 	return headers
 }
@@ -23,6 +24,120 @@ const createCachedResponse = (cached) => {
 
 const TIMEOUT_MS = 15000
 const TIMEOUT_ERROR_MESSAGE = 'GitHub took too long to respond. Try again in a moment.'
+const RATE_LIMIT_CACHE_TTL_MS = 60 * 1000 // 60 seconds
+
+let cachedRateLimit = null
+let rateLimitCachedAt = 0
+
+const redactToken = (input) => {
+	const token = process.env.GITHUB_TOKEN ? process.env.GITHUB_TOKEN.trim() : ''
+	if (!token) return input
+	if (typeof input === 'string') {
+		return input.split(token).join('[REDACTED]')
+	}
+	return input
+}
+
+function formatResetTime(reset) {
+	if (!reset) {
+		return new Date(Date.now() + 60 * 1000).toISOString()
+	}
+	if (reset instanceof Date) {
+		return reset.toISOString()
+	}
+	const num = Number(reset)
+	if (!Number.isNaN(num) && num > 0) {
+		const ms = num < 1e11 ? num * 1000 : num
+		return new Date(ms).toISOString()
+	}
+	return String(reset)
+}
+
+function updateRateLimitFromHeaders(headers) {
+	if (!headers) return
+	const getHeader = (name) => {
+		if (typeof headers.get === 'function') {
+			return headers.get(name)
+		}
+		return headers[name.toLowerCase()] ?? headers[name]
+	}
+
+	const remaining = getHeader('x-ratelimit-remaining')
+	const limit = getHeader('x-ratelimit-limit')
+	const reset = getHeader('x-ratelimit-reset')
+
+	if (remaining !== null && remaining !== undefined && limit !== null && limit !== undefined) {
+		cachedRateLimit = {
+			remaining: Number(remaining),
+			limit: Number(limit),
+			resetsAt: formatResetTime(reset),
+		}
+		rateLimitCachedAt = Date.now()
+	}
+}
+
+function getCachedRateLimit() {
+	if (cachedRateLimit && Date.now() - rateLimitCachedAt < RATE_LIMIT_CACHE_TTL_MS) {
+		return {
+			remaining: cachedRateLimit.remaining,
+			limit: cachedRateLimit.limit,
+			resetsAt: cachedRateLimit.resetsAt,
+		}
+	}
+	return null
+}
+
+function setCachedRateLimit(data, cachedAt = Date.now()) {
+	if (!data) {
+		cachedRateLimit = null
+		rateLimitCachedAt = 0
+		return
+	}
+	cachedRateLimit = {
+		remaining: Number(data.remaining),
+		limit: Number(data.limit),
+		resetsAt: formatResetTime(data.resetsAt ?? data.reset),
+	}
+	rateLimitCachedAt = cachedAt
+}
+
+function clearRateLimitCache() {
+	cachedRateLimit = null
+	rateLimitCachedAt = 0
+}
+
+function mapGitHubError(status, headers = {}) {
+	const getHeader = (name) => {
+		if (headers && typeof headers.get === 'function') {
+			return headers.get(name)
+		}
+		return headers ? (headers[name.toLowerCase()] ?? headers[name]) : null
+	}
+
+	if (status === 401) {
+		const error = new Error('GitHub token is invalid or expired')
+		error.status = 401
+		return error
+	}
+
+	const remaining = getHeader('x-ratelimit-remaining')
+	const reset = getHeader('x-ratelimit-reset')
+	const isRateLimit = status === 429 || (status === 403 && (remaining === '0' || remaining === 0 || Boolean(reset)))
+	if (isRateLimit) {
+		const resetTime = formatResetTime(reset)
+		const error = new Error(`GitHub rate limit reached, resets at ${resetTime}`)
+		error.status = 429
+		return error
+	}
+
+	if (status === 404) {
+		const error = new Error('Repository not found or private')
+		error.status = 404
+		return error
+	}
+
+	return null
+}
 
 function isTimeoutError(err, timeoutSignal) {
 	if (timeoutSignal?.aborted && (timeoutSignal.reason?.name === 'TimeoutError' || timeoutSignal.reason?.status === 502 || timeoutSignal.reason?.status === 504 || (typeof timeoutSignal.reason?.message === 'string' && /timeout|timed out|too long/i.test(timeoutSignal.reason.message)))) {
@@ -102,8 +217,22 @@ const ghFetch = async (url, options = {}) => {
 				signal: requestSignal,
 			})
 
-			if (response.status === 429 || (response.status === 403 && response.headers?.get?.('x-ratelimit-remaining') === '0')) {
-				const error = new Error('GitHub API rate limit exceeded. Set GITHUB_TOKEN.')
+			if (response.headers) {
+				updateRateLimitFromHeaders(response.headers)
+			}
+
+			if (response.status === 401) {
+				const error = new Error('GitHub token is invalid or expired')
+				error.status = 401
+				throw error
+			}
+
+			const remaining = response.headers?.get?.('x-ratelimit-remaining')
+			const resetHeader = response.headers?.get?.('x-ratelimit-reset')
+			const isRateLimit = response.status === 429 || (response.status === 403 && (remaining === '0' || Boolean(resetHeader)))
+			if (isRateLimit) {
+				const resetTime = formatResetTime(resetHeader)
+				const error = new Error(`GitHub rate limit reached, resets at ${resetTime}`)
 				error.status = 429
 				throw error
 			}
@@ -150,6 +279,10 @@ const ghFetch = async (url, options = {}) => {
 			cache.set(url, entry)
 			return createCachedResponse(entry)
 		} catch (err) {
+			if (err && typeof err.message === 'string') {
+				err.message = redactToken(err.message)
+			}
+
 			// Do not retry on 4xx (e.g. rate limit error with err.status = 429)
 			if (err && typeof err.status === 'number' && err.status >= 400 && err.status < 500) {
 				throw err
@@ -184,7 +317,7 @@ const ghFetch = async (url, options = {}) => {
 				throw error
 			}
 
-			const error = new Error(lastError?.message || 'Unable to connect to the GitHub API')
+			const error = new Error(redactToken(lastError?.message || 'Unable to connect to the GitHub API'))
 			error.status = 502
 			error.cause = lastError
 			throw error
@@ -207,4 +340,12 @@ module.exports = {
 	MAX_CACHE_ENTRIES,
 	TIMEOUT_MS,
 	TIMEOUT_ERROR_MESSAGE,
+	redactToken,
+	formatResetTime,
+	mapGitHubError,
+	updateRateLimitFromHeaders,
+	getCachedRateLimit,
+	setCachedRateLimit,
+	clearRateLimitCache,
+	RATE_LIMIT_CACHE_TTL_MS,
 }

@@ -6,6 +6,7 @@ const helmet = require('helmet')
 
 const analyzeRouter = require('./routes/analyze')
 const repositoryRouter = require('./routes/repository')
+const healthRouter = require('./routes/health')
 const errorHandler = require('./middleware/errorHandler')
 
 dotenv.config()
@@ -35,12 +36,7 @@ const limiter = rateLimit({
 })
 app.use(limiter)
 
-app.get('/api/health', (req, res) => {
-	res.json({
-		status: 'ok',
-		message: 'SetupDoctor backend is running',
-	})
-})
+app.get('/api/health', healthRouter.handleHealth)
 
 app.use('/api/analyze', analyzeRouter)
 app.use('/api/repository', repositoryRouter)
@@ -49,3 +45,4 @@ app.use(errorHandler)
 
 module.exports = app
 module.exports.app = app
+module.exports.handleHealth = healthRouter.handleHealth
