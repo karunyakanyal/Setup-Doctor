@@ -113,6 +113,8 @@ export default function CodeMapPanel({
   onRerun,
   initialShowUnresolvedPanel = false,
   initialIncludeNonProd = false,
+  includeNonProd: controlledIncludeNonProd,
+  onToggleIncludeNonProd,
   initialExpandedReasons = {},
 }) {
   const isScanning = status === 'scanning'
@@ -122,7 +124,19 @@ export default function CodeMapPanel({
   const [selectedFile, setSelectedFile] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [showUnresolvedPanel, setShowUnresolvedPanel] = useState(initialShowUnresolvedPanel)
-  const [includeNonProd, setIncludeNonProd] = useState(initialIncludeNonProd)
+  const [localIncludeNonProd, setLocalIncludeNonProd] = useState(initialIncludeNonProd)
+  const isIncludeNonProdControlled = controlledIncludeNonProd !== undefined
+  const includeNonProd = isIncludeNonProdControlled ? controlledIncludeNonProd : localIncludeNonProd
+
+  const handleToggleIncludeNonProd = (val) => {
+    if (onToggleIncludeNonProd) {
+      onToggleIncludeNonProd(val)
+    }
+    if (!isIncludeNonProdControlled) {
+      setLocalIncludeNonProd(val)
+    }
+  }
+
   const [expandedReasons, setExpandedReasons] = useState(initialExpandedReasons)
   const unresolvedPanelRef = useRef(null)
 
@@ -708,7 +722,7 @@ export default function CodeMapPanel({
               <input
                 type="checkbox"
                 checked={hasNonProdFiles && includeNonProd}
-                onChange={(e) => setIncludeNonProd(e.target.checked)}
+                onChange={(e) => handleToggleIncludeNonProd(e.target.checked)}
                 disabled={!hasNonProdFiles}
                 aria-label="Include tests, fixtures and playground"
               />
@@ -859,7 +873,7 @@ export default function CodeMapPanel({
                   <input
                     type="checkbox"
                     checked={hasNonProdFiles && includeNonProd}
-                    onChange={(e) => setIncludeNonProd(e.target.checked)}
+                    onChange={(e) => handleToggleIncludeNonProd(e.target.checked)}
                     disabled={!hasNonProdFiles}
                     aria-label="Include tests, fixtures and playground"
                   />

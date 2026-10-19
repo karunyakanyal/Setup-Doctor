@@ -4,14 +4,21 @@ import { getWhatToDoNext } from '../../utils/projectGlance.js'
 export default function WhatToDoNextPanel({
   diagnostics = [],
   deepScanData = null,
+  deepScanStatus = 'idle',
+  includeNonProd = false,
   onInspectFile = null,
 }) {
   const [expanded, setExpanded] = useState(false)
   const [copiedId, setCopiedId] = useState(null)
 
   const steps = useMemo(() => {
-    return getWhatToDoNext({ diagnostics, deepScanData })
-  }, [diagnostics, deepScanData])
+    return getWhatToDoNext({
+      diagnostics,
+      deepScanData,
+      deepScanStatus,
+      includeNonProd,
+    })
+  }, [diagnostics, deepScanData, deepScanStatus, includeNonProd])
 
   const displayedSteps = expanded ? steps : steps.slice(0, 3)
   const hasMore = steps.length > 3
@@ -43,6 +50,12 @@ export default function WhatToDoNextPanel({
     }
   }
 
+  const badgeText = useMemo(() => {
+    if (steps[0]?.severity === 'Scanning') return 'Scanning...'
+    if (steps[0]?.isZeroState) return '0 issues'
+    return `${steps.length} ${steps.length === 1 ? 'step' : 'steps'}`
+  }, [steps])
+
   return (
     <section className="what-to-do-next-panel" aria-labelledby="what-to-do-next-heading">
       <div className="next-panel-header">
@@ -53,7 +66,7 @@ export default function WhatToDoNextPanel({
           </h2>
         </div>
         <span className="next-steps-count-badge">
-          {steps[0]?.isZeroState ? '0 issues' : `${steps.length} ${steps.length === 1 ? 'step' : 'steps'}`}
+          {badgeText}
         </span>
       </div>
 
@@ -68,7 +81,7 @@ export default function WhatToDoNextPanel({
             >
               <div className="step-card-main">
                 <div className="step-number-badge">
-                  {step.isZeroState ? '✓' : idx + 1}
+                  {step.isZeroState ? (step.severity === 'Scanning' ? '⏳' : '✓') : idx + 1}
                 </div>
 
                 <div className="step-content">
@@ -119,10 +132,10 @@ export default function WhatToDoNextPanel({
       </div>
 
       {hasMore && (
-        <div className="next-steps-footer">
+        <div className="next-panel-footer">
           <button
             type="button"
-            className="show-more-recommendations-btn"
+            className="btn-secondary next-toggle-btn"
             onClick={() => setExpanded((prev) => !prev)}
             aria-expanded={expanded}
           >

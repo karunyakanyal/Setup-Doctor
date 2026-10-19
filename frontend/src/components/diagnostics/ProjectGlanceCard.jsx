@@ -9,6 +9,8 @@ export default function ProjectGlanceCard({
   stack = [],
   diagnostics = [],
   deepScanData = null,
+  deepScanStatus = 'idle',
+  includeNonProd = false,
 }) {
   const stackDescription = useMemo(() => {
     return formatStackInPlainWords({
@@ -24,15 +26,18 @@ export default function ProjectGlanceCard({
       health,
       diagnostics,
       deepScanData,
+      deepScanStatus,
+      includeNonProd,
     })
-  }, [health, diagnostics, deepScanData])
+  }, [health, diagnostics, deepScanData, deepScanStatus, includeNonProd])
 
   const codeFilesCount = useMemo(() => {
     return (
       deepScanData?.coverage?.graphFiles ??
+      deepScanData?.graphFiles ??
       deepScanData?.graph?.nodes?.length ??
-      deepScanData?.inventory?.analyzedFiles ??
       deepScanData?.coverage?.analyzedFiles ??
+      deepScanData?.inventory?.analyzedFiles ??
       0
     )
   }, [deepScanData])
@@ -56,14 +61,22 @@ export default function ProjectGlanceCard({
           </span>
           <div className="verdict-text-wrap">
             <span className="verdict-label">{verdict.label}</span>
-            <span className="verdict-score-sub">{verdict.score}/100</span>
+            {verdict.showScore && typeof verdict.score === 'number' && (
+              <span className="verdict-score-sub">{verdict.score}/100</span>
+            )}
           </div>
         </div>
       </div>
 
       <div className="glance-card-footer">
         <div className="glance-meta-item">
-          <strong className="meta-number">{codeFilesCount.toLocaleString()}</strong>
+          <strong className="meta-number">
+            {deepScanStatus === 'scanning'
+              ? 'Scanning code...'
+              : (deepScanStatus === 'error' || (!deepScanData && deepScanStatus === 'idle'))
+              ? '—'
+              : codeFilesCount.toLocaleString()}
+          </strong>
           <span className="meta-label">code files mapped</span>
         </div>
 

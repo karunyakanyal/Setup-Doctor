@@ -75,14 +75,89 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
   const [diagnosticsError, setDiagnosticsError] = useState(null)
 
   // Deep scan state
-  const [deepScanStatus, setDeepScanStatus] = useState('idle')
-  const [deepScanData, setDeepScanData] = useState(null)
+  const [deepScanStatus, setDeepScanStatus] = useState(() => {
+    const active = resolveLatestAnalysis(analysisHistory, selectedAnalysis)
+    const st = extractAnalysisState(active)
+    if (active?.deepScanData || st.codeMapSummary) return 'success'
+    return 'idle'
+  })
+  const [deepScanData, setDeepScanData] = useState(() => {
+    const active = resolveLatestAnalysis(analysisHistory, selectedAnalysis)
+    const st = extractAnalysisState(active)
+    return active?.deepScanData || st.codeMapSummary || null
+  })
   const [deepScanError, setDeepScanError] = useState(null)
 
   // Filter & passing toggle state
   const [activeFilter, setActiveFilter] = useState('all')
   const [showPassed, setShowPassed] = useState(false)
   const [viewMode, setViewMode] = useState('simple') // 'simple' | 'detailed'
+  const [includeNonProd, setIncludeNonProd] = useState(false)
+
+  async function runDeepScan(repositoryData) {
+    if (!repositoryData?.owner || !repositoryData?.name || !repositoryData?.defaultBranch) {
+      return
+    }
+
+    setDeepScanStatus('scanning')
+    setDeepScanError(null)
+
+    try {
+      const response = await fetch('/api/repository/graph', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          owner: repositoryData.owner,
+          repo: repositoryData.name,
+          branch: repositoryData.defaultBranch,
+        }),
+      })
+
+      if (response.status === 413) {
+        throw new Error('Repository too large to scan fully')
+      }
+
+      if (response.status === 429) {
+        const retryAfter = response.headers?.get?.('retry-after')
+        const message = retryAfter
+          ? `Rate limit exceeded. Try again in ${retryAfter}s.`
+          : 'Rate limit exceeded. Please try again later.'
+        throw new Error(message)
+      }
+
+      if (response.status === 503) {
+        throw new Error('Deep scan is busy, try again in a minute')
+      }
+
+      if (!response.ok) {
+        let errMessage = 'Deep scan request failed'
+        try {
+          const errData = await response.json()
+          if (errData?.message) errMessage = errData.message
+        } catch {
+          // ignore
+        }
+        throw new Error(errMessage)
+      }
+
+      const data = await response.json()
+      if (!data.success) {
+        throw new Error(data.message || 'Deep scan request was unsuccessful')
+      }
+
+      setDeepScanData(data)
+      setDeepScanStatus('success')
+
+      // Save only small summary with analysis in localStorage, NEVER the full graph
+      const smallSummary = createCodeMapSummary(data)
+      updateAnalysisCodeMapSummary(repositoryData, smallSummary)
+    } catch (err) {
+      setDeepScanStatus('error')
+      setDeepScanError(err.message || 'Network error while running deep scan')
+    }
+  }
 
   useEffect(() => {
     if (!showSuccessToast) {
@@ -106,10 +181,12 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     setDiagnosticsError(null)
     setIsDiagnosticsLoading(true)
     setDeepScanData(null)
+    setDeepScanStatus('scanning')
     setDeepScanError(null)
     setActiveFilter('all')
     setShowPassed(false)
     setViewMode('simple')
+    setIncludeNonProd(false)
 
     try {
       const response = await fetch('/api/repository/diagnose', {
@@ -181,71 +258,6 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
       })
     } finally {
       setIsDiagnosticsLoading(false)
-    }
-  }
-
-  async function runDeepScan(repositoryData) {
-    if (!repositoryData?.owner || !repositoryData?.name || !repositoryData?.defaultBranch) {
-      return
-    }
-
-    setDeepScanStatus('scanning')
-    setDeepScanError(null)
-
-    try {
-      const response = await fetch('/api/repository/graph', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          owner: repositoryData.owner,
-          repo: repositoryData.name,
-          branch: repositoryData.defaultBranch,
-        }),
-      })
-
-      if (response.status === 413) {
-        throw new Error('Repository too large to scan fully')
-      }
-
-      if (response.status === 429) {
-        const retryAfter = response.headers?.get?.('retry-after')
-        const message = retryAfter
-          ? `Rate limit exceeded. Try again in ${retryAfter}s.`
-          : 'Rate limit exceeded. Please try again later.'
-        throw new Error(message)
-      }
-
-      if (response.status === 503) {
-        throw new Error('Deep scan is busy, try again in a minute')
-      }
-
-      if (!response.ok) {
-        let errMessage = 'Deep scan request failed'
-        try {
-          const errData = await response.json()
-          if (errData?.message) errMessage = errData.message
-        } catch {
-          // ignore
-        }
-        throw new Error(errMessage)
-      }
-
-      const data = await response.json()
-      if (!data.success) {
-        throw new Error(data.message || 'Deep scan request was unsuccessful')
-      }
-
-      setDeepScanData(data)
-      setDeepScanStatus('success')
-
-      // Save only small summary with analysis in localStorage, NEVER the full graph
-      const smallSummary = createCodeMapSummary(data)
-      updateAnalysisCodeMapSummary(repositoryData, smallSummary)
-    } catch (err) {
-      setDeepScanStatus('error')
-      setDeepScanError(err.message || 'Network error while running deep scan')
     }
   }
 
@@ -503,11 +515,15 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
             stack={stack}
             diagnostics={diagnostics}
             deepScanData={deepScanData}
+            deepScanStatus={deepScanStatus}
+            includeNonProd={includeNonProd}
           />
 
           <WhatToDoNextPanel
             diagnostics={diagnostics}
             deepScanData={deepScanData}
+            deepScanStatus={deepScanStatus}
+            includeNonProd={includeNonProd}
             onInspectFile={() => {
               setViewMode('detailed')
               const el = document.getElementById('codemap-panel-heading') || document.getElementById('technical-details-title')
@@ -661,6 +677,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                 data={deepScanData}
                 status={deepScanStatus}
                 error={deepScanError}
+                includeNonProd={includeNonProd}
+                onToggleIncludeNonProd={setIncludeNonProd}
                 onRerun={() => runDeepScan(repository)}
               />
 
@@ -761,6 +779,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                   data={deepScanData}
                   status={deepScanStatus}
                   error={deepScanError}
+                  includeNonProd={includeNonProd}
+                  onToggleIncludeNonProd={setIncludeNonProd}
                   onRerun={() => runDeepScan(repository)}
                 />
 
