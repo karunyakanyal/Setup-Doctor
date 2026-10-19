@@ -24,10 +24,17 @@ const handleAnalyze = async (req, res, next) => {
 			`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
 		)
 
+		if (githubResponse.status === 401) {
+			return res.status(401).json({
+				success: false,
+				message: 'GitHub token is invalid or expired',
+			})
+		}
+
 		if (githubResponse.status === 404) {
 			return res.status(404).json({
 				success: false,
-				message: 'GitHub repository not found',
+				message: 'Repository not found or private',
 			})
 		}
 
@@ -54,7 +61,7 @@ const handleAnalyze = async (req, res, next) => {
 		if (res?.writableEnded || error?.name === 'AbortError') {
 			return
 		}
-		if (error && error.status === 429) {
+		if (error && error.status) {
 			return next(error)
 		}
 		const err = new Error('Unable to connect to the GitHub API')
