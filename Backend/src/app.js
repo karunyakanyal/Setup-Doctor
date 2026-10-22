@@ -40,6 +40,7 @@ app.get('/api/health', healthRouter.handleHealth)
 
 app.use('/api/analyze', analyzeRouter)
 app.use('/api/repository', repositoryRouter)
+app.get('/api/badge/:owner/:repo', repositoryRouter.handleBadge)
 
 app.use(errorHandler)
 

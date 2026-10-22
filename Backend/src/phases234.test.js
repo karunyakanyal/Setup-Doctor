@@ -1,0 +1,587 @@
+const assert = require('node:assert/strict')
+const test = require('node:test')
+const { buildGraph, clearPreviousScans, getPreviousScan, setPreviousScan } = require('./services/graph')
+const { maskSecret } = require('./services/projectRules')
+const { queryOsvVulnerabilities, clearOsvCache } = require('./services/osv')
+const { evaluateGithubHygieneSync, evaluateGithubHygiene } = require('./services/githubHygiene')
+const { calculateDimensionsAndGrade } = require('./services/dimensions')
+const { handleBadge } = require('./routes/repository')
+
+test('Phase 2 & 4: Universal Rule 1 - committed-secrets (positive and negative, and secret masking)', () => {
+	// Secret masking helper check
+	assert.equal(maskSecret('AKIAIOSFODNN7WXYZABC'), 'AKIA****')
+	assert.equal(maskSecret('ghp_1234567890abcdef1234567890abcdef1234'), 'ghp_****')
+
+	// Positive: contains real secret
+	const rawKey = 'AKIAIOSFODNN7WXYZABC'
+	const positiveFiles = {
+		'package.json': JSON.stringify({ name: 'test-app', scripts: { test: 'vitest' } }),
+		'src/config.js': `const AWS_KEY = "${rawKey}";`,
+	}
+	const posResult = buildGraph(positiveFiles)
+	const secretRule = posResult.summary.allRules.find((r) => r.id === 'committed-secrets')
+	assert.ok(secretRule)
+	assert.equal(secretRule.count, 1)
+	assert.equal(secretRule.evidence[0].snippet.includes(rawKey), false)
+	assert.ok(secretRule.evidence[0].snippet.includes('AKIA****'))
+	assert.equal(secretRule.why.includes(rawKey), false)
+	assert.ok(secretRule.why.includes('AKIA****'))
+	// Grade cap at C due to committed secrets
+	assert.ok(['C', 'D', 'E'].includes(posResult.grade))
+
+	// Negative: clean or placeholder
+	const negativeFiles = {
+		'package.json': JSON.stringify({ name: 'test-app', scripts: { test: 'vitest' } }),
+		'src/config.js': `const AWS_KEY = "AKIA0000000000000000"; // dummy placeholder`,
+	}
+	const negResult = buildGraph(negativeFiles)
+	const negSecretRule = negResult.summary.allRules.find((r) => r.id === 'committed-secrets')
+	assert.equal(negSecretRule.count, 0)
+})
+
+test('Phase 2: Universal Rule 2 - env-file-tracked (positive and negative)', () => {
+	const posResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app' }),
+		'.env': 'SECRET=123',
+	})
+	const posRule = posResult.summary.allRules.find((r) => r.id === 'env-file-tracked')
+	assert.equal(posRule.count, 1)
+
+	const negResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app' }),
+		'.env.example': 'SECRET=',
+	})
+	const negRule = negResult.summary.allRules.find((r) => r.id === 'env-file-tracked')
+	assert.equal(negRule.count, 0)
+})
+
+test('Phase 2: Universal Rule 3 - missing-lockfile (positive and negative)', () => {
+	const posResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app' }),
+		'src/a.js': 'export const a = 1;',
+		'src/b.js': 'import { a } from "./a.js";',
+		'src/c.js': 'export const c = 2;',
+	})
+	const posRule = posResult.summary.allRules.find((r) => r.id === 'missing-lockfile')
+	assert.equal(posRule.count, 1)
+
+	const negResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app' }),
+		'package-lock.json': JSON.stringify({ name: 'app', lockfileVersion: 2 }),
+		'src/a.js': 'export const a = 1;',
+	})
+	const negRule = negResult.summary.allRules.find((r) => r.id === 'missing-lockfile')
+	assert.equal(negRule.count, 0)
+})
+
+test('Phase 2: Universal Rule 4 - node-version-mismatch across sources (positive and negative)', () => {
+	const posResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app', engines: { node: '>=20.0.0' } }),
+		'.nvmrc': '18.16.0',
+	})
+	const posRule = posResult.summary.allRules.find((r) => r.id === 'node-version-mismatch')
+	assert.equal(posRule.count, 1)
+
+	const negResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app', engines: { node: '>=20.0.0' } }),
+		'.nvmrc': '20.10.0',
+	})
+	const negRule = negResult.summary.allRules.find((r) => r.id === 'node-version-mismatch')
+	assert.equal(negRule.count, 0)
+})
+
+test('Phase 2: Universal Rule 5 - no-ci (positive and negative)', () => {
+	const posResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app' }),
+		'src/a.js': 'export const a = 1;',
+		'src/b.js': 'export const b = 2;',
+		'src/c.js': 'export const c = 3;',
+	})
+	const posRule = posResult.summary.allRules.find((r) => r.id === 'no-ci')
+	assert.equal(posRule.count, 1)
+
+	const negResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app' }),
+		'.github/workflows/ci.yml': 'name: CI',
+	})
+	const negRule = negResult.summary.allRules.find((r) => r.id === 'no-ci')
+	assert.equal(negRule.count, 0)
+})
+
+test('Phase 2: Universal Rule 6 - no-test-script (positive and negative)', () => {
+	const posResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app', scripts: { test: 'echo "Error: no test specified" && exit 1' } }),
+	})
+	const posRule = posResult.summary.allRules.find((r) => r.id === 'no-test-script')
+	assert.equal(posRule.count, 1)
+
+	const negResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app', scripts: { test: 'vitest run' } }),
+	})
+	const negRule = negResult.summary.allRules.find((r) => r.id === 'no-test-script')
+	assert.equal(negRule.count, 0)
+})
+
+test('Phase 2: Universal Rule 7 - low-test-ratio (positive and negative)', () => {
+	const files = {
+		'package.json': JSON.stringify({ name: 'app', scripts: { test: 'vitest' } }),
+	}
+	for (let i = 1; i <= 6; i++) {
+		files[`src/file${i}.js`] = `export const x${i} = ${i};`
+	}
+	const posResult = buildGraph(files)
+	const posRule = posResult.summary.allRules.find((r) => r.id === 'low-test-ratio')
+	assert.equal(posRule.count, 1)
+
+	files['tests/app.test.js'] = `import { x1 } from "../src/file1.js";`
+	files['tests/app2.test.js'] = `import { x2 } from "../src/file2.js";`
+	const negResult = buildGraph(files)
+	const negRule = negResult.summary.allRules.find((r) => r.id === 'low-test-ratio')
+	assert.equal(negRule.count, 0)
+})
+
+test('Phase 2: Universal Rule 8 - file-over-800-lines (positive and negative)', () => {
+	const bigLines = Array(820).fill('const x = 1;').join('\n')
+	const posResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app' }),
+		'src/big.js': bigLines,
+	})
+	const posRule = posResult.summary.allRules.find((r) => r.id === 'file-over-800-lines')
+	assert.equal(posRule.count, 1)
+
+	const negResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app' }),
+		'src/small.js': 'const x = 1;\nconst y = 2;',
+	})
+	const negRule = negResult.summary.allRules.find((r) => r.id === 'file-over-800-lines')
+	assert.equal(negRule.count, 0)
+})
+
+test('Phase 2: Universal Rules 9 & 10 - env var drift (missing from example & unused example env)', () => {
+	const posResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app' }),
+		'.env.example': 'PORT=3000\nUNUSED_SECRET=xyz\n',
+		'src/index.js': `const db = process.env.DATABASE_URL;`,
+	})
+	const missingRule = posResult.summary.allRules.find((r) => r.id === 'env-missing-from-example')
+	assert.equal(missingRule.count, 1)
+	assert.ok(missingRule.why.includes('DATABASE_URL'))
+
+	const unusedRule = posResult.summary.allRules.find((r) => r.id === 'unused-example-env')
+	assert.equal(unusedRule.count, 2) // PORT and UNUSED_SECRET are both unused
+
+	// Clean alignment
+	const negResult = buildGraph({
+		'package.json': JSON.stringify({ name: 'app' }),
+		'.env.example': 'DATABASE_URL=\n',
+		'src/index.js': `const db = process.env.DATABASE_URL;`,
+	})
+	const negMissing = negResult.summary.allRules.find((r) => r.id === 'env-missing-from-example')
+	assert.equal(negMissing.count, 0)
+	const negUnused = negResult.summary.allRules.find((r) => r.id === 'unused-example-env')
+	assert.equal(negUnused.count, 0)
+})
+
+test('Phase 2: Express Rules & Route extraction (profile.routes & express-*)', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			name: 'express-app',
+			dependencies: { express: '^4.18.2' },
+		}),
+		'src/server.js': `
+const express = require('express');
+const app = express();
+app.get('/api/users', (req, res) => res.json([]));
+app.post('/api/login', (req, res) => {
+	const { user } = req.body;
+	res.send(user);
+});
+new Promise((resolve) => resolve()); // unhandled promise
+`,
+	}
+	const result = buildGraph(files)
+	assert.ok(result.summary.profile.stacks.includes('express'))
+	assert.equal(result.summary.profile.routes.length, 2)
+	assert.equal(result.summary.profile.routes[0].path, '/api/users')
+	assert.equal(result.summary.profile.routes[1].path, '/api/login')
+
+	const noErrorMid = result.summary.allRules.find((r) => r.id === 'express-no-error-middleware')
+	assert.equal(noErrorMid.count, 1)
+
+	const noHelmet = result.summary.allRules.find((r) => r.id === 'express-no-helmet')
+	assert.equal(noHelmet.count, 1)
+
+	const unvalidated = result.summary.allRules.find((r) => r.id === 'express-unvalidated-inputs')
+	assert.equal(unvalidated.count, 2)
+
+	const unhandled = result.summary.allRules.find((r) => r.id === 'unhandled-promise')
+	assert.equal(unhandled.count, 1)
+
+	// Clean express app
+	const cleanFiles = {
+		'package.json': JSON.stringify({
+			name: 'clean-express-app',
+			dependencies: { express: '^4.18.2', helmet: '^7.0.0', zod: '^3.21.4' },
+		}),
+		'src/server.js': `
+const express = require('express');
+const helmet = require('helmet');
+const app = express();
+app.use(helmet());
+app.use((err, req, res, next) => res.status(500).send());
+return new Promise((resolve) => resolve());
+`,
+	}
+	const cleanResult = buildGraph(cleanFiles)
+	assert.equal(cleanResult.summary.allRules.find((r) => r.id === 'express-no-error-middleware').count, 0)
+	assert.equal(cleanResult.summary.allRules.find((r) => r.id === 'express-no-helmet').count, 0)
+	assert.equal(cleanResult.summary.allRules.find((r) => r.id === 'unhandled-promise').count, 0)
+})
+
+test('Phase 2: Express wildcard CORS detection', () => {
+	const files = {
+		'package.json': JSON.stringify({ name: 'app', dependencies: { express: '^4.18.2' } }),
+		'src/app.js': `const cors = require('cors'); app.use(cors({ origin: '*' }));`,
+	}
+	const result = buildGraph(files)
+	const corsRule = result.summary.allRules.find((r) => r.id === 'express-wildcard-cors')
+	assert.equal(corsRule.count, 1)
+})
+
+test('Phase 2: React/Vite Rules (vite-secrets-in-env, console-log-in-src, react-no-error-boundary, react-component-over-400-lines)', () => {
+	const bigComponent = Array(420).fill('<div>test</div>').join('\n')
+	const files = {
+		'package.json': JSON.stringify({
+			name: 'vite-react-app',
+			dependencies: { react: '^18.0.0', vite: '^5.0.0' },
+		}),
+		'.env': 'VITE_API_SECRET_KEY=12345\n',
+		'src/App.jsx': `
+import React from 'react';
+console.log('debug render');
+export function App() {
+	return <div>${bigComponent}</div>;
+}
+`,
+	}
+	const result = buildGraph(files)
+	assert.ok(result.summary.profile.stacks.includes('react'))
+	assert.ok(result.summary.profile.stacks.includes('vite'))
+
+	const viteSecret = result.summary.allRules.find((r) => r.id === 'vite-secrets-in-env')
+	assert.equal(viteSecret.count, 1)
+
+	const consoleLog = result.summary.allRules.find((r) => r.id === 'console-log-in-src')
+	assert.equal(consoleLog.count, 1)
+
+	const noEb = result.summary.allRules.find((r) => r.id === 'react-no-error-boundary')
+	assert.equal(noEb.count, 1)
+
+	const bigCompRule = result.summary.allRules.find((r) => r.id === 'react-component-over-400-lines')
+	assert.equal(bigCompRule.count, 1)
+
+	// Clean React app
+	const cleanFiles = {
+		'package.json': JSON.stringify({
+			name: 'clean-react-app',
+			dependencies: { react: '^18.0.0' },
+		}),
+		'src/App.jsx': `
+import React, { Component } from 'react';
+export class ErrorBoundary extends Component {
+	componentDidCatch(error) {}
+	render() { return this.props.children; }
+}
+`,
+	}
+	const cleanResult = buildGraph(cleanFiles)
+	assert.equal(cleanResult.summary.allRules.find((r) => r.id === 'console-log-in-src').count, 0)
+	assert.equal(cleanResult.summary.allRules.find((r) => r.id === 'react-no-error-boundary').count, 0)
+	assert.equal(cleanResult.summary.allRules.find((r) => r.id === 'react-component-over-400-lines').count, 0)
+})
+
+test('Phase 2: Python Rules (unpinned-requirements, bare-except, debug-true, missing-init-py)', () => {
+	const files = {
+		'requirements.txt': 'flask>=2.0.0\nrequests\n',
+		'app.py': `
+import flask
+try:
+	flask.run(debug=True)
+except:
+	pass
+`,
+		'models/user.py': 'class User: pass',
+	}
+	const result = buildGraph(files)
+	assert.ok(result.summary.profile.stacks.includes('python'))
+
+	const unpinned = result.summary.allRules.find((r) => r.id === 'python-unpinned-requirements')
+	assert.equal(unpinned.count, 2)
+
+	const bare = result.summary.allRules.find((r) => r.id === 'python-bare-except')
+	assert.equal(bare.count, 1)
+
+	const debug = result.summary.allRules.find((r) => r.id === 'python-debug-true')
+	assert.equal(debug.count, 1)
+
+	const missingInit = result.summary.allRules.find((r) => r.id === 'python-missing-init-py')
+	assert.equal(missingInit.count, 1)
+
+	// Clean Python project
+	const cleanFiles = {
+		'requirements.txt': 'flask==2.2.5\nrequests==2.31.0\n',
+		'app.py': `
+import flask
+try:
+	flask.run(debug=False)
+except Exception as e:
+	pass
+`,
+		'models/__init__.py': '',
+		'models/user.py': 'class User: pass',
+	}
+	const cleanResult = buildGraph(cleanFiles)
+	assert.equal(cleanResult.summary.allRules.find((r) => r.id === 'python-unpinned-requirements').count, 0)
+	assert.equal(cleanResult.summary.allRules.find((r) => r.id === 'python-bare-except').count, 0)
+	assert.equal(cleanResult.summary.allRules.find((r) => r.id === 'python-debug-true').count, 0)
+	assert.equal(cleanResult.summary.allRules.find((r) => r.id === 'python-missing-init-py').count, 0)
+})
+
+test('Phase 2: OSV offline fallback & mock query', async () => {
+	clearOsvCache()
+	// Mock offline fetch that rejects
+	const offlineFetch = async () => {
+		throw new Error('Network offline')
+	}
+	const vulns = await queryOsvVulnerabilities(
+		[{ name: 'lodash', version: '4.17.20', ecosystem: 'npm' }],
+		{ fetchFn: offlineFetch, timeout: 500 }
+	)
+	assert.deepEqual(vulns, []) // degrades silently
+
+	// Mock online response
+	const onlineFetch = async () => {
+		return {
+			ok: true,
+			json: async () => ({
+				results: [
+					{
+						vulns: [
+							{
+								id: 'GHSA-35jh-r3h4-6jhm',
+								summary: 'Prototype pollution in lodash',
+								database_specific: { severity: 'HIGH' },
+							},
+						],
+					},
+				],
+			}),
+		}
+	}
+	clearOsvCache()
+	const onlineVulns = await queryOsvVulnerabilities(
+		[{ name: 'lodash', version: '4.17.20', ecosystem: 'npm' }],
+		{ fetchFn: onlineFetch }
+	)
+	assert.equal(onlineVulns.length, 1)
+	assert.equal(onlineVulns[0].id, 'GHSA-35jh-r3h4-6jhm')
+	assert.equal(onlineVulns[0].severity, 'critical')
+})
+
+test('Phase 3: GitHub Hygiene local rules (security policy, dependabot, unpinned actions, permissions)', () => {
+	const filesWithoutHygiene = new Map([
+		['.github/workflows/ci.yml', { text: 'on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@main\n' }],
+		['src/a.js', { text: 'export const a = 1;' }],
+		['src/b.js', { text: 'export const b = 2;' }],
+		['package.json', { text: '{}' }],
+	])
+	const findings = evaluateGithubHygieneSync({ filesMap: filesWithoutHygiene })
+	const secRule = findings.find((r) => r.id === 'github-no-security-policy')
+	assert.equal(secRule.count, 1)
+
+	const depBotRule = findings.find((r) => r.id === 'github-no-dependabot')
+	assert.equal(depBotRule.count, 1)
+
+	const unpinnedActionRule = findings.find((r) => r.id === 'github-unpinned-action')
+	assert.equal(unpinnedActionRule.count, 1)
+
+	const permissionsRule = findings.find((r) => r.id === 'github-no-workflow-permissions')
+	assert.equal(permissionsRule.count, 1)
+
+	// Clean GitHub files
+	const cleanGithubFiles = new Map([
+		['SECURITY.md', { text: '# Security Policy' }],
+		['.github/dependabot.yml', { text: 'version: 2' }],
+		['.github/workflows/ci.yml', { text: 'on: push\npermissions: read-all\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4.1.0\n' }],
+	])
+	const cleanFindings = evaluateGithubHygieneSync({ filesMap: cleanGithubFiles })
+	assert.equal(cleanFindings.find((r) => r.id === 'github-no-security-policy').count, 0)
+	assert.equal(cleanFindings.find((r) => r.id === 'github-no-dependabot').count, 0)
+	assert.equal(cleanFindings.find((r) => r.id === 'github-unpinned-action').count, 0)
+	assert.equal(cleanFindings.find((r) => r.id === 'github-no-workflow-permissions').count, 0)
+})
+
+test('Phase 3: GitHub Hygiene remote API calls (unmaintained and branch protection with silent fallback)', async () => {
+	// Remote mock for old commits (> 180 days)
+	const mockFetch = async (url) => {
+		if (url.includes('/commits?per_page=1')) {
+			return {
+				ok: true,
+				json: async () => [
+					{
+						commit: {
+							committer: { date: '2020-01-01T00:00:00Z' },
+						},
+					},
+				],
+			}
+		}
+		if (url.includes('/protection')) {
+			return {
+				status: 404,
+				json: async () => ({ message: 'Branch not protected' }),
+			}
+		}
+		return { ok: false }
+	}
+
+	const findings = await evaluateGithubHygiene({
+		owner: 'old-owner',
+		repo: 'old-repo',
+		branch: 'main',
+		filesMap: new Map([['SECURITY.md', { text: '' }], ['.github/dependabot.yml', { text: '' }]]),
+		isHealthRequest: false,
+		options: { fetchFn: mockFetch },
+	})
+
+	const unmaintained = findings.find((r) => r.id === 'github-unmaintained')
+	assert.ok(unmaintained)
+	assert.equal(unmaintained.count, 1)
+
+	const noProtection = findings.find((r) => r.id === 'github-no-branch-protection')
+	assert.ok(noProtection)
+	assert.equal(noProtection.count, 1)
+})
+
+test('Phase 4: Dimension Ratings A-E, 0-10 check score, worst dimension, and caps', () => {
+	const rules = [
+		{ id: 'committed-secrets', severity: 'critical', dimension: 'security', count: 1 },
+		{ id: 'runtime-cycles', severity: 'critical', dimension: 'reliability', count: 0 },
+		{ id: 'file-over-800-lines', severity: 'nice-to-have', dimension: 'maintainability', count: 0 },
+		{ id: 'missing-lockfile', severity: 'important', dimension: 'hygiene', count: 0 },
+	]
+	const result = calculateDimensionsAndGrade(rules)
+	assert.ok(result.dimensions.security)
+	assert.ok(result.dimensions.reliability)
+	assert.ok(result.dimensions.maintainability)
+	assert.ok(result.dimensions.hygiene)
+
+	// Security should be C or worse due to committed secrets
+	assert.ok(['C', 'D', 'E'].includes(result.dimensions.security.grade))
+	assert.equal(result.dimensions.reliability.grade, 'A')
+	assert.equal(result.dimensions.maintainability.grade, 'A')
+	assert.equal(result.dimensions.hygiene.grade, 'A')
+
+	// Overall grade is capped at C due to committed secrets
+	assert.equal(result.grade, 'C')
+	assert.equal(result.capReason, 'committed secret')
+})
+
+test('Phase 4: Since-last-scan diff (summary.changes: newFindings, fixedFindings, dimensionChange)', () => {
+	clearPreviousScans()
+	const owner = 'test-owner'
+	const repo = 'diff-repo'
+
+	// Scan 1: has circular dependency
+	const scan1Files = {
+		'package.json': JSON.stringify({ name: 'app', scripts: { test: 'vitest' } }),
+		'package-lock.json': '{}',
+		'.github/workflows/ci.yml': 'name: CI\npermissions: read-all\njobs:\n  build:\n    steps:\n      - uses: actions/checkout@v4\n',
+		'SECURITY.md': '# Security Policy',
+		'.github/dependabot.yml': 'version: 2',
+		'src/a.js': 'import { b } from "./b.js"; export const a = 1;',
+		'src/b.js': 'import { a } from "./a.js"; export const b = 2;',
+	}
+	const res1 = buildGraph(scan1Files, [], { owner, repo })
+	assert.equal(res1.summary.changes, null) // first scan has no changes
+
+	// Scan 2: fixed cycle, but added committed secret
+	const scan2Files = {
+		'package.json': JSON.stringify({ name: 'app', scripts: { test: 'vitest' } }),
+		'package-lock.json': '{}',
+		'.github/workflows/ci.yml': 'name: CI\npermissions: read-all\njobs:\n  build:\n    steps:\n      - uses: actions/checkout@v4\n',
+		'SECURITY.md': '# Security Policy',
+		'.github/dependabot.yml': 'version: 2',
+		'src/a.js': 'import "./secret.js"; export const a = 1;',
+		'src/b.js': 'export const b = 2;',
+		'src/secret.js': 'const key = "AKIAIOSFODNN7WXYZABC";',
+	}
+	const res2 = buildGraph(scan2Files, [], { owner, repo })
+	assert.ok(res2.summary.changes)
+	assert.equal(res2.summary.changes.newFindings.length, 2)
+	assert.ok(res2.summary.changes.newFindings.some(f => f.id === 'committed-secrets'))
+	assert.ok(res2.summary.changes.newFindings.some(f => f.id === 'orphans'))
+	assert.equal(res2.summary.changes.fixedFindings.length, 1)
+	assert.equal(res2.summary.changes.fixedFindings[0].id, 'runtime-cycles')
+	assert.ok(res2.summary.changes.dimensionChange)
+})
+
+test('Phase 4: Badge endpoint GET /api/badge/:owner/:repo', async () => {
+	clearPreviousScans()
+	setPreviousScan('badge-owner', 'badge-repo', {
+		grade: 'A',
+		score: 95,
+	})
+
+	let capturedStatus = 200
+	let capturedHeaders = {}
+	let capturedBody = null
+
+	const req = {
+		params: { owner: 'badge-owner', repo: 'badge-repo' },
+		headers: { accept: 'image/svg+xml' },
+		protocol: 'https',
+		get: (h) => (h === 'host' ? 'setupdoctor.dev' : ''),
+	}
+	const res = {
+		status: (code) => {
+			capturedStatus = code
+			return res
+		},
+		setHeader: (k, v) => {
+			capturedHeaders[k] = v
+		},
+		send: (body) => {
+			capturedBody = body
+			return res
+		},
+		json: (data) => {
+			capturedBody = data
+			return res
+		},
+	}
+
+	await handleBadge(req, res)
+	assert.equal(capturedStatus, 200)
+	assert.equal(capturedHeaders['Content-Type'], 'image/svg+xml')
+	assert.equal(capturedHeaders['Cache-Control'], 'public, max-age=600')
+	assert.ok(capturedHeaders['X-Markdown-Snippet'])
+	assert.ok(capturedHeaders['X-Markdown-Snippet'].includes('badge-owner/badge-repo'))
+	assert.ok(capturedBody.includes('<svg'))
+	assert.ok(capturedBody.includes('Grade A'))
+})
+
+test('Production files only: playground, fixtures, and tests never produce findings', () => {
+	const files = {
+		'package.json': JSON.stringify({ name: 'app' }),
+		'playground/bad.js': 'const x = "AKIAIOSFODNN7WXYZABC"; console.log(1);',
+		'fixtures/leaked.js': 'const token = "ghp_1234567890abcdef1234567890abcdef1234";',
+		'src/__tests__/test.js': 'console.log(process.env.UNDEFINED_VAR);',
+		'src/index.js': 'export const ok = 1;',
+	}
+	const result = buildGraph(files)
+	const secretRule = result.summary.allRules.find((r) => r.id === 'committed-secrets')
+	assert.equal(secretRule.count, 0) // No findings from playground, fixtures, tests!
+	const consoleRule = result.summary.allRules.find((r) => r.id === 'console-log-in-src')
+	assert.equal(consoleRule.count, 0)
+})
