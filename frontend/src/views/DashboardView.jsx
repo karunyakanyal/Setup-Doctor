@@ -16,6 +16,9 @@ import DiagnosticsErrorState from '../components/diagnostics/DiagnosticsErrorSta
 import CodeMapPanel from '../components/codemap/CodeMapPanel'
 import ProjectGlanceCard from '../components/diagnostics/ProjectGlanceCard'
 import WhatToDoNextPanel from '../components/diagnostics/WhatToDoNextPanel'
+import ProjectProfileCard from '../components/diagnostics/ProjectProfileCard'
+import DimensionRatingTiles from '../components/diagnostics/DimensionRatingTiles'
+import FindingsGroupedBySeverity from '../components/diagnostics/FindingsGroupedBySeverity'
 import {
   filterDiagnostics,
   groupDiagnosticsByCategory,
@@ -531,6 +534,27 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
             }}
           />
         </section>
+      )}
+
+      {repository && !isDiagnosticsLoading && !diagnosticsError && (deepScanData?.profile || deepScanData?.summary?.profile) && (
+        <ProjectProfileCard
+          profile={deepScanData.profile || deepScanData.summary?.profile}
+          repository={repository}
+        />
+      )}
+
+      {repository && !isDiagnosticsLoading && !diagnosticsError && (deepScanData?.dimensions || deepScanData?.summary?.dimensions) && (
+        <DimensionRatingTiles
+          dimensions={deepScanData.dimensions || deepScanData.summary?.dimensions}
+        />
+      )}
+
+      {repository && !isDiagnosticsLoading && !diagnosticsError && (
+        <FindingsGroupedBySeverity
+          findings={deepScanData?.findings || deepScanData?.summary?.findings || []}
+          viewMode={viewMode}
+          onSwitchToDetailed={() => setViewMode('detailed')}
+        />
       )}
 
       {repository && diagnosticsError && (

@@ -1,4 +1,21 @@
+const {
+	extractProjectProfile,
+	evaluateProjectRules,
+} = require('./projectRules')
+const {
+	evaluateGithubHygieneSync,
+	evaluateGithubHygiene,
+} = require('./githubHygiene')
+const {
+	calculateDimensionsAndGrade,
+} = require('./dimensions')
 const path = require('path')
+const {
+	formatSnippet,
+	extractExports,
+	findLineAndSnippet,
+	createRuleResult,
+} = require('./ruleEngine')
 
 const CODE_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts', '.vue', '.html'])
 const RESOLVE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.json', '.d.ts', '.d.mts', '.d.cts']
@@ -37,12 +54,89 @@ function normalizeExternalPackageName(specifier) {
 	return clean.split('/')[0]
 }
 
-const CONFIG_TOOLS = ['eslint', 'vite', 'tailwind', 'postcss', 'babel', 'jest', 'vitest', 'prettier']
+const CONFIG_TOOLS = ['eslint', 'vite', 'tailwind', 'postcss', 'babel', 'jest', 'vitest', 'prettier', 'webpack', 'rollup']
 
 const BIN_ALIASES = {
 	tsc: 'typescript',
 	ng: '@angular/cli',
 	playwright: '@playwright/test',
+}
+
+
+function isCIFile(filePath) {
+	if (!filePath) return false
+	const clean = filePath.replace(/\\/g, '/').toLowerCase()
+	return (
+		clean.startsWith('.github/') ||
+		clean.startsWith('.gitlab/') ||
+		clean.startsWith('.circleci/') ||
+		clean.startsWith('.azure-pipelines/') ||
+		clean.includes('.gitlab-ci') ||
+		clean.includes('circleci') ||
+		clean.includes('.travis') ||
+		clean.includes('azure-pipelines')
+	)
+}
+
+const TOOL_PLUGIN_PRESETS = [
+	{
+		tools: ['eslint'],
+		match: (name) => name.startsWith('eslint-plugin-') || name.startsWith('@eslint/') || name.startsWith('eslint-config-') || name.startsWith('@typescript-eslint/') || name === 'typescript-eslint',
+	},
+	{
+		tools: ['babel', '@babel/core'],
+		match: (name) => name.startsWith('babel-preset-') || name.startsWith('@babel/preset-') || name.startsWith('babel-plugin-') || name.startsWith('@babel/plugin-'),
+	},
+	{
+		tools: ['vite'],
+		match: (name) => name.startsWith('vite-plugin-') || name.startsWith('@vitejs/plugin-'),
+	},
+	{
+		tools: ['postcss'],
+		match: (name) => name.startsWith('postcss-') || name === 'autoprefixer',
+	},
+	{
+		tools: ['tailwindcss', 'tailwind'],
+		match: (name) => name.startsWith('@tailwindcss/'),
+	},
+	{
+		tools: ['jest'],
+		match: (name) => name.startsWith('jest-') || name === 'ts-jest' || name === 'babel-jest',
+	},
+	{
+		tools: ['vitest'],
+		match: (name) => name.startsWith('@vitest/'),
+	},
+	{
+		tools: ['webpack'],
+		match: (name) => name.startsWith('webpack-') || name.endsWith('-loader') || name.endsWith('-webpack-plugin'),
+	},
+	{
+		tools: ['rollup'],
+		match: (name) => name.startsWith('@rollup/plugin-') || name.startsWith('rollup-plugin-'),
+	},
+	{
+		tools: ['prettier'],
+		match: (name) => name.startsWith('prettier-plugin-') || name.startsWith('@prettier/'),
+	},
+]
+
+function isKnownPluginOrPreset(depName, usedToolsSet) {
+	if (!depName || !usedToolsSet) return false
+	for (const entry of TOOL_PLUGIN_PRESETS) {
+		const toolActive = entry.tools.some((t) => usedToolsSet.has(t))
+		if (toolActive && entry.match(depName)) {
+			return true
+		}
+	}
+	return false
+}
+
+function isTypesPackageForUsed(depName, usedSet) {
+	if (!depName || !depName.startsWith('@types/')) return false
+	const base = depName.slice(7).replace('__', '/')
+	if (base === 'node') return true
+	return Boolean(usedSet && usedSet.has(base))
 }
 
 function isConfigFile(filePath) {
@@ -141,11 +235,13 @@ function isNonProductionFile(filePath) {
 			part === 'templates' ||
 			part === 'misc' ||
 			part === 'playground' ||
+			part === 'playgrounds' ||
 			part === 'examples' ||
 			part === 'example' ||
 			part === 'test' ||
 			part === 'tests' ||
 			part === 'fixtures' ||
+			part === 'fixture' ||
 			part === '__fixtures__' ||
 			part === 'e2e' ||
 			part === 'docs'
@@ -154,7 +250,24 @@ function isNonProductionFile(filePath) {
 		}
 	}
 	const base = path.posix.basename(clean).toLowerCase()
-	if (base.includes('.spec.') || base.includes('.test.')) {
+	if (
+		base.includes('.spec.') ||
+		base.includes('.test.') ||
+		base.endsWith('.test.js') ||
+		base.endsWith('.test.ts') ||
+		base.endsWith('.test.jsx') ||
+		base.endsWith('.test.tsx') ||
+		base.endsWith('.test.mjs') ||
+		base.endsWith('.test.cjs') ||
+		base.endsWith('.spec.js') ||
+		base.endsWith('.spec.ts') ||
+		base.endsWith('.spec.jsx') ||
+		base.endsWith('.spec.tsx') ||
+		base.endsWith('_test.py') ||
+		base.startsWith('test_') ||
+		base === 'test.js' ||
+		base === 'test.ts'
+	) {
 		return true
 	}
 	return false
@@ -1260,6 +1373,10 @@ function computeProductionRules({
 	allUnresolvedImports = [],
 	filesMap = new Map(),
 	parsedPackageJsons = [],
+	nodes = [],
+	edges = [],
+	packageImporters = new Map(),
+	options = {},
 }) {
 	const prodUnresolvedImports = allUnresolvedImports.filter((item) => {
 		if (item.category === 'non-production' || isNonProductionFile(item.from)) {
@@ -1271,7 +1388,22 @@ function computeProductionRules({
 		return true
 	})
 
-	// 1. Runtime cycles (production runtime cycles only)
+	const rootPkg = parsedPackageJsons.find((p) => !p.dir) || parsedPackageJsons[0]
+	const nestedPackages = parsedPackageJsons
+		.filter((p) => p.dir)
+		.sort((a, b) => b.dir.length - a.dir.length)
+
+	const getNearestPkg = (filePath) => {
+		const clean = filePath.replace(/\\/g, '/')
+		for (const pkgItem of nestedPackages) {
+			if (clean === pkgItem.dir || clean.startsWith(pkgItem.dir + '/')) {
+				return pkgItem
+			}
+		}
+		return rootPkg
+	}
+
+	// 1. Runtime cycles
 	const runtimeCyclesList = cycles.filter((c) => !c?.isTypeOnly)
 	const runtimeCyclesExamples = runtimeCyclesList.slice(0, 3).map((cycle) => {
 		const shortest = (Array.isArray(cycle.shortest) && cycle.shortest.length > 0)
@@ -1281,20 +1413,401 @@ function computeProductionRules({
 			? [...shortest, shortest[0]].join(' -> ')
 			: shortest.join(' -> ')
 	})
+	function findClosingImportLine(fromFile, targetFile) {
+		const fileText = filesMap.get(fromFile)?.text || ''
+		if (!fileText) return { file: fromFile, line: 1, snippet: '' }
+		const targetBase = path.posix.basename(targetFile, path.posix.extname(targetFile))
+		const lines = fileText.split(/\r?\n/)
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i]
+			if (
+				(/\bimport\b|\brequire\b/.test(line)) &&
+				(line.includes(targetBase) || line.includes(targetFile))
+			) {
+				return {
+					file: fromFile,
+					line: i + 1,
+					snippet: formatSnippet(line, 120),
+				}
+			}
+		}
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i]
+			if (
+				(/\bfrom\s*['"][^'"]*['"]/.test(line) || /require\s*\(['"][^'"]*['"]\)/.test(line)) &&
+				(line.includes(targetBase) || line.includes(targetFile))
+			) {
+				return {
+					file: fromFile,
+					line: i + 1,
+					snippet: formatSnippet(line, 120),
+				}
+			}
+		}
+		for (let i = 0; i < lines.length; i++) {
+			if (lines[i].includes(targetBase)) {
+				return {
+					file: fromFile,
+					line: i + 1,
+					snippet: formatSnippet(lines[i], 120),
+				}
+			}
+		}
+		return { file: fromFile, line: 1, snippet: formatSnippet(lines[0] || targetBase, 120) }
+	}
 
-	// 2. Orphans (production orphan files)
-	const orphansList = orphans.slice(0, 3)
+	const cycleEvidence = []
+	for (const cycle of runtimeCyclesList.slice(0, 3)) {
+		const shortest = (Array.isArray(cycle.shortest) && cycle.shortest.length > 0)
+			? cycle.shortest
+			: (Array.isArray(cycle) ? cycle : (cycle.files || []))
+		const lastNode = shortest[shortest.length - 1] || shortest[0]
+		const firstNode = shortest[0] || lastNode
+		let ev = findClosingImportLine(lastNode, firstNode)
+		if (ev.line === 1 && shortest.length > 1) {
+			const alt = findClosingImportLine(firstNode, shortest[1])
+			if (alt.line !== 1) ev = alt
+		}
+		cycleEvidence.push(ev)
+	}
+	const firstCycleShortest = runtimeCyclesList[0]?.shortest || runtimeCyclesList[0]?.files || []
+	const cycleWhy = runtimeCyclesList.length > 0
+		? `The production file "${firstCycleShortest[0] || 'file'}" forms a circular dependency loop with "${firstCycleShortest[1] || 'dependency'}".`
+		: 'No circular dependencies detected in production code.'
+	const cycleFix = runtimeCyclesList.length > 0
+		? `Refactor "${firstCycleShortest[0] || 'file'}" or extract shared logic into a separate module to break the cycle.`
+		: 'No action required.'
 
-	// 3. Undeclared packages (production used but undeclared)
-	const undeclaredList = usedButUndeclared.slice(0, 3)
+	const runtimeCyclesRule = createRuleResult({
+		id: 'runtime-cycles',
+		name: 'Runtime Circular Dependency',
+		severity: 'critical',
+		dimension: 'reliability',
+		why: cycleWhy,
+		fix: cycleFix,
+		docsUrl: 'https://nodejs.org/api/modules.html#cycles',
+		evidence: cycleEvidence,
+		count: runtimeCyclesList.length,
+		examples: runtimeCyclesExamples,
+		affectedExamples: runtimeCyclesExamples,
+	})
 
-	// 4. Unresolved imports (production, excluding known build outputs like ./dist)
-	const unresolvedExamples = prodUnresolvedImports.slice(0, 3).map((item) => `${item.specifier} in ${item.from}`)
+	// 2. Orphans (with root-cause grouping)
+	const prodNodes = nodes.filter((n) => n.category === 'production' && !isNonProductionFile(n.path))
+	
+	const orphanChildren = []
+	const orphanEvidence = []
+	for (const orphanPath of orphans) {
+		const fileText = filesMap.get(orphanPath)?.text || ''
+		const fileExports = extractExports(fileText)
+		
+		const importedSpecifiers = extractImportSpecifiers(fileText)
+		const importedPkgs = new Set()
+		for (const spec of importedSpecifiers) {
+			if (!isRelativeSpecifier(spec) && !spec.startsWith('/') && !spec.startsWith('~') && !spec.startsWith('#') && isValidSpecifier(spec)) {
+				const norm = normalizeExternalPackageName(spec)
+				if (norm && !isNodeBuiltin(norm)) {
+					importedPkgs.add(norm)
+				}
+			}
+		}
 
-	// 5. Unused dependencies (production declared but unused)
-	const unusedDepsList = declaredButUnused.slice(0, 3)
+		const exclusiveDeps = []
+		for (const pkg of importedPkgs) {
+			let usedElsewhere = false
+			for (const otherNode of prodNodes) {
+				if (otherNode.path === orphanPath) continue
+				const otherText = filesMap.get(otherNode.path)?.text || ''
+				if (otherText.includes(pkg)) {
+					usedElsewhere = true
+					break
+				}
+			}
+			if (!usedElsewhere) {
+				exclusiveDeps.push(pkg)
+			}
+		}
 
-	// 6. Missing license (license file or package.json license field)
+		orphanChildren.push({
+			file: orphanPath,
+			exportsCount: fileExports.length,
+			dependenciesCount: exclusiveDeps.length,
+			exports: fileExports,
+			dependencies: exclusiveDeps,
+			summary: `1 unused file explains ${fileExports.length} ${fileExports.length === 1 ? 'export' : 'exports'} and ${exclusiveDeps.length} ${exclusiveDeps.length === 1 ? 'dependency' : 'dependencies'}`,
+		})
+
+		if (orphanEvidence.length < 3) {
+			const firstLine = fileText.split(/\r?\n/)[0] || orphanPath
+			orphanEvidence.push({
+				file: orphanPath,
+				line: 1,
+				snippet: formatSnippet(firstLine, 120),
+			})
+		}
+	}
+
+	const firstChild = orphanChildren[0]
+	const orphanWhy = orphans.length > 0
+		? (firstChild ? `The production file "${orphans[0]}" is unused (${firstChild.summary}).` : `The production file "${orphans[0]}" is not imported anywhere in the project.`)
+		: 'All production files are imported and utilized.'
+	const orphanFix = orphans.length > 0
+		? `Import "${orphans[0]}" where needed or safely remove it and its unused dependencies.`
+		: 'No action required.'
+
+	const orphansRule = createRuleResult({
+		id: 'orphans',
+		name: 'Unused Production File',
+		severity: 'important',
+		dimension: 'maintainability',
+		why: orphanWhy,
+		fix: orphanFix,
+		docsUrl: 'https://docs.npmjs.com/creating-node-js-modules',
+		evidence: orphanEvidence,
+		count: orphans.length,
+		children: orphanChildren,
+		examples: orphans.slice(0, 3),
+		affectedExamples: orphans.slice(0, 3),
+	})
+
+	// 3. Undeclared packages
+	const undeclaredEvidence = []
+	for (const pkg of usedButUndeclared.slice(0, 3)) {
+		const importers = Array.from(packageImporters.get(pkg) || [])
+		const file = importers[0] || 'src'
+		const info = findLineAndSnippet(filesMap.get(file)?.text, pkg)
+		undeclaredEvidence.push({ file, line: info.line, snippet: info.snippet })
+	}
+	const undeclaredWhy = usedButUndeclared.length > 0
+		? `Production file "${undeclaredEvidence[0]?.file || 'src'}" imports package "${usedButUndeclared[0]}", which is not declared in package.json.`
+		: 'All imported packages are declared in package.json.'
+	const undeclaredFix = usedButUndeclared.length > 0
+		? `Run \`npm install ${usedButUndeclared[0]}\` to add it to package.json dependencies.`
+		: 'No action required.'
+
+	const undeclaredRule = createRuleResult({
+		id: 'undeclared-packages',
+		name: 'Undeclared Package Dependency',
+		severity: 'critical',
+		dimension: 'reliability',
+		why: undeclaredWhy,
+		fix: undeclaredFix,
+		docsUrl: 'https://docs.npmjs.com/specifying-dependencies',
+		evidence: undeclaredEvidence,
+		count: usedButUndeclared.length,
+		examples: usedButUndeclared.slice(0, 3),
+		affectedExamples: usedButUndeclared.slice(0, 3),
+	})
+
+	// 4. Production code importing devDependencies
+	function isBundledPackage(pkgItem) {
+		if (!pkgItem) return false
+		const content = pkgItem.content || {}
+		const scripts = content.scripts || {}
+		const deps = { ...(content.dependencies || {}), ...(content.devDependencies || {}) }
+
+		const BUNDLER_PATTERNS = [/\btsdown\b/i, /\brolldown\b/i, /\besbuild\b/i, /\bwebpack\b/i, /\brollup\b/i, /\bvite\s+build\b/i]
+		for (const sVal of Object.values(scripts)) {
+			if (typeof sVal === 'string' && BUNDLER_PATTERNS.some((pat) => pat.test(sVal))) {
+				return true
+			}
+		}
+		const BUNDLER_PACKAGES = ['tsdown', 'rolldown', 'esbuild', 'webpack', 'rollup', 'vite']
+		for (const bp of BUNDLER_PACKAGES) {
+			if (deps[bp]) return true
+		}
+		const pkgDir = pkgItem.dir ? `${pkgItem.dir}/` : ''
+		const CONFIG_PATTERNS = [
+			/^vite\.config\.[mc]?[jt]s$/,
+			/^rollup\.config\.[mc]?[jt]s$/,
+			/^webpack\.config\.[mc]?[jt]s$/,
+			/^esbuild\.[mc]?[jt]s$/,
+			/^tsdown\.config\.[mc]?[jt]s$/,
+			/^rolldown\.config\.[mc]?[jt]s$/,
+		]
+		for (const filePath of filesMap.keys()) {
+			if (pkgDir && !filePath.startsWith(pkgDir)) continue
+			const relPath = pkgDir ? filePath.slice(pkgDir.length) : filePath
+			if (CONFIG_PATTERNS.some((pat) => pat.test(relPath))) {
+				return true
+			}
+		}
+		return false
+	}
+
+	const devDepFindings = []
+	const devDepPackages = new Set()
+	for (const node of prodNodes) {
+		if (node.isConfig || isConfigFile(node.path)) continue
+		const pkgItem = getNearestPkg(node.path)
+		// Skip dev-dependency-in-production for packages bundled by a build tool
+		if (isBundledPackage(pkgItem)) continue
+
+		const devDeps = pkgItem?.content?.devDependencies || {}
+		const prodDeps = pkgItem?.content?.dependencies || {}
+		const rootProdDeps = rootPkg?.content?.dependencies || {}
+
+		const fileText = filesMap.get(node.path)?.text || ''
+		const detailedImports = extractImports(fileText)
+		for (const imp of detailedImports) {
+			if (imp.typeOnly) continue
+			const spec = imp.specifier
+			if (!isRelativeSpecifier(spec) && !spec.startsWith('/') && !spec.startsWith('~') && !spec.startsWith('#') && isValidSpecifier(spec)) {
+				const norm = normalizeExternalPackageName(spec)
+				if (norm && !isNodeBuiltin(norm) && devDeps[norm] && !prodDeps[norm] && !rootProdDeps[norm]) {
+					const info = findLineAndSnippet(fileText, spec)
+					const finding = {
+						file: node.path,
+						pkg: norm,
+						line: info.line,
+						snippet: info.snippet,
+						pkgPath: pkgItem?.path || 'package.json',
+					}
+					devDepFindings.push(finding)
+					devDepPackages.add(finding.pkgPath)
+				}
+			}
+		}
+	}
+	const devDepEvidence = devDepFindings.slice(0, 3).map((f) => ({
+		file: f.file,
+		line: f.line,
+		snippet: f.snippet,
+	}))
+	const devDepWhy = devDepFindings.length > 0
+		? `Production file "${devDepFindings[0].file}" imports package "${devDepFindings[0].pkg}", which is declared in devDependencies.`
+		: 'No devDependencies are imported by production code.'
+	const devDepFix = devDepFindings.length > 0
+		? `Move "${devDepFindings[0].pkg}" from devDependencies to dependencies in ${devDepFindings[0].pkgPath}.`
+		: 'No action required.'
+
+	const devDepRule = createRuleResult({
+		id: 'dev-dependency-in-production',
+		name: 'Production Code Importing DevDependency',
+		severity: 'important',
+		dimension: 'reliability',
+		why: devDepWhy,
+		fix: devDepFix,
+		docsUrl: 'https://docs.npmjs.com/specifying-dependencies',
+		evidence: devDepEvidence,
+		count: devDepPackages.size,
+		examples: devDepFindings.slice(0, 3).map((f) => `${f.pkg} in ${f.file}`),
+		affectedExamples: devDepFindings.slice(0, 3).map((f) => `${f.pkg} in ${f.file}`),
+	})
+
+	// 5. Package in both dependencies and devDependencies
+	const dupFindings = []
+	for (const pkgItem of parsedPackageJsons) {
+		const deps = pkgItem.content?.dependencies || {}
+		const devDeps = pkgItem.content?.devDependencies || {}
+		for (const key of Object.keys(deps)) {
+			if (Object.prototype.hasOwnProperty.call(devDeps, key)) {
+				const info = findLineAndSnippet(filesMap.get(pkgItem.path)?.text, key)
+				dupFindings.push({
+					file: pkgItem.path,
+					pkg: key,
+					line: info.line,
+					snippet: info.snippet,
+				})
+			}
+		}
+	}
+	const dupEvidence = dupFindings.slice(0, 3).map((d) => ({
+		file: d.file,
+		line: d.line,
+		snippet: d.snippet,
+	}))
+	const dupWhy = dupFindings.length > 0
+		? `Package "${dupFindings[0].pkg}" is declared in both dependencies and devDependencies in ${dupFindings[0].file}.`
+		: 'No package is duplicated between dependencies and devDependencies.'
+	const dupFix = dupFindings.length > 0
+		? `Remove "${dupFindings[0].pkg}" from devDependencies in ${dupFindings[0].file}.`
+		: 'No action required.'
+
+	const duplicateDepsRule = createRuleResult({
+		id: 'duplicate-dependencies',
+		name: 'Duplicate Dependency Declaration',
+		severity: 'important',
+		dimension: 'hygiene',
+		why: dupWhy,
+		fix: dupFix,
+		docsUrl: 'https://docs.npmjs.com/specifying-dependencies',
+		evidence: dupEvidence,
+		count: dupFindings.length,
+		examples: dupFindings.slice(0, 3).map((d) => `${d.pkg} in ${d.file}`),
+		affectedExamples: dupFindings.slice(0, 3).map((d) => `${d.pkg} in ${d.file}`),
+	})
+
+	// 6. Unresolved imports (production, excluding known build outputs like ./dist)
+	const unresolvedEvidence = []
+	for (const item of prodUnresolvedImports.slice(0, 3)) {
+		const info = findLineAndSnippet(filesMap.get(item.from)?.text, item.specifier)
+		unresolvedEvidence.push({
+			file: item.from,
+			line: info.line,
+			snippet: info.snippet,
+		})
+	}
+	const unresolvedWhy = prodUnresolvedImports.length > 0
+		? `Production file "${prodUnresolvedImports[0].from}" imports "${prodUnresolvedImports[0].specifier}", which cannot be resolved.`
+		: 'All relative and alias imports resolve to valid files.'
+	const unresolvedFix = prodUnresolvedImports.length > 0
+		? `Verify the import path "${prodUnresolvedImports[0].specifier}" in "${prodUnresolvedImports[0].from}" or create the missing file.`
+		: 'No action required.'
+
+	const unresolvedRule = createRuleResult({
+		id: 'unresolved-imports',
+		name: 'Unresolved Import',
+		severity: 'important',
+		dimension: 'reliability',
+		why: unresolvedWhy,
+		fix: unresolvedFix,
+		docsUrl: 'https://nodejs.org/api/modules.html#all-together',
+		evidence: unresolvedEvidence,
+		count: prodUnresolvedImports.length,
+		examples: prodUnresolvedImports.slice(0, 3).map((item) => `${item.specifier} in ${item.from}`),
+		affectedExamples: prodUnresolvedImports.slice(0, 3).map((item) => `${item.specifier} in ${item.from}`),
+	})
+
+	// 7. Unused dependencies
+	const unusedDepsEvidence = []
+	for (const dep of declaredButUnused.slice(0, 3)) {
+		let declaringPkg = parsedPackageJsons.find((pkg) => {
+			const deps = pkg.content?.dependencies || {}
+			const devDeps = pkg.content?.devDependencies || {}
+			return Object.prototype.hasOwnProperty.call(deps, dep) || Object.prototype.hasOwnProperty.call(devDeps, dep)
+		}) || rootPkg
+		const pkgPath = declaringPkg?.path || 'package.json'
+		const pkgText = filesMap.get(pkgPath)?.text || ''
+		const info = findLineAndSnippet(pkgText, `"${dep}"`)
+		unusedDepsEvidence.push({
+			file: pkgPath,
+			line: info.line,
+			snippet: info.snippet,
+		})
+	}
+	const unusedWhy = declaredButUnused.length > 0
+		? `Package "${declaredButUnused[0]}" is declared in package.json but never used in code, scripts, or configuration.`
+		: 'All declared dependencies are used in the project.'
+	const unusedFix = declaredButUnused.length > 0
+		? `Run \`npm uninstall ${declaredButUnused[0]}\` to remove the unused package.`
+		: 'No action required.'
+
+	const unusedDepsRule = createRuleResult({
+		id: 'unused-dependencies',
+		name: 'Unused Dependency',
+		severity: 'nice-to-have',
+		dimension: 'hygiene',
+		why: unusedWhy,
+		fix: unusedFix,
+		docsUrl: 'https://docs.npmjs.com/cli/v10/commands/npm-uninstall',
+		evidence: unusedDepsEvidence,
+		count: declaredButUnused.length,
+		examples: declaredButUnused.slice(0, 3),
+		affectedExamples: declaredButUnused.slice(0, 3),
+	})
+
+	// 8. Missing license
 	const hasLicenseFile = Array.from(filesMap.keys()).some((p) => {
 		const base = path.posix.basename(p).toLowerCase()
 		return (
@@ -1306,7 +1819,6 @@ function computeProductionRules({
 			base.startsWith('licence-')
 		)
 	})
-	const rootPkg = parsedPackageJsons.find((p) => !p.dir) || parsedPackageJsons[0]
 	const hasLicenseField = Boolean(
 		rootPkg?.content?.license &&
 		typeof rootPkg.content.license === 'string' &&
@@ -1314,18 +1826,44 @@ function computeProductionRules({
 	)
 	const hasLicense = hasLicenseFile || hasLicenseField
 	const missingLicenseCount = hasLicense ? 0 : 1
-	const missingLicenseExamples = hasLicense ? [] : ['LICENSE']
 
-	// 7. Missing engines field
+	const missingLicenseRule = createRuleResult({
+		id: 'missing-license',
+		name: 'Missing License',
+		severity: 'nice-to-have',
+		dimension: 'hygiene',
+		why: missingLicenseCount > 0 ? 'No LICENSE file or package.json license field was found in the repository.' : 'Repository includes an open source license.',
+		fix: missingLicenseCount > 0 ? 'Add a LICENSE file (e.g. MIT, Apache-2.0) to the repository root.' : 'No action required.',
+		docsUrl: 'https://choosealicense.com/',
+		evidence: missingLicenseCount > 0 ? [{ file: 'package.json', line: 1, snippet: 'Missing license declaration' }] : [],
+		count: missingLicenseCount,
+		examples: hasLicense ? [] : ['LICENSE'],
+		affectedExamples: hasLicense ? [] : ['LICENSE'],
+	})
+
+	// 9. Missing engines field
 	const hasEnginesField = Boolean(
 		rootPkg?.content?.engines &&
 		typeof rootPkg.content.engines === 'object' &&
 		Object.keys(rootPkg.content.engines).length > 0
 	)
 	const missingEnginesCount = hasEnginesField ? 0 : 1
-	const missingEnginesExamples = hasEnginesField ? [] : ['package.json engines field']
 
-	// 8. Missing tests
+	const missingEnginesRule = createRuleResult({
+		id: 'missing-engines-field',
+		name: 'Missing Node Engine Specification',
+		severity: 'nice-to-have',
+		dimension: 'hygiene',
+		why: missingEnginesCount > 0 ? 'package.json does not specify supported Node.js versions in an engines field.' : 'package.json specifies an engines field.',
+		fix: missingEnginesCount > 0 ? 'Add an "engines": { "node": ">=18.0.0" } field to package.json.' : 'No action required.',
+		docsUrl: 'https://docs.npmjs.com/cli/v10/configuring-npm/package-json#engines',
+		evidence: missingEnginesCount > 0 ? [{ file: 'package.json', line: 1, snippet: 'Missing engines.node field' }] : [],
+		count: missingEnginesCount,
+		examples: hasEnginesField ? [] : ['package.json engines field'],
+		affectedExamples: hasEnginesField ? [] : ['package.json engines field'],
+	})
+
+	// 10. Missing tests
 	const hasTestScript = parsedPackageJsons.some((p) => {
 		const testScript = p.content?.scripts?.test
 		return (
@@ -1337,71 +1875,71 @@ function computeProductionRules({
 	const hasTestFiles = Array.from(filesMap.keys()).some((p) => isTestFile(p))
 	const hasTests = hasTestScript || hasTestFiles
 	const missingTestsCount = hasTests ? 0 : 1
-	const missingTestsExamples = hasTests ? [] : ['No test files or test script found']
 
-	return [
-		{
-			id: 'runtime-cycles',
-			severity: 'critical',
-			count: runtimeCyclesList.length,
-			examples: runtimeCyclesExamples,
-			affectedExamples: runtimeCyclesExamples,
-		},
-		{
-			id: 'orphans',
-			severity: 'important',
-			count: orphans.length,
-			examples: orphansList,
-			affectedExamples: orphansList,
-		},
-		{
-			id: 'undeclared-packages',
-			severity: 'critical',
-			count: usedButUndeclared.length,
-			examples: undeclaredList,
-			affectedExamples: undeclaredList,
-		},
-		{
-			id: 'unresolved-imports',
-			severity: 'important',
-			count: prodUnresolvedImports.length,
-			examples: unresolvedExamples,
-			affectedExamples: unresolvedExamples,
-		},
-		{
-			id: 'unused-dependencies',
-			severity: 'nice-to-have',
-			count: declaredButUnused.length,
-			examples: unusedDepsList,
-			affectedExamples: unusedDepsList,
-		},
-		{
-			id: 'missing-license',
-			severity: 'nice-to-have',
-			count: missingLicenseCount,
-			examples: missingLicenseExamples,
-			affectedExamples: missingLicenseExamples,
-		},
-		{
-			id: 'missing-engines-field',
-			severity: 'nice-to-have',
-			count: missingEnginesCount,
-			examples: missingEnginesExamples,
-			affectedExamples: missingEnginesExamples,
-		},
-		{
-			id: 'missing-tests',
-			severity: 'important',
-			count: missingTestsCount,
-			examples: missingTestsExamples,
-			affectedExamples: missingTestsExamples,
-		},
+	const missingTestsRule = createRuleResult({
+		id: 'missing-tests',
+		name: 'Missing Test Script or Test Files',
+		severity: 'important',
+		dimension: 'maintainability',
+		why: missingTestsCount > 0 ? 'No test script or test files were found in this project.' : 'Test suite or test script is configured.',
+		fix: missingTestsCount > 0 ? 'Add a "test" script to package.json and write automated unit tests.' : 'No action required.',
+		docsUrl: 'https://docs.npmjs.com/cli/v10/using-npm/scripts',
+		evidence: missingTestsCount > 0 ? [{ file: 'package.json', line: 1, snippet: 'Missing "test" script' }] : [],
+		count: missingTestsCount,
+		examples: hasTests ? [] : ['No test files or test script found'],
+		affectedExamples: hasTests ? [] : ['No test files or test script found'],
+	})
+
+	const baseRules = [
+		runtimeCyclesRule,
+		orphansRule,
+		undeclaredRule,
+		unresolvedRule,
+		unusedDepsRule,
+		missingLicenseRule,
+		missingEnginesRule,
+		missingTestsRule,
 	]
+
+	const profile = extractProjectProfile({
+		filesMap,
+		parsedPackageJsons,
+		nodes,
+		isNonProductionFile,
+	})
+
+	const projectRuleFindings = evaluateProjectRules({
+		filesMap,
+		parsedPackageJsons,
+		nodes,
+		profile,
+		isNonProductionFile,
+		options,
+	})
+
+	const githubRuleFindings = options.githubFindings || evaluateGithubHygieneSync({
+		filesMap,
+	})
+
+	const extraRules = [
+		devDepRule,
+		duplicateDepsRule,
+		...projectRuleFindings,
+		...githubRuleFindings,
+	]
+
+	const allRules = [...baseRules, ...extraRules]
+	const rules = [...baseRules]
+
+	const origFind = rules.find.bind(rules)
+	rules.find = (fn) => origFind(fn) || allRules.find(fn)
+	rules.allRules = allRules
+	rules.profile = profile
+	rules.extraRules = extraRules
+
+	return rules
 }
 
-/**
- * Builds the dependency graph from files and packages.
- */
 function buildGraph(files, packageJsons = [], options = {}) {
 	const filesMap = new Map()
 	for (const [p, val] of (files instanceof Map ? files.entries() : Object.entries(files || {}))) {
@@ -2216,7 +2754,7 @@ function buildGraph(files, packageJsons = [], options = {}) {
 
 		// 3. Config files in package dir or root
 		for (const [filePath, fileData] of filesMap.entries()) {
-			if (isConfigFile(filePath) && fileData.text) {
+			if ((isConfigFile(filePath) || isCIFile(filePath)) && fileData.text) {
 				const nearest = getNearestPackage(filePath)
 				if (!nearest || nearest.dir === pkgItem.dir || !pkgItem.dir) {
 					const text = fileData.text
@@ -2225,7 +2763,9 @@ function buildGraph(files, packageJsons = [], options = {}) {
 						const escaped = dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 						const quotedRegex = new RegExp(`['"\`]${escaped}(?:/[^'"\`]*)?['"\`]`)
 						const keyRegex = new RegExp('(^|[\\s{,])' + escaped + '\\s*:')
-						if (quotedRegex.test(text) || keyRegex.test(text)) {
+						const isCI = isCIFile(filePath)
+						const wordRegex = new RegExp('(^|[\\s/.:;,-])' + escaped + '([\\s/.:;,-]|$)')
+						if (quotedRegex.test(text) || keyRegex.test(text) || (isCI && wordRegex.test(text))) {
 							refSet.add(dep)
 						}
 					}
@@ -2267,14 +2807,18 @@ function buildGraph(files, packageJsons = [], options = {}) {
 		const pkgRefs = pkgReferencedTools.get(pkgItem.dir) || new Set()
 
 		const pkgDeclaredButUnused = []
+		const pkgAllUsed = new Set([...pkgUsedInProd, ...pkgRefs, ...allReferencedInScriptsOrConfigs])
 		for (const dep of pkgDeclared) {
+			const isUsedType = isTypesPackageForUsed(dep, pkgAllUsed)
+			const isUsedPlugin = isKnownPluginOrPreset(dep, pkgAllUsed)
 			if (
 				!pkgUsedInProd.has(dep) &&
 				!isNodeBuiltin(dep) &&
 				!workspacePackages.has(dep) &&
 				!localPackageNames.has(dep) &&
 				!allFilteredLocalOrProtocolDeps.has(dep) &&
-				!isIgnoredToolingPackage(dep) &&
+				!isUsedType &&
+				!isUsedPlugin &&
 				!pkgRefs.has(dep)
 			) {
 				pkgDeclaredButUnused.push(dep)
@@ -2334,14 +2878,18 @@ function buildGraph(files, packageJsons = [], options = {}) {
 
 	// Compute aggregate declaredButUnused and usedButUndeclared
 	const declaredButUnused = []
+	const allUsedAggregate = new Set([...prodExternalsAll, ...allReferencedInScriptsOrConfigs])
 	for (const dep of allDeclaredDependencies) {
+		const isUsedType = isTypesPackageForUsed(dep, allUsedAggregate)
+		const isUsedPlugin = isKnownPluginOrPreset(dep, allUsedAggregate)
 		if (
 			!prodExternalsAll.has(dep) &&
 			!isNodeBuiltin(dep) &&
 			!workspacePackages.has(dep) &&
 			!localPackageNames.has(dep) &&
 			!allFilteredLocalOrProtocolDeps.has(dep) &&
-			!isIgnoredToolingPackage(dep) &&
+			!isUsedType &&
+			!isUsedPlugin &&
 			!allReferencedInScriptsOrConfigs.has(dep)
 		) {
 			declaredButUnused.push(dep)
@@ -2549,14 +3097,37 @@ function buildGraph(files, packageJsons = [], options = {}) {
 		allUnresolvedImports,
 		filesMap,
 		parsedPackageJsons,
+		nodes,
+		edges,
+		packageImporters,
+		options,
 	})
 
 	const isTruncatedScan = Boolean(truncated || options.truncated)
-	const scoreAndGrade = calculateScoreAndGrade(rules, {
+	const dimensionsAndGrade = calculateDimensionsAndGrade(rules.allRules, {
 		truncated: isTruncatedScan,
 		failed: Boolean(options.failed),
 		hasFailedCriticalDiagnostic: Boolean(options.hasFailedCriticalDiagnostic),
 	})
+
+	const scoreAndGrade = {
+		score: dimensionsAndGrade.score,
+		grade: dimensionsAndGrade.grade,
+		capReason: dimensionsAndGrade.capReason,
+	}
+
+	let changes = null
+	if (options.owner && options.repo) {
+		const prev = getPreviousScan(options.owner, options.repo)
+		changes = computeChanges(prev, {
+			summary: {
+				allRules: rules.allRules,
+				rules,
+				dimensions: dimensionsAndGrade.dimensions,
+			},
+			dimensions: dimensionsAndGrade.dimensions,
+		})
+	}
 
 	const graphResult = {
 		nodes,
@@ -2593,10 +3164,18 @@ function buildGraph(files, packageJsons = [], options = {}) {
 			parsedFiles: nodes.length,
 			configFiles,
 			rules,
+			allRules: rules.allRules,
+			findings: rules.allRules.filter((r) => r.count > 0),
+			profile: rules.profile,
+			dimensions: dimensionsAndGrade.dimensions,
+			changes,
 			score: scoreAndGrade.score,
 			grade: scoreAndGrade.grade,
 			capReason: scoreAndGrade.capReason,
 		},
+		dimensions: dimensionsAndGrade.dimensions,
+		profile: rules.profile,
+		changes,
 		coverage,
 		graphFiles: nodes.length,
 		truncated,
@@ -2604,6 +3183,10 @@ function buildGraph(files, packageJsons = [], options = {}) {
 		score: scoreAndGrade.score,
 		grade: scoreAndGrade.grade,
 		capReason: scoreAndGrade.capReason,
+	}
+
+	if (options.owner && options.repo) {
+		setPreviousScan(options.owner, options.repo, graphResult)
 	}
 
 	return graphResult
@@ -2676,6 +3259,73 @@ function getImpact(graph, fileId) {
 	}
 }
 
+const PREVIOUS_SCANS = new Map()
+
+function getPreviousScan(owner, repo) {
+	if (!owner || !repo) return null
+	const key = `${owner}/${repo}`.toLowerCase()
+	return PREVIOUS_SCANS.get(key) || null
+}
+
+function setPreviousScan(owner, repo, data) {
+	if (!owner || !repo) return
+	const key = `${owner}/${repo}`.toLowerCase()
+	PREVIOUS_SCANS.set(key, data)
+}
+
+function clearPreviousScans() {
+	PREVIOUS_SCANS.clear()
+}
+
+function computeChanges(previousScan, currentScan) {
+	if (!previousScan || !currentScan) return null
+
+	const prevRules = previousScan.summary?.allRules || previousScan.summary?.rules || []
+	const currRules = currentScan.summary?.allRules || currentScan.summary?.rules || []
+
+	const prevMap = new Map()
+	for (const r of prevRules) {
+		if (r && r.count > 0) prevMap.set(r.id, r)
+	}
+
+	const currMap = new Map()
+	for (const r of currRules) {
+		if (r && r.count > 0) currMap.set(r.id, r)
+	}
+
+	const newFindings = []
+	for (const [id, r] of currMap.entries()) {
+		if (!prevMap.has(id)) {
+			newFindings.push(r)
+		}
+	}
+
+	const fixedFindings = []
+	for (const [id, r] of prevMap.entries()) {
+		if (!currMap.has(id)) {
+			fixedFindings.push(r)
+		}
+	}
+
+	const GRADE_VAL = { A: 4, B: 3, C: 2, D: 1, E: 0 }
+	const dimensionChange = {}
+	const prevDims = previousScan.summary?.dimensions || previousScan.dimensions || {}
+	const currDims = currentScan.summary?.dimensions || currentScan.dimensions || {}
+
+	for (const dim of ['security', 'reliability', 'maintainability', 'hygiene']) {
+		const curG = currDims[dim]?.grade || 'A'
+		const prevG = prevDims[dim]?.grade || 'A'
+		const diff = (GRADE_VAL[curG] ?? 0) - (GRADE_VAL[prevG] ?? 0)
+		dimensionChange[dim] = diff > 0 ? `+${diff}` : `${diff}`
+	}
+
+	return {
+		newFindings,
+		fixedFindings,
+		dimensionChange,
+	}
+}
+
 const GRAPH_CACHE = new Map()
 const GRAPH_CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 const MAX_GRAPH_CACHE_ENTRIES = 3
@@ -2740,5 +3390,9 @@ module.exports = {
 	isKnownBuildOutput,
 	calculateScoreAndGrade,
 	computeProductionRules,
+	getPreviousScan,
+	setPreviousScan,
+	clearPreviousScans,
+	computeChanges,
 }
 

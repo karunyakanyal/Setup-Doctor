@@ -3,7 +3,9 @@ const { rateLimit } = require('express-rate-limit')
 const { runDiagnostics } = require('../rules')
 const { ghFetch, TIMEOUT_ERROR_MESSAGE } = require('../services/github')
 const { fetchRepoArchive } = require('../services/archive')
-const { buildGraph, getCachedGraph, setCachedGraph } = require('../services/graph')
+const { buildGraph, getCachedGraph, setCachedGraph, getPreviousScan, setPreviousScan } = require('../services/graph')
+const { evaluateGithubHygiene } = require('../services/githubHygiene')
+const { extractProductionDepsFromLockfile, queryOsvVulnerabilities } = require('../services/osv')
 
 const router = express.Router()
 
@@ -19,6 +21,80 @@ const allowedFileNames = new Set([
 	'eslint.config.js',
 	'vite.config.js',
 ])
+
+
+function generateBadgeSvg(grade = 'unknown') {
+	const colors = {
+		A: '#4c1',
+		B: '#97ca00',
+		C: '#dfb317',
+		D: '#fe7d37',
+		E: '#e05d44',
+		F: '#e05d44',
+	}
+	const color = colors[grade] || '#9f9f9f'
+	const label = 'SetupDoctor'
+	const value = grade === 'unknown' ? 'unknown' : `Grade ${grade}`
+	const textLen = grade === 'unknown' ? 480 : 440
+	const textX = grade === 'unknown' ? 1050 : 1030
+
+	return `<svg xmlns="http://www.w3.org/2000/svg" width="130" height="20" role="img" aria-label="${label}: ${value}">
+  <title>${label}: ${value}</title>
+  <linearGradient id="s" x2="0" y2="100%">
+    <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+    <stop offset="1" stop-opacity=".1"/>
+  </linearGradient>
+  <clipPath id="r">
+    <rect width="130" height="20" rx="3" fill="#fff"/>
+  </clipPath>
+  <g clip-path="url(#r)">
+    <rect width="78" height="20" fill="#555"/>
+    <rect x="78" width="52" height="20" fill="${color}"/>
+    <rect width="130" height="20" fill="url(#s)"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110">
+    <text aria-hidden="true" x="400" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="680">${label}</text>
+    <text x="400" y="140" transform="scale(.1)" fill="#fff" textLength="680">${label}</text>
+    <text aria-hidden="true" x="${textX}" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="${textLen}">${value}</text>
+    <text x="${textX}" y="140" transform="scale(.1)" fill="#fff" textLength="${textLen}">${value}</text>
+  </g>
+</svg>`
+}
+
+async function handleBadge(req, res) {
+	const { owner, repo } = req.params
+
+	if (!isValidIdentifier(owner) || !isValidIdentifier(repo)) {
+		const svg = generateBadgeSvg('unknown')
+		res.setHeader('Content-Type', 'image/svg+xml')
+		res.setHeader('Cache-Control', 'public, max-age=600')
+		return res.status(400).send(svg)
+	}
+
+	const cached = getPreviousScan(owner, repo) || getCachedGraph(owner, repo, 'main') || getCachedGraph(owner, repo, 'master')
+	const grade = cached?.grade || cached?.summary?.grade || 'unknown'
+	const svg = generateBadgeSvg(grade)
+	const host = req.get('host') || 'localhost:3000'
+	const proto = req.protocol || 'http'
+	const badgeUrl = `${proto}://${host}/api/badge/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+	const repoUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+	const markdown = `[![SetupDoctor Grade](${badgeUrl})](${repoUrl})`
+
+	res.setHeader('Cache-Control', 'public, max-age=600')
+	res.setHeader('X-Markdown-Snippet', markdown)
+
+	if (req.headers.accept?.includes('application/json') || req.query?.format === 'json') {
+		return res.json({
+			success: true,
+			grade,
+			markdown,
+			svg,
+		})
+	}
+
+	res.setHeader('Content-Type', 'image/svg+xml')
+	return res.send(svg)
+}
 
 const handleTree = async (req, res, next) => {
 	const { owner, repo, branch } = req.query
@@ -596,6 +672,9 @@ const handleGraph = async (req, res, next) => {
 			graphFiles: graphResult.nodes.length,
 		}
 
+		const badgeUrl = '/api/badge/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo);
+		const badgeMarkdown = '[![SetupDoctor Grade](' + badgeUrl + ')](https://github.com/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + ')';
+
 		const responsePayload = {
 			inventory: archiveResult.inventory,
 			graph: {
@@ -609,6 +688,14 @@ const handleGraph = async (req, res, next) => {
 			score: graphResult.score,
 			grade: graphResult.grade,
 			capReason: graphResult.capReason,
+			profile: graphResult.summary?.profile,
+			dimensions: graphResult.summary?.dimensions,
+			findings: graphResult.summary?.findings,
+			changes: graphResult.summary?.changes,
+			badge: {
+				url: badgeUrl,
+				markdown: badgeMarkdown,
+			},
 		}
 
 
@@ -658,8 +745,12 @@ router.post('/repository/build-check', handleBuildCheck)
 router.post('/graph', graphLimiter, handleGraph)
 router.post('/repository/graph', graphLimiter, handleGraph)
 
+router.get('/badge/:owner/:repo', handleBadge)
+router.get('/repository/badge/:owner/:repo', handleBadge)
+
 module.exports = router
 module.exports.handleGraph = handleGraph
+module.exports.handleBadge = handleBadge
 module.exports.handleDiagnose = handleDiagnose
 module.exports.graphLimiter = graphLimiter
 module.exports.getActiveScans = getActiveScans

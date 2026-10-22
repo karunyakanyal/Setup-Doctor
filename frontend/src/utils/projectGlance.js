@@ -459,6 +459,25 @@ export function getHealthVerdict({
     finalScore = deepScanData.score
     finalGrade = deepScanData.grade
     capReason = deepScanData.capReason || null
+  }
+
+  const dimensions = deepScanData?.dimensions || deepScanData?.summary?.dimensions
+  if (dimensions?.overallGrade) {
+    finalGrade = dimensions.overallGrade
+    if (dimensions.capReason) {
+      capReason = dimensions.capReason
+    }
+  }
+
+  const findingsList = deepScanData?.findings || deepScanData?.summary?.findings || []
+  const hasSecrets = findingsList.some((f) => f.id === 'committed-secrets' || f.id === 'env-tracked')
+  const hasCriticalVulns = findingsList.some((f) => f.id === 'known-vulnerabilities' && f.severity === 'critical')
+  if (hasSecrets || hasCriticalVulns) {
+    if (finalGrade === 'A' || finalGrade === 'B' || finalGrade === 'C') {
+      finalGrade = 'C'
+      finalScore = Math.min(finalScore, 79)
+      capReason = hasSecrets ? 'committed secrets found' : 'known critical vulnerabilities'
+    }
   } else if (
     !hasGraphFindings &&
     !isTruncated &&
@@ -793,6 +812,57 @@ export function getWhatToDoNext({
         value: `npm uninstall ${pkg}`,
         label: `npm uninstall ${pkg}`,
       },
+    })
+  }
+
+  // 8. Rule engine findings (Phase 1-4 rules)
+  const rawFindings = deepScanData?.findings || deepScanData?.summary?.findings || []
+  const genericRuleIds = new Set([
+    'runtime-cycles',
+    'undeclared-packages',
+    'unresolved-imports',
+    'orphans',
+    'unused-dependencies',
+  ])
+
+  for (let idx = 0; idx < rawFindings.length; idx++) {
+    const f = rawFindings[idx]
+    if (!f || !f.id) continue
+    if (genericRuleIds.has(f.id)) continue
+
+    const s = f.severity?.toLowerCase()
+    const sevLabel = s === 'critical' ? 'Critical' : (s === 'important' ? 'Important' : 'Nice to have')
+    const sevOrder = s === 'critical' ? 0.15 : (s === 'important' ? 1.3 : 2.2)
+
+    let action
+    if (f.evidence && f.evidence[0]?.file) {
+      action = {
+        type: 'file',
+        value: f.evidence[0].file,
+        label: `Inspect ${f.evidence[0].file}`,
+      }
+    } else if (f.fix) {
+      action = {
+        type: 'command',
+        value: f.fix,
+        label: f.fix,
+      }
+    } else {
+      action = {
+        type: 'command',
+        value: f.name || f.id,
+        label: f.name || f.id,
+      }
+    }
+
+    steps.push({
+      id: `rule-${f.id}-${idx}`,
+      severity: sevLabel,
+      severityOrder: sevOrder,
+      title: f.name || f.id,
+      why: f.why || 'Identified by project rule analysis.',
+      action,
+      docsUrl: f.docsUrl,
     })
   }
 
