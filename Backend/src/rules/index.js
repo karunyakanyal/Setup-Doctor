@@ -323,11 +323,21 @@ const calculateHealthScore = (diagnostics = []) => {
 		return counts
 	}, { total: scoredDiagnostics.length, pass: 0, warning: 0, error: 0 })
 
-	const score = scoredSummary.total === 0
+	let score = scoredSummary.total === 0
 		? 0
 		: Math.round(((scoredSummary.pass * 100) + (scoredSummary.warning * 50)) / scoredSummary.total)
 
-	const grade = calculateGrade(score)
+	let grade = calculateGrade(score)
+	let capReason = null
+
+	if (scoredSummary.error > 0) {
+		if (grade === 'A' || grade === 'B') {
+			grade = 'C'
+			score = Math.min(score, 79)
+			capReason = 'failed critical diagnostic'
+		}
+	}
+
 	const status = GRADE_LABELS[grade] || 'At Risk'
 
 	return {
@@ -335,6 +345,7 @@ const calculateHealthScore = (diagnostics = []) => {
 		status,
 		label: status,
 		grade,
+		capReason,
 	}
 }
 
@@ -470,8 +481,7 @@ const runDiagnostics = ({ packageJson = {}, treeData = {} }) => {
 	const summary = calculateSummary(finalDiagnostics)
 	const health = calculateHealthScore(finalDiagnostics)
 	const categoryScores = calculateCategoryScores(finalDiagnostics)
-	const grade = calculateGrade(health.score)
-	health.grade = grade
+	const grade = health.grade
 	health.categoryScores = categoryScores
 
 	return {
@@ -482,6 +492,7 @@ const runDiagnostics = ({ packageJson = {}, treeData = {} }) => {
 		framework,
 		categoryScores,
 		grade,
+		capReason: health.capReason || null,
 		monorepo: isMonorepo,
 	}
 }

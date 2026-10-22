@@ -268,7 +268,7 @@ const handleDiagnose = async (req, res, next) => {
 		}
 
 		const treeData = await treeResponse.json()
-		const { stack, diagnostics, summary, health, framework, categoryScores, grade, monorepo } = runDiagnostics({ packageJson, treeData })
+		const { stack, diagnostics, summary, health, framework, categoryScores, grade, capReason, monorepo } = runDiagnostics({ packageJson, treeData })
 
 		return res.json({
 			success: true,
@@ -285,6 +285,8 @@ const handleDiagnose = async (req, res, next) => {
 			framework,
 			categoryScores,
 			grade,
+			score: health?.score ?? null,
+			capReason: capReason || null,
 			monorepo: Boolean(monorepo),
 		})
 	} catch (error) {
@@ -506,7 +508,9 @@ const handleGraph = async (req, res, next) => {
 		}
 
 		const archiveResult = await fetchRepoArchive(owner, repo, targetBranch, archiveOptions)
-		const graphResult = buildGraph(archiveResult.files)
+		const graphResult = buildGraph(archiveResult.files, [], {
+			truncated: Boolean(archiveResult.truncated),
+		})
 
 		const graphLanguages = {}
 		for (const node of graphResult.nodes) {
@@ -560,6 +564,9 @@ const handleGraph = async (req, res, next) => {
 			summary: graphResult.summary,
 			coverage,
 			graphFiles: graphResult.nodes.length,
+			score: graphResult.score,
+			grade: graphResult.grade,
+			capReason: graphResult.capReason,
 		}
 
 

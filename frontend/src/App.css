@@ -4020,6 +4020,13 @@ summary:focus-visible,
   line-height: 1.2;
 }
 
+.verdict-grade-sub {
+  font-size: 13px;
+  font-weight: 700;
+  opacity: 0.95;
+  margin-top: 2px;
+}
+
 .verdict-score-sub {
   font-size: 12px;
   opacity: 0.85;

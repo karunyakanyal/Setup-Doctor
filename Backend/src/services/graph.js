@@ -110,6 +110,25 @@ function isToolEntryCandidate(filePath) {
 	return parts.includes('scripts') || parts.includes('bin')
 }
 
+function isKnownBuildOutput(specifier) {
+	if (!specifier) return false
+	const clean = specifier.replace(/\\/g, '/')
+	return (
+		clean === './dist' ||
+		clean.startsWith('./dist/') ||
+		clean === '../dist' ||
+		clean.startsWith('../dist/') ||
+		clean.startsWith('dist/') ||
+		clean.includes('/dist/') ||
+		clean === './build' ||
+		clean.startsWith('./build/') ||
+		clean === '../build' ||
+		clean.startsWith('../build/') ||
+		clean.startsWith('build/') ||
+		clean.includes('/build/')
+	)
+}
+
 function isNonProductionFile(filePath) {
 	if (!filePath) return false
 	const clean = filePath.replace(/\\/g, '/')
@@ -1125,9 +1144,265 @@ function extractBundlerAliases(filesMap) {
 }
 
 /**
+ * Repository Health Score & Grade Formula
+ *
+ * One formula to derive unified score and grade from whole-repo production rules:
+ *
+ * 1. Base Score: 100 points.
+ * 2. Deductions based on rule violations and severity:
+ *    - 'critical' (runtime cycles, undeclared packages):
+ *      Base deduction of 2.5 points for the first violation + 0.5 points per additional violation (max 8 points per rule).
+ *    - 'important' (unresolved imports, orphan files, missing tests):
+ *      Base deduction of 2.0 points for the first violation + 0.5 points per additional violation (max 5 points per rule).
+ *    - 'nice-to-have' (unused dependencies, missing license, missing engines field):
+ *      Base deduction of 1.0 point for the first violation + 0.1 points per additional violation (max 2 points per rule).
+ *
+ * 3. Raw Score & Grade:
+ *    rawScore = Math.max(0, Math.min(100, Math.round(100 - totalDeductions)))
+ *    rawGrade = calculateGrade(rawScore):
+ *      A: >= 90, B: >= 80, C: >= 70, D: >= 60, F: < 60
+ *
+ * 4. Grade Caps:
+ *    Caps prevent a repository with real production problems from showing a high grade:
+ *    - Any undeclared package or failed critical diagnostic -> max grade C (and score capped at max 79).
+ *      capReason: `${count} undeclared ${count === 1 ? 'package' : 'packages'}` (or 'failed critical diagnostic').
+ *    - Any runtime cycle -> max grade B (and score capped at max 89).
+ *      capReason: `${count} runtime ${count === 1 ? 'cycle' : 'cycles'}`.
+ *    - Truncated or failed Code Map scan -> max grade B (and score capped at max 89).
+ *      capReason: truncated ? 'Code Map scan truncated' : 'Code Map scan failed'.
+ *    - Otherwise: no cap, capReason is null.
+ *
+ * Returns { score, grade, capReason, rawScore, rawGrade }.
+ */
+function calculateScoreAndGrade(rules = [], options = {}) {
+	const rulesMap = new Map()
+	for (const r of rules) {
+		if (r && r.id) rulesMap.set(r.id, r)
+	}
+
+	let totalDeductions = 0
+	for (const rule of rules) {
+		if (!rule || typeof rule.count !== 'number' || rule.count <= 0) continue
+
+		if (rule.severity === 'critical') {
+			const deduction = 2.5 + Math.min(5.5, (rule.count - 1) * 0.5)
+			totalDeductions += deduction
+		} else if (rule.severity === 'important') {
+			const deduction = 2.0 + Math.min(3.0, (rule.count - 1) * 0.5)
+			totalDeductions += deduction
+		} else {
+			// nice-to-have
+			const deduction = 1.0 + Math.min(1.0, (rule.count - 1) * 0.1)
+			totalDeductions += deduction
+		}
+	}
+
+	const rawScore = Math.max(0, Math.min(100, Math.round(100 - totalDeductions)))
+	let rawGrade = 'F'
+	if (rawScore >= 90) rawGrade = 'A'
+	else if (rawScore >= 80) rawGrade = 'B'
+	else if (rawScore >= 70) rawGrade = 'C'
+	else if (rawScore >= 60) rawGrade = 'D'
+
+	const undeclaredRule = rulesMap.get('undeclared-packages')
+	const undeclaredCount = undeclaredRule ? undeclaredRule.count : 0
+
+	const runtimeCyclesRule = rulesMap.get('runtime-cycles')
+	const runtimeCyclesCount = runtimeCyclesRule ? runtimeCyclesRule.count : 0
+
+	const hasFailedCriticalDiag = Boolean(options.hasFailedCriticalDiagnostic)
+	const isTruncated = Boolean(options.truncated)
+	const isFailedScan = Boolean(options.failed)
+
+	let finalGrade = rawGrade
+	let finalScore = rawScore
+	let capReason = null
+
+	if (undeclaredCount > 0 || hasFailedCriticalDiag) {
+		// Cap at max Grade C
+		if (finalGrade === 'A' || finalGrade === 'B' || finalGrade === 'C') {
+			finalGrade = 'C'
+			finalScore = Math.min(finalScore, 79)
+			capReason = undeclaredCount > 0
+				? `${undeclaredCount} undeclared ${undeclaredCount === 1 ? 'package' : 'packages'}`
+				: 'failed critical diagnostic'
+		}
+	} else if (runtimeCyclesCount > 0) {
+		// Cap at max Grade B
+		if (finalGrade === 'A' || finalGrade === 'B') {
+			finalGrade = 'B'
+			finalScore = Math.min(finalScore, 89)
+			capReason = `${runtimeCyclesCount} runtime ${runtimeCyclesCount === 1 ? 'cycle' : 'cycles'}`
+		}
+	} else if (isTruncated || isFailedScan) {
+		// Cap at max Grade B
+		if (finalGrade === 'A' || finalGrade === 'B') {
+			finalGrade = 'B'
+			finalScore = Math.min(finalScore, 89)
+			capReason = isTruncated ? 'Code Map scan truncated' : 'Code Map scan failed'
+		}
+	}
+
+	return {
+		score: finalScore,
+		grade: finalGrade,
+		capReason,
+		rawScore,
+		rawGrade,
+	}
+}
+
+function computeProductionRules({
+	cycles = [],
+	orphans = [],
+	usedButUndeclared = [],
+	declaredButUnused = [],
+	allUnresolvedImports = [],
+	filesMap = new Map(),
+	parsedPackageJsons = [],
+}) {
+	const prodUnresolvedImports = allUnresolvedImports.filter((item) => {
+		if (item.category === 'non-production' || isNonProductionFile(item.from)) {
+			return false
+		}
+		if (isKnownBuildOutput(item.specifier)) {
+			return false
+		}
+		return true
+	})
+
+	// 1. Runtime cycles (production runtime cycles only)
+	const runtimeCyclesList = cycles.filter((c) => !c?.isTypeOnly)
+	const runtimeCyclesExamples = runtimeCyclesList.slice(0, 3).map((cycle) => {
+		const shortest = (Array.isArray(cycle.shortest) && cycle.shortest.length > 0)
+			? cycle.shortest
+			: (Array.isArray(cycle) ? cycle : (cycle.files || []))
+		return (shortest.length > 1 && shortest[0] !== shortest[shortest.length - 1])
+			? [...shortest, shortest[0]].join(' -> ')
+			: shortest.join(' -> ')
+	})
+
+	// 2. Orphans (production orphan files)
+	const orphansList = orphans.slice(0, 3)
+
+	// 3. Undeclared packages (production used but undeclared)
+	const undeclaredList = usedButUndeclared.slice(0, 3)
+
+	// 4. Unresolved imports (production, excluding known build outputs like ./dist)
+	const unresolvedExamples = prodUnresolvedImports.slice(0, 3).map((item) => `${item.specifier} in ${item.from}`)
+
+	// 5. Unused dependencies (production declared but unused)
+	const unusedDepsList = declaredButUnused.slice(0, 3)
+
+	// 6. Missing license (license file or package.json license field)
+	const hasLicenseFile = Array.from(filesMap.keys()).some((p) => {
+		const base = path.posix.basename(p).toLowerCase()
+		return (
+			base === 'license' ||
+			base === 'licence' ||
+			base.startsWith('license.') ||
+			base.startsWith('licence.') ||
+			base.startsWith('license-') ||
+			base.startsWith('licence-')
+		)
+	})
+	const rootPkg = parsedPackageJsons.find((p) => !p.dir) || parsedPackageJsons[0]
+	const hasLicenseField = Boolean(
+		rootPkg?.content?.license &&
+		typeof rootPkg.content.license === 'string' &&
+		rootPkg.content.license.trim()
+	)
+	const hasLicense = hasLicenseFile || hasLicenseField
+	const missingLicenseCount = hasLicense ? 0 : 1
+	const missingLicenseExamples = hasLicense ? [] : ['LICENSE']
+
+	// 7. Missing engines field
+	const hasEnginesField = Boolean(
+		rootPkg?.content?.engines &&
+		typeof rootPkg.content.engines === 'object' &&
+		Object.keys(rootPkg.content.engines).length > 0
+	)
+	const missingEnginesCount = hasEnginesField ? 0 : 1
+	const missingEnginesExamples = hasEnginesField ? [] : ['package.json engines field']
+
+	// 8. Missing tests
+	const hasTestScript = parsedPackageJsons.some((p) => {
+		const testScript = p.content?.scripts?.test
+		return (
+			typeof testScript === 'string' &&
+			testScript.trim() !== '' &&
+			!testScript.includes('no test specified')
+		)
+	})
+	const hasTestFiles = Array.from(filesMap.keys()).some((p) => isTestFile(p))
+	const hasTests = hasTestScript || hasTestFiles
+	const missingTestsCount = hasTests ? 0 : 1
+	const missingTestsExamples = hasTests ? [] : ['No test files or test script found']
+
+	return [
+		{
+			id: 'runtime-cycles',
+			severity: 'critical',
+			count: runtimeCyclesList.length,
+			examples: runtimeCyclesExamples,
+			affectedExamples: runtimeCyclesExamples,
+		},
+		{
+			id: 'orphans',
+			severity: 'important',
+			count: orphans.length,
+			examples: orphansList,
+			affectedExamples: orphansList,
+		},
+		{
+			id: 'undeclared-packages',
+			severity: 'critical',
+			count: usedButUndeclared.length,
+			examples: undeclaredList,
+			affectedExamples: undeclaredList,
+		},
+		{
+			id: 'unresolved-imports',
+			severity: 'important',
+			count: prodUnresolvedImports.length,
+			examples: unresolvedExamples,
+			affectedExamples: unresolvedExamples,
+		},
+		{
+			id: 'unused-dependencies',
+			severity: 'nice-to-have',
+			count: declaredButUnused.length,
+			examples: unusedDepsList,
+			affectedExamples: unusedDepsList,
+		},
+		{
+			id: 'missing-license',
+			severity: 'nice-to-have',
+			count: missingLicenseCount,
+			examples: missingLicenseExamples,
+			affectedExamples: missingLicenseExamples,
+		},
+		{
+			id: 'missing-engines-field',
+			severity: 'nice-to-have',
+			count: missingEnginesCount,
+			examples: missingEnginesExamples,
+			affectedExamples: missingEnginesExamples,
+		},
+		{
+			id: 'missing-tests',
+			severity: 'important',
+			count: missingTestsCount,
+			examples: missingTestsExamples,
+			affectedExamples: missingTestsExamples,
+		},
+	]
+}
+
+/**
  * Builds the dependency graph from files and packages.
  */
-function buildGraph(files, packageJsons = []) {
+function buildGraph(files, packageJsons = [], options = {}) {
 	const filesMap = new Map()
 	for (const [p, val] of (files instanceof Map ? files.entries() : Object.entries(files || {}))) {
 		if (typeof val === 'string') {
@@ -2266,6 +2541,23 @@ function buildGraph(files, packageJsons = []) {
 		.map((n) => n.path)
 		.slice(0, 25)
 
+	const rules = computeProductionRules({
+		cycles,
+		orphans,
+		usedButUndeclared,
+		declaredButUnused,
+		allUnresolvedImports,
+		filesMap,
+		parsedPackageJsons,
+	})
+
+	const isTruncatedScan = Boolean(truncated || options.truncated)
+	const scoreAndGrade = calculateScoreAndGrade(rules, {
+		truncated: isTruncatedScan,
+		failed: Boolean(options.failed),
+		hasFailedCriticalDiagnostic: Boolean(options.hasFailedCriticalDiagnostic),
+	})
+
 	const graphResult = {
 		nodes,
 		edges,
@@ -2300,11 +2592,18 @@ function buildGraph(files, packageJsons = []) {
 			unresolvedCount: totalUnresolvedCount,
 			parsedFiles: nodes.length,
 			configFiles,
+			rules,
+			score: scoreAndGrade.score,
+			grade: scoreAndGrade.grade,
+			capReason: scoreAndGrade.capReason,
 		},
 		coverage,
 		graphFiles: nodes.length,
 		truncated,
 		graphNodesOmitted,
+		score: scoreAndGrade.score,
+		grade: scoreAndGrade.grade,
+		capReason: scoreAndGrade.capReason,
 	}
 
 	return graphResult
@@ -2438,5 +2737,8 @@ module.exports = {
 	extractBundlerAliases,
 	resolveFilePath,
 	isRelativeSpecifier,
+	isKnownBuildOutput,
+	calculateScoreAndGrade,
+	computeProductionRules,
 }
 

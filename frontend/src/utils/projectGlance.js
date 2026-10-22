@@ -139,6 +139,116 @@ export function formatStackInPlainWords({
  * Derive health verdict (icon, text, tone/color, one-sentence why) from combined data:
  * diagnostics + graph summary (production counts only, respecting toggle state).
  */
+/**
+ * Repository Health Score & Grade Formula
+ *
+ * One formula to derive unified score and grade from whole-repo production rules:
+ *
+ * 1. Base Score: 100 points.
+ * 2. Deductions based on rule violations and severity:
+ *    - 'critical' (runtime cycles, undeclared packages):
+ *      Base deduction of 2.5 points for the first violation + 0.5 points per additional violation (max 8 points per rule).
+ *    - 'important' (unresolved imports, orphan files, missing tests):
+ *      Base deduction of 2.0 points for the first violation + 0.5 points per additional violation (max 5 points per rule).
+ *    - 'nice-to-have' (unused dependencies, missing license, missing engines field):
+ *      Base deduction of 1.0 point for the first violation + 0.1 points per additional violation (max 2 points per rule).
+ *
+ * 3. Raw Score & Grade:
+ *    rawScore = Math.max(0, Math.min(100, Math.round(100 - totalDeductions)))
+ *    rawGrade = calculateGrade(rawScore):
+ *      A: >= 90, B: >= 80, C: >= 70, D: >= 60, F: < 60
+ *
+ * 4. Grade Caps:
+ *    Caps prevent a repository with real production problems from showing a high grade:
+ *    - Any undeclared package or failed critical diagnostic -> max grade C (and score capped at max 79).
+ *      capReason: `${count} undeclared ${count === 1 ? 'package' : 'packages'}` (or 'failed critical diagnostic').
+ *    - Any runtime cycle -> max grade B (and score capped at max 89).
+ *      capReason: `${count} runtime ${count === 1 ? 'cycle' : 'cycles'}`.
+ *    - Truncated or failed Code Map scan -> max grade B (and score capped at max 89).
+ *      capReason: truncated ? 'Code Map scan truncated' : 'Code Map scan failed'.
+ *    - Otherwise: no cap, capReason is null.
+ *
+ * Returns { score, grade, capReason, rawScore, rawGrade }.
+ */
+export function calculateScoreAndGrade(rules = [], options = {}) {
+  const rulesMap = new Map()
+  for (const r of rules) {
+    if (r && r.id) rulesMap.set(r.id, r)
+  }
+
+  let totalDeductions = 0
+  for (const rule of rules) {
+    if (!rule || typeof rule.count !== 'number' || rule.count <= 0) continue
+
+    if (rule.severity === 'critical') {
+      const deduction = 2.5 + Math.min(5.5, (rule.count - 1) * 0.5)
+      totalDeductions += deduction
+    } else if (rule.severity === 'important') {
+      const deduction = 2.0 + Math.min(3.0, (rule.count - 1) * 0.5)
+      totalDeductions += deduction
+    } else {
+      // nice-to-have
+      const deduction = 1.0 + Math.min(1.0, (rule.count - 1) * 0.1)
+      totalDeductions += deduction
+    }
+  }
+
+  const rawScore = Math.max(0, Math.min(100, Math.round(100 - totalDeductions)))
+  let rawGrade = 'F'
+  if (rawScore >= 90) rawGrade = 'A'
+  else if (rawScore >= 80) rawGrade = 'B'
+  else if (rawScore >= 70) rawGrade = 'C'
+  else if (rawScore >= 60) rawGrade = 'D'
+
+  const undeclaredRule = rulesMap.get('undeclared-packages')
+  const undeclaredCount = undeclaredRule ? undeclaredRule.count : 0
+
+  const runtimeCyclesRule = rulesMap.get('runtime-cycles')
+  const runtimeCyclesCount = runtimeCyclesRule ? runtimeCyclesRule.count : 0
+
+  const hasFailedCriticalDiag = Boolean(options.hasFailedCriticalDiagnostic)
+  const isTruncated = Boolean(options.truncated)
+  const isFailedScan = Boolean(options.failed)
+
+  let finalGrade = rawGrade
+  let finalScore = rawScore
+  let capReason = null
+
+  if (undeclaredCount > 0 || hasFailedCriticalDiag) {
+    if (finalGrade === 'A' || finalGrade === 'B' || finalGrade === 'C') {
+      finalGrade = 'C'
+      finalScore = Math.min(finalScore, 79)
+      capReason = undeclaredCount > 0
+        ? `${undeclaredCount} undeclared ${undeclaredCount === 1 ? 'package' : 'packages'}`
+        : 'failed critical diagnostic'
+    }
+  } else if (runtimeCyclesCount > 0) {
+    if (finalGrade === 'A' || finalGrade === 'B') {
+      finalGrade = 'B'
+      finalScore = Math.min(finalScore, 89)
+      capReason = `${runtimeCyclesCount} runtime ${runtimeCyclesCount === 1 ? 'cycle' : 'cycles'}`
+    }
+  } else if (isTruncated || isFailedScan) {
+    if (finalGrade === 'A' || finalGrade === 'B') {
+      finalGrade = 'B'
+      finalScore = Math.min(finalScore, 89)
+      capReason = isTruncated ? 'Code Map scan truncated' : 'Code Map scan failed'
+    }
+  }
+
+  return {
+    score: finalScore,
+    grade: finalGrade,
+    capReason,
+    rawScore,
+    rawGrade,
+  }
+}
+
+/**
+ * Derive health verdict (icon, text, tone/color, one-sentence why) from combined data:
+ * diagnostics + graph summary (production counts only, respecting toggle state).
+ */
 export function getHealthVerdict({
   health = null,
   diagnostics = [],
@@ -177,6 +287,9 @@ export function getHealthVerdict({
       icon,
       tone,
       score: null,
+      grade: null,
+      capReason: null,
+      gradeText: null,
       showScore: false,
       whySentence,
       counts: {
@@ -203,7 +316,7 @@ export function getHealthVerdict({
       verdict = 'Needs attention'
       icon = '✖'
       tone = 'attention'
-    } else if (prodWarnings > 0) {
+    } else if (prodWarnings > 0 || deepScanStatus === 'error') {
       verdict = 'A few things to fix'
       icon = '⚠'
       tone = 'warning'
@@ -214,11 +327,34 @@ export function getHealthVerdict({
       ? health.score
       : (prodErrors > 0 ? 60 : (prodWarnings > 0 ? 80 : 100))
 
+    let grade = health?.grade || (fallbackScore >= 90 ? 'A' : fallbackScore >= 80 ? 'B' : fallbackScore >= 70 ? 'C' : 'D')
+    let score = fallbackScore
+    let capReason = health?.capReason || null
+
+    if (prodErrors > 0) {
+      if (grade === 'A' || grade === 'B' || grade === 'C') {
+        grade = 'C'
+        score = Math.min(score, 79)
+        capReason = 'failed critical diagnostic'
+      }
+    } else if (deepScanStatus === 'error') {
+      if (grade === 'A' || grade === 'B') {
+        grade = 'B'
+        score = Math.min(score, 89)
+        capReason = 'Code Map scan failed'
+      }
+    }
+
+    const gradeText = grade ? (capReason ? `Grade ${grade} (capped: ${capReason})` : `Grade ${grade}`) : null
+
     return {
       label: verdict,
       icon,
       tone,
-      score: fallbackScore,
+      score,
+      grade,
+      capReason,
+      gradeText,
       showScore: true,
       whySentence,
       counts: {
@@ -284,21 +420,102 @@ export function getHealthVerdict({
     }
   }
 
+  const hasMissingLicense = diagnostics.some((d) => d.rule === 'missing-license' && normalizeStatus(d.status) !== 'pass')
+  const hasMissingEngines = diagnostics.some((d) => (d.rule === 'node-engine' || d.rule === 'missing-nvmrc-or-engines') && normalizeStatus(d.status) !== 'pass')
+  const hasMissingTests = diagnostics.some((d) => (d.rule === 'missing-test-script' || d.rule === 'missing-tests') && normalizeStatus(d.status) !== 'pass')
+
+  const isTruncated = Boolean(deepScanData?.truncated || deepScanData?.coverage?.truncated)
+  const isFailedScan = deepScanStatus === 'error'
+
+  const rules = deepScanData?.summary?.rules || deepScanData?.rules || [
+    { id: 'runtime-cycles', severity: 'critical', count: runtimeCyclesCount },
+    { id: 'orphans', severity: 'important', count: orphansCount },
+    { id: 'undeclared-packages', severity: 'critical', count: undeclaredCount },
+    { id: 'unresolved-imports', severity: 'important', count: unresolvedCount },
+    { id: 'unused-dependencies', severity: 'nice-to-have', count: unusedCount },
+    { id: 'missing-license', severity: 'nice-to-have', count: hasMissingLicense ? 1 : 0 },
+    { id: 'missing-engines-field', severity: 'nice-to-have', count: hasMissingEngines ? 1 : 0 },
+    { id: 'missing-tests', severity: 'important', count: hasMissingTests ? 1 : 0 },
+  ]
+
+  const scoreResult = calculateScoreAndGrade(rules, {
+    hasFailedCriticalDiagnostic: prodErrors > 0,
+    truncated: isTruncated,
+    failed: isFailedScan,
+  })
+
+  let finalScore = scoreResult.score
+  let finalGrade = scoreResult.grade
+  let capReason = scoreResult.capReason
+
+  const hasGraphFindings =
+    runtimeCyclesCount > 0 ||
+    orphansCount > 0 ||
+    unresolvedCount > 0 ||
+    undeclaredCount > 0 ||
+    unusedCount > 0
+
+  if (typeof deepScanData?.score === 'number' && typeof deepScanData?.grade === 'string') {
+    finalScore = deepScanData.score
+    finalGrade = deepScanData.grade
+    capReason = deepScanData.capReason || null
+  } else if (
+    !hasGraphFindings &&
+    !isTruncated &&
+    !isFailedScan &&
+    typeof health?.score === 'number' &&
+    typeof deepScanData?.score !== 'number' &&
+    !deepScanData?.summary?.rules
+  ) {
+    finalScore = health.score
+    finalGrade = finalScore >= 90 ? 'A' : (finalScore >= 80 ? 'B' : (finalScore >= 70 ? 'C' : 'D'))
+    capReason = health?.capReason || null
+  }
+
+  // Enforce grade caps:
+  if (undeclaredCount > 0 || prodErrors > 0) {
+    if (finalGrade === 'A' || finalGrade === 'B' || finalGrade === 'C') {
+      finalGrade = 'C'
+      finalScore = Math.min(finalScore, 79)
+      capReason = undeclaredCount > 0
+        ? `${undeclaredCount} undeclared ${undeclaredCount === 1 ? 'package' : 'packages'}`
+        : 'failed critical diagnostic'
+    }
+  } else if (runtimeCyclesCount > 0) {
+    if (finalGrade === 'A' || finalGrade === 'B') {
+      finalGrade = 'B'
+      finalScore = Math.min(finalScore, 89)
+      capReason = `${runtimeCyclesCount} runtime ${runtimeCyclesCount === 1 ? 'cycle' : 'cycles'}`
+    }
+  } else if (isTruncated || isFailedScan) {
+    if (finalGrade === 'A' || finalGrade === 'B') {
+      finalGrade = 'B'
+      finalScore = Math.min(finalScore, 89)
+      capReason = isTruncated ? 'Code Map scan truncated' : 'Code Map scan failed'
+    }
+  }
+
+  const gradeText = finalGrade ? (capReason ? `Grade ${finalGrade} (capped: ${capReason})` : `Grade ${finalGrade}`) : null
+
   // Verdict rules (production only):
-  // - Needs attention: any failed critical diagnostic, or >= 1 undeclared package.
-  // - A few things to fix: any runtime cycle, orphan, unresolved import or unused dependency, or any non-passing diagnostic.
-  // - Looking healthy: none of the above.
+  // - Needs attention: any failed critical diagnostic, or >= 1 undeclared package, or grade C/D/F.
+  // - A few things to fix: any runtime cycle, orphan, unresolved import, unused dependency,
+  //   any non-passing diagnostic, truncated scan, or grade B.
+  // - Looking healthy: none of the above (grade A).
   let verdict = 'Looking healthy'
   let icon = '✓'
   let tone = 'healthy'
 
-  const hasCritical = prodErrors > 0 || undeclaredCount >= 1
+  const hasCritical = prodErrors > 0 || undeclaredCount >= 1 || finalGrade === 'C' || finalGrade === 'D' || finalGrade === 'F'
   const hasFixable =
     runtimeCyclesCount > 0 ||
     orphansCount > 0 ||
     unresolvedCount > 0 ||
     unusedCount > 0 ||
-    nonPassingDiag > 0
+    nonPassingDiag > 0 ||
+    isTruncated ||
+    isFailedScan ||
+    finalGrade === 'B'
 
   if (hasCritical) {
     verdict = 'Needs attention'
@@ -309,22 +526,6 @@ export function getHealthVerdict({
     icon = '⚠'
     tone = 'warning'
   }
-
-  const rawScore = typeof health?.score === 'number' ? health.score : 100
-
-  // Glance card: do not show the numeric score next to the verdict unless it
-  // is computed from the same findings that drive the verdict. Otherwise hide
-  // it and show the verdict only.
-  const hasGraphFindings =
-    runtimeCyclesCount > 0 ||
-    orphansCount > 0 ||
-    unresolvedCount > 0 ||
-    undeclaredCount > 0 ||
-    unusedCount > 0
-
-  const isScoreUnified = !hasGraphFindings
-  const scoreToDisplay = isScoreUnified ? rawScore : null
-  const showScore = isScoreUnified
 
   // The one-line reason must list the real counts.
   const parts = []
@@ -349,6 +550,9 @@ export function getHealthVerdict({
   if (prodWarnings > 0) {
     parts.push(`${prodWarnings} setup ${prodWarnings === 1 ? 'warning' : 'warnings'}`)
   }
+  if (isTruncated && parts.length === 0) {
+    parts.push('truncated scan')
+  }
 
   let whySentence
   if (parts.length === 0) {
@@ -367,8 +571,11 @@ export function getHealthVerdict({
     label: verdict,
     icon,
     tone,
-    score: scoreToDisplay,
-    showScore,
+    score: finalScore,
+    grade: finalGrade,
+    capReason,
+    gradeText,
+    showScore: true,
     whySentence,
     counts: {
       critical: prodErrors + undeclaredCount,
