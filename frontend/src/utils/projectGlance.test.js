@@ -113,7 +113,7 @@ test('getHealthVerdict: verdict mapping and one sentence why derived from produc
   assert.equal(healthy.showScore, true)
   assert.equal(healthy.score, 95)
 
-  // 2. A few things to fix with 1 circular dependency -> score is hidden because diagnostics score doesn't account for graph cycles
+  // 2. A few things to fix with 1 circular dependency -> capped at B (1 cycle)
   const cycleVerdict = getHealthVerdict({
     health: { score: 95 },
     diagnostics: [],
@@ -128,8 +128,11 @@ test('getHealthVerdict: verdict mapping and one sentence why derived from produc
   assert.equal(cycleVerdict.icon, '⚠')
   assert.equal(cycleVerdict.tone, 'warning')
   assert.equal(cycleVerdict.whySentence, '1 circular dependency was found.')
-  assert.equal(cycleVerdict.showScore, false)
-  assert.equal(cycleVerdict.score, null)
+  assert.equal(cycleVerdict.grade, 'B')
+  assert.equal(cycleVerdict.capReason, '1 runtime cycle')
+  assert.equal(cycleVerdict.gradeText, 'Grade B (capped: 1 runtime cycle)')
+  assert.equal(cycleVerdict.showScore, true)
+  assert.equal(cycleVerdict.score, 89)
 
   // Type-only cycles do NOT trigger runtime circular dependency verdict
   const typeOnlyVerdict = getHealthVerdict({
@@ -163,7 +166,7 @@ test('getHealthVerdict: verdict mapping and one sentence why derived from produc
   assert.equal(warningVerdict.showScore, true)
   assert.equal(warningVerdict.score, 82)
 
-  // 4. Undeclared dependencies trigger Needs attention -> score is hidden because score doesn't account for graph undeclared packages
+  // 4. Undeclared dependencies trigger Needs attention and cap at C
   const undeclaredVerdict = getHealthVerdict({
     health: { score: 80 },
     diagnostics: [],
@@ -176,8 +179,11 @@ test('getHealthVerdict: verdict mapping and one sentence why derived from produc
   })
   assert.equal(undeclaredVerdict.label, 'Needs attention')
   assert.equal(undeclaredVerdict.whySentence, '2 undeclared packages were found.')
-  assert.equal(undeclaredVerdict.showScore, false)
-  assert.equal(undeclaredVerdict.score, null)
+  assert.equal(undeclaredVerdict.grade, 'C')
+  assert.equal(undeclaredVerdict.capReason, '2 undeclared packages')
+  assert.equal(undeclaredVerdict.gradeText, 'Grade C (capped: 2 undeclared packages)')
+  assert.equal(undeclaredVerdict.showScore, true)
+  assert.equal(undeclaredVerdict.score, 79)
 
   // 5. Critical setup error triggers Needs attention (0 graph issues) -> score is shown
   const errorVerdict = getHealthVerdict({
@@ -220,10 +226,13 @@ test('getHealthVerdict: unavailable state ("error" or missing) shows score and n
     diagnostics: [{ status: 'pass' }],
     deepScanStatus: 'error',
   })
-  assert.equal(unavailableError.label, 'Looking healthy')
+  assert.equal(unavailableError.label, 'A few things to fix')
   assert.equal(unavailableError.whySentence, 'Code Map unavailable, so this verdict covers setup checks only.')
+  assert.equal(unavailableError.grade, 'B')
+  assert.equal(unavailableError.capReason, 'Code Map scan failed')
+  assert.equal(unavailableError.gradeText, 'Grade B (capped: Code Map scan failed)')
   assert.equal(unavailableError.showScore, true)
-  assert.equal(unavailableError.score, 100)
+  assert.equal(unavailableError.score, 89)
 
   const unavailableMissing = getHealthVerdict({
     health: { score: 80 },
@@ -237,7 +246,89 @@ test('getHealthVerdict: unavailable state ("error" or missing) shows score and n
   assert.equal(unavailableMissing.score, 80)
 })
 
-test('vite-shaped response: yields "A few things to fix" with cycle and unresolved steps, hides score', () => {
+test('clean repo: reaches grade A with no caps', () => {
+  const cleanDiag = [{ status: 'pass' }]
+  const cleanDeepScan = {
+    coverage: { graphFiles: 50 },
+    summary: {
+      cycles: [],
+      usedButUndeclared: [],
+      declaredButUnused: [],
+      orphans: [],
+      unresolvedImports: [],
+    },
+  }
+
+  const verdict = getHealthVerdict({
+    health: { score: 100 },
+    diagnostics: cleanDiag,
+    deepScanData: cleanDeepScan,
+  })
+
+  assert.equal(verdict.label, 'Looking healthy')
+  assert.equal(verdict.grade, 'A')
+  assert.equal(verdict.capReason, null)
+  assert.equal(verdict.gradeText, 'Grade A')
+  assert.equal(verdict.score, 100)
+  assert.equal(verdict.showScore, true)
+})
+
+test('undeclared package: caps at C', () => {
+  const diag = [{ status: 'pass' }]
+  const deepScan = {
+    coverage: { graphFiles: 50 },
+    summary: {
+      cycles: [],
+      usedButUndeclared: ['axios'],
+      declaredButUnused: [],
+      orphans: [],
+      unresolvedImports: [],
+    },
+  }
+
+  const verdict = getHealthVerdict({
+    health: { score: 100 },
+    diagnostics: diag,
+    deepScanData: deepScan,
+  })
+
+  assert.equal(verdict.label, 'Needs attention')
+  assert.equal(verdict.grade, 'C')
+  assert.equal(verdict.capReason, '1 undeclared package')
+  assert.equal(verdict.gradeText, 'Grade C (capped: 1 undeclared package)')
+  assert.equal(verdict.score, 79)
+  assert.equal(verdict.showScore, true)
+})
+
+test('truncated scan: caps at B', () => {
+  const diag = [{ status: 'pass' }]
+  const deepScan = {
+    coverage: { graphFiles: 500, truncated: true },
+    truncated: true,
+    summary: {
+      cycles: [],
+      usedButUndeclared: [],
+      declaredButUnused: [],
+      orphans: [],
+      unresolvedImports: [],
+    },
+  }
+
+  const verdict = getHealthVerdict({
+    health: { score: 100 },
+    diagnostics: diag,
+    deepScanData: deepScan,
+  })
+
+  assert.equal(verdict.label, 'A few things to fix')
+  assert.equal(verdict.grade, 'B')
+  assert.equal(verdict.capReason, 'Code Map scan truncated')
+  assert.equal(verdict.gradeText, 'Grade B (capped: Code Map scan truncated)')
+  assert.equal(verdict.score, 89)
+  assert.equal(verdict.showScore, true)
+})
+
+test('vite-shaped response: is capped at B because of runtime cycles', () => {
   const viteDiag = [{ status: 'pass' }]
   const viteDeepScan = {
     coverage: { graphFiles: 1781 },
@@ -272,8 +363,11 @@ test('vite-shaped response: yields "A few things to fix" with cycle and unresolv
   })
 
   assert.equal(verdict.label, 'A few things to fix')
-  assert.equal(verdict.showScore, false, 'Score must be hidden when graph findings exist')
-  assert.equal(verdict.score, null)
+  assert.equal(verdict.grade, 'B')
+  assert.equal(verdict.capReason, '2 runtime cycles')
+  assert.equal(verdict.gradeText, 'Grade B (capped: 2 runtime cycles)')
+  assert.equal(verdict.showScore, true)
+  assert.equal(verdict.score, 89)
   assert.ok(verdict.whySentence.includes('2 circular dependencies'))
   assert.ok(verdict.whySentence.includes('2 orphan files'))
   assert.ok(verdict.whySentence.includes('2 unresolved imports'))
@@ -295,7 +389,7 @@ test('vite-shaped response: yields "A few things to fix" with cycle and unresolv
   assert.ok(top3[2].title.includes('Resolve missing import "../types.js" in packages/vite/src/node/index.ts'))
 })
 
-test('Skinveda-shaped response: yields App.jsx/Landing.jsx cycle as step 1, hides score', () => {
+test('Skinveda-shaped response: is capped at B (1 cycle)', () => {
   const skinvedaDiag = [
     { status: 'warning', rule: 'node-engine' },
     { status: 'warning', rule: 'missing-license' },
@@ -327,8 +421,11 @@ test('Skinveda-shaped response: yields App.jsx/Landing.jsx cycle as step 1, hide
   })
 
   assert.equal(verdict.label, 'A few things to fix')
-  assert.equal(verdict.showScore, false, 'Score must be hidden when circular dependency exists')
-  assert.equal(verdict.score, null)
+  assert.equal(verdict.grade, 'B')
+  assert.equal(verdict.capReason, '1 runtime cycle')
+  assert.equal(verdict.gradeText, 'Grade B (capped: 1 runtime cycle)')
+  assert.equal(verdict.showScore, true)
+  assert.equal(verdict.score, 89)
   assert.ok(verdict.whySentence.includes('1 circular dependency'))
   assert.ok(verdict.whySentence.includes('5 setup warnings'))
 

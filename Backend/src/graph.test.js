@@ -705,3 +705,106 @@ test('graph builder: "node ../scripts/x.js" resolves correctly', () => {
 	assert.equal(scriptNode.isOrphan, false)
 })
 
+test('graph builder: computes summary.rules and clean repo reaches Grade A', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			name: 'clean-repo',
+			license: 'MIT',
+			engines: { node: '>=18' },
+			scripts: { test: 'vitest run' },
+			dependencies: { lodash: '^4.17.21' },
+		}),
+		'src/index.js': `
+			import lodash from 'lodash';
+			import { helper } from './helper.js';
+			console.log(lodash, helper);
+		`,
+		'src/helper.js': 'export const helper = 42;',
+	}
+
+	const result = buildGraph(files)
+	assert.ok(Array.isArray(result.summary.rules))
+	assert.equal(result.summary.rules.length, 8)
+	assert.equal(result.grade, 'A')
+	assert.equal(result.score, 100)
+	assert.equal(result.capReason, null)
+})
+
+test('graph builder: runtime cycle caps at Grade B', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			name: 'cycle-repo',
+			license: 'MIT',
+			engines: { node: '>=18' },
+			scripts: { test: 'vitest run' },
+		}),
+		'src/a.js': 'import { b } from "./b.js"; export const a = 1;',
+		'src/b.js': 'import { a } from "./a.js"; export const b = 2;',
+	}
+
+	const result = buildGraph(files)
+	assert.equal(result.grade, 'B')
+	assert.equal(result.score, 89)
+	assert.equal(result.capReason, '1 runtime cycle')
+	const cycleRule = result.summary.rules.find((r) => r.id === 'runtime-cycles')
+	assert.ok(cycleRule)
+	assert.equal(cycleRule.count, 1)
+	assert.equal(cycleRule.severity, 'critical')
+})
+
+test('graph builder: undeclared package caps at Grade C', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			name: 'undeclared-repo',
+			license: 'MIT',
+			engines: { node: '>=18' },
+			scripts: { test: 'vitest run' },
+		}),
+		'src/index.js': 'import axios from "axios"; console.log(axios);',
+	}
+
+	const result = buildGraph(files)
+	assert.equal(result.grade, 'C')
+	assert.equal(result.score, 79)
+	assert.equal(result.capReason, '1 undeclared package')
+	const undeclaredRule = result.summary.rules.find((r) => r.id === 'undeclared-packages')
+	assert.ok(undeclaredRule)
+	assert.equal(undeclaredRule.count, 1)
+	assert.equal(undeclaredRule.severity, 'critical')
+})
+
+test('graph builder: truncated scan caps at Grade B', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			name: 'truncated-repo',
+			license: 'MIT',
+			engines: { node: '>=18' },
+			scripts: { test: 'vitest run' },
+		}),
+		'src/index.js': 'console.log("hello");',
+	}
+
+	const result = buildGraph(files, [], { truncated: true })
+	assert.equal(result.grade, 'B')
+	assert.equal(result.score, 89)
+	assert.equal(result.capReason, 'Code Map scan truncated')
+})
+
+test('graph builder: excludes known build outputs like ./dist from unresolved imports', () => {
+	const files = {
+		'package.json': JSON.stringify({
+			name: 'dist-import-repo',
+			license: 'MIT',
+			engines: { node: '>=18' },
+			scripts: { test: 'vitest run' },
+		}),
+		'packages/cli/index.js': 'import "./dist/index.js";',
+	}
+
+	const result = buildGraph(files)
+	const unresolvedRule = result.summary.rules.find((r) => r.id === 'unresolved-imports')
+	assert.ok(unresolvedRule)
+	assert.equal(unresolvedRule.count, 0)
+})
+
+

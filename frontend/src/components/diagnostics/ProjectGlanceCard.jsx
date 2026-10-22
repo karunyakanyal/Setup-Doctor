@@ -61,6 +61,9 @@ export default function ProjectGlanceCard({
           </span>
           <div className="verdict-text-wrap">
             <span className="verdict-label">{verdict.label}</span>
+            {verdict.gradeText && (
+              <span className="verdict-grade-sub">{verdict.gradeText}</span>
+            )}
             {verdict.showScore && typeof verdict.score === 'number' && (
               <span className="verdict-score-sub">{verdict.score}/100</span>
             )}
