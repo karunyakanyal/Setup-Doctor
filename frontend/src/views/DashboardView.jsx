@@ -15,6 +15,7 @@ import DiagnosticsLoadingSkeleton from '../components/diagnostics/DiagnosticsLoa
 import DiagnosticsErrorState from '../components/diagnostics/DiagnosticsErrorState'
 import CodeMapPanel from '../components/codemap/CodeMapPanel'
 import ProjectGlanceCard from '../components/diagnostics/ProjectGlanceCard'
+import { buildMergedFindings, isCoveredTopic } from '../utils/projectGlance.js'
 import WhatToDoNextPanel from '../components/diagnostics/WhatToDoNextPanel'
 import ProjectProfileCard from '../components/diagnostics/ProjectProfileCard'
 import DimensionRatingTiles from '../components/diagnostics/DimensionRatingTiles'
@@ -305,6 +306,52 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     }
   }
 
+  // Derive single overall grade, score, and capReason from the rule engine
+  const overallGrade = useMemo(() => {
+    if (deepScanData?.grade) return deepScanData.grade
+    if (deepScanData?.summary?.grade) return deepScanData.summary.grade
+    if (deepScanData?.dimensions?.overallGrade) return deepScanData.dimensions.overallGrade
+    if (health?.grade && health?.grade !== 'N/A') return health.grade
+    return getGrade(health)
+  }, [deepScanData, health])
+
+  const overallScore = useMemo(() => {
+    if (typeof deepScanData?.score === 'number') return Math.round(deepScanData.score)
+    if (typeof deepScanData?.summary?.score === 'number') return Math.round(deepScanData.summary.score)
+    if (typeof deepScanData?.dimensions?.overallScore === 'number') return Math.round(deepScanData.dimensions.overallScore)
+    if (typeof health?.score === 'number') return Math.round(health.score)
+    return null
+  }, [deepScanData, health])
+
+  const overallCapReason = useMemo(() => {
+    return deepScanData?.capReason || deepScanData?.summary?.capReason || deepScanData?.dimensions?.capReason || health?.capReason || null
+  }, [deepScanData, health])
+  const mergedFindings = useMemo(() => {
+    return buildMergedFindings({
+      diagnostics,
+      deepScanData,
+      includeNonProd,
+    })
+  }, [diagnostics, deepScanData, includeNonProd])
+
+  const visibleDiagnostics = useMemo(() => {
+    const filtered = filterDiagnostics(diagnostics, activeFilter)
+
+    if (activeFilter === 'all' && !showPassed) {
+      return filtered.filter((d) => normalizeStatus(d.status) !== 'pass')
+    }
+
+    return filtered
+  }, [diagnostics, activeFilter, showPassed])
+
+  const uncoveredDiagnostics = useMemo(() => {
+    return visibleDiagnostics.filter((d) => !isCoveredTopic(d.rule || d.ruleId))
+  }, [visibleDiagnostics])
+
+  const groupedUncovered = useMemo(() => {
+    return groupDiagnosticsByCategory(uncoveredDiagnostics)
+  }, [uncoveredDiagnostics])
+
   // Repository card analysis status text and failure badge
   const repoAnalysisBadge = useMemo(() => {
     if (!repository?.fullName) {
@@ -329,7 +376,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
       return { text: 'Ready for analysis', isFailed: false }
     }
 
-    const grade = getGrade(activeHealth)
+    const grade = overallGrade
+    const capReason = overallCapReason
     let timeStr = ''
 
     if (timestamp) {
@@ -343,18 +391,20 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
       }
     }
 
+    const gradeText = capReason ? `Grade ${grade} (capped: ${capReason})` : `Grade ${grade}`
+
     if (timeStr && grade && grade !== 'N/A') {
-      return { text: `Analyzed at ${timeStr} • Grade ${grade}`, isFailed: false }
+      return { text: `Analyzed at ${timeStr} • ${gradeText}`, isFailed: false }
     }
     if (timeStr) {
       return { text: `Analyzed at ${timeStr}`, isFailed: false }
     }
     if (grade && grade !== 'N/A') {
-      return { text: `Grade ${grade}`, isFailed: false }
+      return { text: gradeText, isFailed: false }
     }
 
     return { text: 'Ready for analysis', isFailed: false }
-  }, [repository, health, diagnosticsError, analysisHistory])
+  }, [repository, health, diagnosticsError, analysisHistory, overallGrade, overallCapReason])
 
   // Count only repositories with successful diagnostics (has an analysis record with a score)
   const analyzedProjectsCount = useMemo(() => {
@@ -366,19 +416,6 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     return getFilterCounts(diagnostics)
   }, [diagnostics])
 
-  const visibleDiagnostics = useMemo(() => {
-    const filtered = filterDiagnostics(diagnostics, activeFilter)
-
-    if (activeFilter === 'all' && !showPassed) {
-      return filtered.filter((d) => normalizeStatus(d.status) !== 'pass')
-    }
-
-    return filtered
-  }, [diagnostics, activeFilter, showPassed])
-
-  const groupedDiagnostics = useMemo(() => {
-    return groupDiagnosticsByCategory(visibleDiagnostics)
-  }, [visibleDiagnostics])
 
   return (
     <>
@@ -521,6 +558,17 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
             deepScanStatus={deepScanStatus}
             includeNonProd={includeNonProd}
           />
+        </section>
+      )}
+
+      {/* Simple mode: glance card, 4 tiles, top 3 steps ("What to do next"), top 3 findings, profile card */}
+      {repository && !isDiagnosticsLoading && !diagnosticsError && viewMode === 'simple' && (
+        <>
+          {(deepScanData?.dimensions || deepScanData?.summary?.dimensions) && (
+            <DimensionRatingTiles
+              dimensions={deepScanData.dimensions || deepScanData.summary?.dimensions}
+            />
+          )}
 
           <WhatToDoNextPanel
             diagnostics={diagnostics}
@@ -533,28 +581,55 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
               if (el) el.scrollIntoView({ behavior: 'smooth' })
             }}
           />
-        </section>
+
+          <FindingsGroupedBySeverity
+            findings={mergedFindings}
+            viewMode="simple"
+            onSwitchToDetailed={() => setViewMode('detailed')}
+          />
+
+          {(deepScanData?.profile || deepScanData?.summary?.profile) && (
+            <ProjectProfileCard
+              profile={deepScanData.profile || deepScanData.summary?.profile}
+              repository={repository}
+            />
+          )}
+        </>
       )}
 
-      {repository && !isDiagnosticsLoading && !diagnosticsError && (deepScanData?.profile || deepScanData?.summary?.profile) && (
-        <ProjectProfileCard
-          profile={deepScanData.profile || deepScanData.summary?.profile}
-          repository={repository}
-        />
-      )}
+      {/* Detailed mode: all findings once + Technical details showing only checks not already covered */}
+      {repository && !isDiagnosticsLoading && !diagnosticsError && viewMode === 'detailed' && (
+        <>
+          <WhatToDoNextPanel
+            diagnostics={diagnostics}
+            deepScanData={deepScanData}
+            deepScanStatus={deepScanStatus}
+            includeNonProd={includeNonProd}
+            onInspectFile={() => {
+              const el = document.getElementById('codemap-panel-heading') || document.getElementById('technical-details-title')
+              if (el) el.scrollIntoView({ behavior: 'smooth' })
+            }}
+          />
 
-      {repository && !isDiagnosticsLoading && !diagnosticsError && (deepScanData?.dimensions || deepScanData?.summary?.dimensions) && (
-        <DimensionRatingTiles
-          dimensions={deepScanData.dimensions || deepScanData.summary?.dimensions}
-        />
-      )}
+          {(deepScanData?.profile || deepScanData?.summary?.profile) && (
+            <ProjectProfileCard
+              profile={deepScanData.profile || deepScanData.summary?.profile}
+              repository={repository}
+            />
+          )}
 
-      {repository && !isDiagnosticsLoading && !diagnosticsError && (
-        <FindingsGroupedBySeverity
-          findings={deepScanData?.findings || deepScanData?.summary?.findings || []}
-          viewMode={viewMode}
-          onSwitchToDetailed={() => setViewMode('detailed')}
-        />
+          {(deepScanData?.dimensions || deepScanData?.summary?.dimensions) && (
+            <DimensionRatingTiles
+              dimensions={deepScanData.dimensions || deepScanData.summary?.dimensions}
+            />
+          )}
+
+          <FindingsGroupedBySeverity
+            findings={mergedFindings}
+            viewMode="detailed"
+            onSwitchToDetailed={() => setViewMode('detailed')}
+          />
+        </>
       )}
 
       {repository && diagnosticsError && (
@@ -566,56 +641,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
           />
         </section>
       )}
-
-      {/* Simple View: Top 3 findings per category */}
-      {repository && !isDiagnosticsLoading && !diagnosticsError && viewMode === 'simple' && groupedDiagnostics.length > 0 && (
-        <section className="simple-findings-section" aria-labelledby="simple-findings-title">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">Key findings</p>
-              <h2 id="simple-findings-title">Top Findings by Category</h2>
-            </div>
-            <button
-              type="button"
-              className="btn-secondary view-all-findings-btn"
-              onClick={() => setViewMode('detailed')}
-            >
-              View all checks in Detailed mode
-            </button>
-          </div>
-
-          <div className="diagnostics-grouped-container">
-            {groupedDiagnostics.map((group) => {
-              const topItems = group.items.slice(0, 3)
-              return (
-                <div key={`simple-${group.key}`} className="diagnostic-category-group">
-                  <div className="category-group-header">
-                    <h3 className="category-group-title">{group.label}</h3>
-                    <span className="category-group-count">
-                      Showing {topItems.length} of {group.items.length} {group.items.length === 1 ? 'check' : 'checks'}
-                    </span>
-                  </div>
-
-                  <div className="category-group-cards">
-                    {topItems.map((diagnostic) => (
-                      <DiagnosticCard
-                        key={diagnostic.ruleId || diagnostic.rule}
-                        diagnostic={diagnostic}
-                        repositoryName={repository?.fullName}
-                        bugs={bugs}
-                        onSaveToVault={handleSaveDiagnosticToVault}
-                        onViewInVault={handleViewDiagnosticInVault}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </section>
-      )}
-
-      {/* Technical details: Everything that exists today */}
+{/* Technical details: Everything that exists today */}
       {repository && !isDiagnosticsLoading && !diagnosticsError && (
         <section className="technical-details" aria-labelledby="technical-details-title">
           <div className="section-heading technical-details-heading-wrap">
@@ -642,6 +668,9 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                   framework={framework}
                   monorepo={monorepo}
                   diagnostics={diagnostics}
+                  overallGrade={overallGrade}
+                  overallScore={overallScore}
+                  capReason={overallCapReason}
                 />
               )}
 
@@ -669,7 +698,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                     />
                   ) : (
                     <div className="diagnostics-grouped-container" id="passing-diagnostics-group">
-                      {groupedDiagnostics.map((group) => (
+                      {groupedUncovered.map((group) => (
                         <div key={group.key} className="diagnostic-category-group">
                           <div className="category-group-header">
                             <h3 className="category-group-title">{group.label}</h3>
@@ -682,6 +711,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                             {group.items.map((diagnostic) => (
                               <DiagnosticCard
                                 key={diagnostic.ruleId || diagnostic.rule}
+                                compact={true}
                                 diagnostic={diagnostic}
                                 repositoryName={repository?.fullName}
                                 bugs={bugs}
@@ -771,7 +801,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                       />
                     ) : (
                       <div className="diagnostics-grouped-container" id="passing-diagnostics-group-acc">
-                        {groupedDiagnostics.map((group) => (
+                        {groupedUncovered.map((group) => (
                           <div key={`acc-${group.key}`} className="diagnostic-category-group">
                             <div className="category-group-header">
                               <h3 className="category-group-title">{group.label}</h3>
@@ -784,6 +814,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                               {group.items.map((diagnostic) => (
                                 <DiagnosticCard
                                   key={`acc-${diagnostic.ruleId || diagnostic.rule}`}
+                                  compact={true}
                                   diagnostic={diagnostic}
                                   repositoryName={repository?.fullName}
                                   bugs={bugs}

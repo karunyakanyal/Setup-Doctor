@@ -3418,6 +3418,23 @@ function getCachedGraph(owner, repo, ref) {
 	return item.data
 }
 
+function getCachedGraphCaseInsensitive(owner, repo) {
+	if (!owner || !repo) return null
+	const target = `${owner}/${repo}`.toLowerCase()
+	for (const [key, item] of GRAPH_CACHE.entries()) {
+		const parts = key.split('/')
+		if (parts.length >= 2) {
+			const candidate = `${parts[0]}/${parts[1]}`.toLowerCase()
+			if (candidate === target) {
+				if (item && Date.now() <= item.expiresAt) {
+					return item.data
+				}
+			}
+		}
+	}
+	return null
+}
+
 function setCachedGraph(owner, repo, ref, data, ttlMs = GRAPH_CACHE_TTL_MS) {
 	const key = `${owner}/${repo}/${ref}`
 	if (GRAPH_CACHE.has(key)) {
@@ -3444,6 +3461,7 @@ module.exports = {
 	buildGraph,
 	getImpact,
 	getCachedGraph,
+	getCachedGraphCaseInsensitive,
 	setCachedGraph,
 	clearGraphCache,
 	getGraphCacheSize,

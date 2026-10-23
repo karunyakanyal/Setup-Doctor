@@ -6,25 +6,25 @@ export default function DimensionRatingTiles({ dimensions = null }) {
       key: 'security',
       title: 'Security',
       icon: '🔒',
-      data: dimensions.security || { grade: 'A', score: 10, reason: 'No security issues found' },
+      data: dimensions.security || { grade: 'A', score: 100, reason: 'No security issues found' },
     },
     {
       key: 'reliability',
       title: 'Reliability',
       icon: '⚙️',
-      data: dimensions.reliability || { grade: 'A', score: 10, reason: 'No reliability issues found' },
+      data: dimensions.reliability || { grade: 'A', score: 100, reason: 'No reliability issues found' },
     },
     {
       key: 'maintainability',
       title: 'Maintainability',
       icon: '🧹',
-      data: dimensions.maintainability || { grade: 'A', score: 10, reason: 'Clean structure and dependencies' },
+      data: dimensions.maintainability || { grade: 'A', score: 100, reason: 'Clean structure and dependencies' },
     },
     {
       key: 'hygiene',
       title: 'Hygiene',
       icon: '🛡️',
-      data: dimensions.hygiene || { grade: 'A', score: 10, reason: 'Good repository hygiene' },
+      data: dimensions.hygiene || { grade: 'A', score: 100, reason: 'Good repository hygiene' },
     },
   ]
 
@@ -73,7 +73,7 @@ export default function DimensionRatingTiles({ dimensions = null }) {
               </div>
 
               <div className="tile-score-row">
-                <span className="dimension-score-text">{score}/10 score</span>
+                <span className="dimension-score-text">{score}/100</span>
               </div>
 
               <p className="dimension-reason-text">{reason}</p>

@@ -270,9 +270,9 @@ test('DashboardView: Simple mode defaults and Technical details structure', () =
   assert.ok(code.includes('<ProjectGlanceCard'), 'DashboardView renders ProjectGlanceCard')
   assert.ok(code.includes('<WhatToDoNextPanel'), 'DashboardView renders WhatToDoNextPanel')
 
-  // 4. In simple mode, findings are capped at top 3 per category
-  assert.ok(code.includes('group.items.slice(0, 3)'), 'Findings capped at top 3 per category in simple mode')
-  assert.ok(code.includes('Showing {topItems.length} of {group.items.length}'), 'Shows count of displayed vs total checks')
+  // 4. In simple mode, top 3 findings are rendered via FindingsGroupedBySeverity, and "Top Findings by Category" is removed
+  assert.ok(code.includes('<FindingsGroupedBySeverity'), 'FindingsGroupedBySeverity rendered')
+  assert.ok(!code.includes('simple-findings-section'), 'Top Findings by Category removed from Simple mode')
 
   // 5. Technical details section wraps existing comprehensive breakdown
   assert.ok(code.includes('className="technical-details"'), 'Technical details section present')

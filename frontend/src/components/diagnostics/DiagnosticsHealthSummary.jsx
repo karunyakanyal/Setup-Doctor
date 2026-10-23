@@ -1,6 +1,5 @@
 import {
   getGrade,
-  getHealthLabel,
   getCategoryScore,
   CATEGORIES,
   CATEGORY_LABELS,
@@ -11,10 +10,19 @@ function DiagnosticsHealthSummary({
   framework = null,
   monorepo = false,
   diagnostics = [],
+  overallGrade = null,
+  overallScore = null,
+  capReason = null,
 }) {
-  const score = typeof health?.score === 'number' ? Math.max(0, Math.min(100, Math.round(health.score))) : null
-  const grade = getGrade(health)
-  const label = getHealthLabel(health, grade)
+  const score = overallScore !== null && overallScore !== undefined
+    ? Math.max(0, Math.min(100, Math.round(overallScore)))
+    : (typeof health?.score === 'number' ? Math.max(0, Math.min(100, Math.round(health.score))) : null)
+  const grade = overallGrade || getGrade(health)
+  const cap = capReason || health?.capReason || null
+  const setupChecksScore = typeof health?.score === 'number' ? Math.max(0, Math.min(100, Math.round(health.score))) : null
+  const verdictLabel = grade === 'A'
+    ? 'Looking healthy'
+    : (grade === 'B' || grade === 'C' ? 'A few things to fix' : 'Needs attention')
   const categoryScores = health?.categoryScores || {}
 
   return (
@@ -37,10 +45,19 @@ function DiagnosticsHealthSummary({
 
           <div className="health-grade-container">
             <span className={`grade-badge grade-badge-${grade}`}>{grade}</span>
-            <span className={`health-status health-${label.toLowerCase().replace(/\s+/g, '-')}`}>
-              {label}
+            <span className={`health-status health-${verdictLabel.toLowerCase().replace(/\s+/g, '-')}`}>
+              {verdictLabel}
             </span>
+            {cap && (
+              <span className="health-cap-tag">(capped: {cap})</span>
+            )}
           </div>
+
+          {setupChecksScore !== null && (
+            <div className="setup-checks-score-row">
+              <span className="setup-checks-badge">Setup checks: {setupChecksScore}/100</span>
+            </div>
+          )}
 
           {framework && (
             <div className="framework-tag-wrap">

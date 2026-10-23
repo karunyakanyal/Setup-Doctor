@@ -425,6 +425,12 @@ export function extractAnalysisState(analysis) {
 export function createCodeMapSummary(data) {
   if (!data) return null
   return {
+    score: data.score,
+    grade: data.grade,
+    capReason: data.capReason,
+    dimensions: data.dimensions || data.summary?.dimensions,
+    profile: data.profile || data.summary?.profile,
+    findings: data.findings || data.summary?.findings,
     analyzedFiles: data.coverage?.analyzedFiles ?? data.inventory?.analyzedFiles ?? 0,
     totalFiles: data.coverage?.totalFiles ?? data.inventory?.totalFiles ?? 0,
     languagesCount: Object.keys(data.inventory?.byLanguage || {}).length,

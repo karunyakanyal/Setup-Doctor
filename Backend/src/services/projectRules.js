@@ -46,6 +46,435 @@ function maskSecret(str) {
  * Extract project profile:
  * stacks, scripts, entry points, test framework, CI provider, Node version sources, API routes, env vars
  */
+function joinRoutePaths(...parts) {
+	const segments = []
+	for (const part of parts) {
+		if (!part || typeof part !== 'string') continue
+		const trimmed = part.trim()
+		if (!trimmed || trimmed === '/') continue
+		const cleaned = trimmed.replace(/^\/+|\/+$/g, '')
+		if (cleaned) {
+			segments.push(cleaned)
+		}
+	}
+	if (segments.length === 0) return '/'
+	return '/' + segments.join('/')
+}
+
+function resolveFilePath(fromFile, relativeTarget, allFiles) {
+	if (!relativeTarget) return null
+	const fromParts = fromFile.split('/')
+	fromParts.pop()
+
+	const targetParts = relativeTarget.replace(/\\/g, '/').split('/')
+	for (const p of targetParts) {
+		if (p === '.' || !p) continue
+		if (p === '..') {
+			if (fromParts.length > 0) fromParts.pop()
+		} else {
+			fromParts.push(p)
+		}
+	}
+	const baseResolved = fromParts.join('/')
+	const candidates = [
+		baseResolved,
+		`${baseResolved}.js`,
+		`${baseResolved}.ts`,
+		`${baseResolved}.mjs`,
+		`${baseResolved}.cjs`,
+		`${baseResolved}.py`,
+		`${baseResolved}/index.js`,
+		`${baseResolved}/index.ts`,
+		`${baseResolved}/__init__.py`,
+	]
+	for (const c of candidates) {
+		if (allFiles.has(c)) return c
+	}
+	for (const f of allFiles) {
+		if (f.endsWith(baseResolved) || f.endsWith(`${baseResolved}.js`) || f.endsWith(`${baseResolved}.ts`)) {
+			return f
+		}
+	}
+	return null
+}
+
+function resolvePythonModule(fromFile, modulePath, allFiles) {
+	if (!modulePath) return null
+	const normPath = modulePath.replace(/^\.+/, '').replace(/\./g, '/')
+	const isRelative = modulePath.startsWith('.')
+
+	if (isRelative) {
+		const fromParts = fromFile.split('/')
+		fromParts.pop()
+		const relPath = fromParts.length > 0 ? `${fromParts.join('/')}/${normPath}` : normPath
+		if (allFiles.has(`${relPath}.py`)) return `${relPath}.py`
+		if (allFiles.has(`${relPath}/__init__.py`)) return `${relPath}/__init__.py`
+	}
+
+	if (allFiles.has(`${normPath}.py`)) return `${normPath}.py`
+	if (allFiles.has(`${normPath}/__init__.py`)) return `${normPath}/__init__.py`
+
+	for (const f of allFiles) {
+		if (f.endsWith(`${normPath}.py`) || f.endsWith(`${normPath}/__init__.py`)) {
+			return f
+		}
+	}
+	return null
+}
+
+function extractProjectRoutes(filesMap = new Map(), isNonProductionFile = () => false) {
+	const allFiles = new Set(filesMap.keys())
+	const routerDefs = new Map()
+	const importsMap = new Map()
+	const mounts = []
+	const rawRoutes = []
+
+	for (const [filePath, fileData] of filesMap.entries()) {
+		if (isNonProductionFile(filePath) || !fileData?.text) continue
+		const text = fileData.text
+		const isPy = filePath.endsWith('.py')
+
+		const fileRouters = new Map()
+		routerDefs.set(filePath, fileRouters)
+
+		const fileImports = new Map()
+		importsMap.set(filePath, fileImports)
+
+		if (isPy) {
+			// Python imports: from foo.bar import baz [as qux]
+			const fromImportRegex = /from\s+([\w.]+)\s+import\s+([^#\n]+)/g
+			let fm
+			while ((fm = fromImportRegex.exec(text)) !== null) {
+				const modPath = fm[1]
+				const items = fm[2].split(',')
+				for (const item of items) {
+					const parts = item.trim().split(/\s+as\s+/)
+					const name = parts[0]?.trim()
+					const alias = parts[1]?.trim() || name
+					if (name) {
+						const resolved = resolvePythonModule(filePath, `${modPath}.${name}`, allFiles) ||
+							resolvePythonModule(filePath, modPath, allFiles)
+						if (resolved) {
+							fileImports.set(alias, { targetFile: resolved, targetVar: name })
+						}
+					}
+				}
+			}
+
+			// import foo.bar [as qux]
+			const importRegex = /import\s+([\w.]+)(?:\s+as\s+(\w+))?/g
+			let im
+			while ((im = importRegex.exec(text)) !== null) {
+				const modPath = im[1]
+				const alias = im[2] || modPath.split('.').pop()
+				const resolved = resolvePythonModule(filePath, modPath, allFiles)
+				if (resolved) {
+					fileImports.set(alias, { targetFile: resolved, targetVar: 'router' })
+				}
+			}
+
+			// FastAPI APIRouter(prefix="/...")
+			const pyRouterRegex = /(\w+)\s*=\s*(?:fastapi\.)?APIRouter\s*\(([^)]*)\)/g
+			let rm
+			while ((rm = pyRouterRegex.exec(text)) !== null) {
+				const varName = rm[1]
+				const args = rm[2] || ''
+				const pMatch = /prefix\s*=\s*['"]([^'"]+)['"]/.exec(args)
+				fileRouters.set(varName, pMatch ? pMatch[1] : '')
+			}
+
+			// Flask Blueprint(..., url_prefix="/...")
+			const bpRegex = /(\w+)\s*=\s*(?:flask\.)?Blueprint\s*\([^)]*url_prefix\s*=\s*['"]([^'"]+)['"]/g
+			let bpm
+			while ((bpm = bpRegex.exec(text)) !== null) {
+				fileRouters.set(bpm[1], bpm[2] || '')
+			}
+
+			// FastAPI include_router / Flask register_blueprint
+			const incRegex = /(\w+)\.include_router\s*\(([^)]+)\)/g
+			let incm
+			while ((incm = incRegex.exec(text)) !== null) {
+				const parentVar = incm[1]
+				const args = incm[2]
+				const pMatch = /prefix\s*=\s*['"]([^'"]+)['"]/.exec(args)
+				const mountPrefix = pMatch ? pMatch[1] : ''
+
+				const targetMatch = /(?:router\s*=\s*)?([\w.]+)/.exec(args)
+				if (targetMatch) {
+					const fullTarget = targetMatch[1]
+					const [modOrVar, prop] = fullTarget.split('.')
+					let targetFile = filePath
+					let targetVar = modOrVar
+
+					if (prop) {
+						const imp = fileImports.get(modOrVar)
+						if (imp) {
+							targetFile = imp.targetFile
+							targetVar = prop
+						}
+					} else {
+						const imp = fileImports.get(modOrVar)
+						if (imp) {
+							targetFile = imp.targetFile
+							targetVar = imp.targetVar || 'router'
+						}
+					}
+
+					mounts.push({
+						parentFile: filePath,
+						parentVar,
+						mountPrefix,
+						childFile: targetFile,
+						childVar: targetVar,
+					})
+				}
+			}
+
+			// Flask register_blueprint
+			const regBpRegex = /(\w+)\.register_blueprint\s*\(([^)]+)\)/g
+			let rbm
+			while ((rbm = regBpRegex.exec(text)) !== null) {
+				const parentVar = rbm[1]
+				const args = rbm[2]
+				const pMatch = /url_prefix\s*=\s*['"]([^'"]+)['"]/.exec(args)
+				const mountPrefix = pMatch ? pMatch[1] : ''
+				const tMatch = /([\w.]+)/.exec(args)
+				if (tMatch) {
+					const fullTarget = tMatch[1]
+					const imp = fileImports.get(fullTarget)
+					mounts.push({
+						parentFile: filePath,
+						parentVar,
+						mountPrefix,
+						childFile: imp ? imp.targetFile : filePath,
+						childVar: imp ? (imp.targetVar || fullTarget) : fullTarget,
+					})
+				}
+			}
+
+			// Python route decorators
+			const pyRouteRegex = /@(\w+)\.(get|post|put|delete|patch|options|head)\s*\(\s*['"]([^'"]*)['"]/gi
+			let pr
+			while ((pr = pyRouteRegex.exec(text)) !== null) {
+				const receiver = pr[1]
+				const method = pr[2].toUpperCase()
+				const rPath = pr[3] || '/'
+				const line = text.slice(0, pr.index).split(/\r?\n/).length
+				const fullLine = text.split(/\r?\n/)[line - 1] || ''
+				rawRoutes.push({
+					file: filePath,
+					line,
+					method,
+					path: rPath,
+					snippet: formatSnippet(fullLine, 120),
+					receiver,
+				})
+			}
+
+			// Flask @bp.route(...)
+			const pyFlaskRouteRegex = /@(\w+)\.route\s*\(\s*['"]([^'"]*)['"](?:\s*,\s*methods\s*=\s*\[([^\]]+)\])?/gi
+			let pfr
+			while ((pfr = pyFlaskRouteRegex.exec(text)) !== null) {
+				const receiver = pfr[1]
+				const rPath = pfr[2] || '/'
+				const methodsStr = pfr[3]
+				const line = text.slice(0, pfr.index).split(/\r?\n/).length
+				const fullLine = text.split(/\r?\n/)[line - 1] || ''
+				if (methodsStr) {
+					const methods = methodsStr.replace(/['"\s]/g, '').split(',')
+					for (const m of methods) {
+						if (m) {
+							rawRoutes.push({
+								file: filePath,
+								line,
+								method: m.toUpperCase(),
+								path: rPath,
+								snippet: formatSnippet(fullLine, 120),
+								receiver,
+							})
+						}
+					}
+				} else {
+					rawRoutes.push({
+						file: filePath,
+						line,
+						method: 'GET',
+						path: rPath,
+						snippet: formatSnippet(fullLine, 120),
+						receiver,
+					})
+				}
+			}
+		} else {
+			// JS / TS files
+			const reqRegex = /(?:const|let|var)\s+(\w+)\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+			let rq
+			while ((rq = reqRegex.exec(text)) !== null) {
+				const varName = rq[1]
+				const relPath = rq[2]
+				const resolved = resolveFilePath(filePath, relPath, allFiles)
+				if (resolved) {
+					fileImports.set(varName, { targetFile: resolved, targetVar: 'default' })
+				}
+			}
+
+			const esmImportRegex = /import\s+(?:(\w+)|\{\s*(\w+)\s*\})\s+from\s+['"]([^'"]+)['"]/g
+			let esm
+			while ((esm = esmImportRegex.exec(text)) !== null) {
+				const varName = esm[1] || esm[2]
+				const relPath = esm[3]
+				const resolved = resolveFilePath(filePath, relPath, allFiles)
+				if (resolved) {
+					fileImports.set(varName, { targetFile: resolved, targetVar: esm[2] || 'default' })
+				}
+			}
+
+			// Express Router definitions: const router = express.Router()
+			const jsRouterRegex = /(?:const|let|var)\s+(\w+)\s*=\s*(?:express\.)?Router\s*\(/g
+			let jrm
+			while ((jrm = jsRouterRegex.exec(text)) !== null) {
+				fileRouters.set(jrm[1], '')
+			}
+
+			// Express mounts: app.use('/base', router) or apiRouter.use('/auth', authRouter)
+			const useRegex = new RegExp("(\\w+)\\.use\\s*\\(\\s*['\"`]" + "([^'\"`]+)['\"`]" + "\\s*,\\s*([^,\\)]+)", "g")
+			let um
+			while ((um = useRegex.exec(text)) !== null) {
+				const parentVar = um[1]
+				const mountPrefix = um[2]
+				const rawChild = um[3].trim()
+
+				const inlineMatch = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/.exec(rawChild)
+				if (inlineMatch) {
+					const resolved = resolveFilePath(filePath, inlineMatch[1], allFiles)
+					if (resolved) {
+						mounts.push({
+							parentFile: filePath,
+							parentVar,
+							mountPrefix,
+							childFile: resolved,
+							childVar: 'default',
+						})
+					}
+				} else {
+					const childVarName = rawChild.split('.')[0]
+					const imp = fileImports.get(childVarName)
+					if (imp) {
+						mounts.push({
+							parentFile: filePath,
+							parentVar,
+							mountPrefix,
+							childFile: imp.targetFile,
+							childVar: imp.targetVar,
+						})
+					} else {
+						mounts.push({
+							parentFile: filePath,
+							parentVar,
+							mountPrefix,
+							childFile: filePath,
+							childVar: childVarName,
+						})
+					}
+				}
+			}
+
+			// Route registrations: (app|router).get('/path', ...)
+			const jsRouteRegex = new RegExp("(\\w+)\\.(get|post|put|delete|patch|options|head|all)\\s*\\(\\s*['\"`]" + "([^'\"`]*)" + "['\"`]", "gi")
+			let jr
+			while ((jr = jsRouteRegex.exec(text)) !== null) {
+				const receiver = jr[1]
+				const method = jr[2].toUpperCase()
+				const rPath = jr[3] || '/'
+				const line = text.slice(0, jr.index).split(/\r?\n/).length
+				const fullLine = text.split(/\r?\n/)[line - 1] || ''
+				rawRoutes.push({
+					file: filePath,
+					line,
+					method,
+					path: rPath,
+					snippet: formatSnippet(fullLine, 120),
+					receiver,
+				})
+			}
+		}
+	}
+
+	// Resolve effective prefixes
+	const effectivePrefixMap = new Map()
+	const graph = new Map()
+
+	for (const m of mounts) {
+		const parentKey = `${m.parentFile}::${m.parentVar}`
+		if (!graph.has(parentKey)) graph.set(parentKey, [])
+		const childKey = `${m.childFile}::${m.childVar}`
+		graph.get(parentKey).push({ childKey, childFile: m.childFile, childVar: m.childVar, mountPrefix: m.mountPrefix })
+	}
+
+	const queue = []
+	for (const [filePath] of filesMap.entries()) {
+		queue.push({ key: `${filePath}::app`, prefix: '' })
+	}
+
+	const visited = new Set()
+	while (queue.length > 0) {
+		const { key, prefix } = queue.shift()
+		if (visited.has(key)) continue
+		visited.add(key)
+
+		const children = graph.get(key) || []
+		for (const ch of children) {
+			const childRouters = routerDefs.get(ch.childFile)
+			const internalPrefix = (childRouters && childRouters.get(ch.childVar)) || ''
+			const combinedPrefix = joinRoutePaths(prefix, ch.mountPrefix, internalPrefix)
+
+			effectivePrefixMap.set(ch.childKey, combinedPrefix)
+			effectivePrefixMap.set(`${ch.childFile}::*`, combinedPrefix)
+
+			queue.push({ key: ch.childKey, prefix: combinedPrefix })
+		}
+	}
+
+	// Map raw routes to resolved routes
+	const routes = []
+	for (const r of rawRoutes) {
+		let effPrefix = ''
+		if (r.receiver && r.receiver.toLowerCase() !== 'app') {
+			const key = `${r.file}::${r.receiver}`
+			const fileKey = `${r.file}::*`
+			const internalPrefix = routerDefs.get(r.file)?.get(r.receiver) || ''
+
+			if (effectivePrefixMap.has(key)) {
+				effPrefix = effectivePrefixMap.get(key)
+			} else if (effectivePrefixMap.has(fileKey)) {
+				effPrefix = joinRoutePaths(effectivePrefixMap.get(fileKey), internalPrefix)
+			} else {
+				effPrefix = internalPrefix
+			}
+		}
+
+		const fullPath = joinRoutePaths(effPrefix, r.path)
+		routes.push({
+			method: r.method,
+			path: fullPath,
+			file: r.file,
+			line: r.line,
+			snippet: r.snippet,
+		})
+	}
+
+	// Group routes by file
+	const routesByFile = {}
+	for (const r of routes) {
+		if (!routesByFile[r.file]) {
+			routesByFile[r.file] = []
+		}
+		routesByFile[r.file].push(r)
+	}
+
+	return { routes, routesByFile }
+}
+
 function extractProjectProfile({
 	filesMap = new Map(),
 	parsedPackageJsons = [],
@@ -204,66 +633,7 @@ function extractProjectProfile({
 		.map((n) => n.path)
 
 	// 6. Routes found
-	const routes = []
-	const routeRegex = /(?:app|router)\.(get|post|put|delete|patch|options|head|all)\s*\(\s*['"`]([^'"`]+)['"`]/gi
-	const pyRouteRegex = /@(?:app|router|blueprint|bp)\.(get|post|put|delete|patch)\s*\(\s*['"]([^'"]+)['"]/gi
-	const pyFlaskRouteRegex = /@(?:app|blueprint|bp)\.route\s*\(\s*['"]([^'"]+)['"](?:\s*,\s*methods\s*=\s*\[([^\]]+)\])?/gi
-
-	for (const [filePath, fileData] of filesMap.entries()) {
-		if (isNonProductionFile(filePath) || !fileData.text) continue
-		const text = fileData.text
-
-		// Express routes
-		let m
-		while ((m = routeRegex.exec(text)) !== null) {
-			const line = text.slice(0, m.index).split(/\r?\n/).length
-			const fullLine = text.split(/\r?\n/)[line - 1] || ''
-			routes.push({
-				method: m[1].toUpperCase(),
-				path: m[2],
-				file: filePath,
-				line,
-				snippet: formatSnippet(fullLine, 120),
-			})
-		}
-
-		// Python FastAPI routes
-		while ((m = pyRouteRegex.exec(text)) !== null) {
-			const line = text.slice(0, m.index).split(/\r?\n/).length
-			const fullLine = text.split(/\r?\n/)[line - 1] || ''
-			routes.push({
-				method: m[1].toUpperCase(),
-				path: m[2],
-				file: filePath,
-				line,
-				snippet: formatSnippet(fullLine, 120),
-			})
-		}
-
-		// Python Flask routes
-		while ((m = pyFlaskRouteRegex.exec(text)) !== null) {
-			const rPath = m[1]
-			const methodsStr = m[2]
-			if (methodsStr) {
-				const methods = methodsStr.replace(/['"\s]/g, '').split(',')
-				for (const meth of methods) {
-					if (meth) {
-						routes.push({
-							method: meth.toUpperCase(),
-							path: rPath,
-							file: filePath,
-						})
-					}
-				}
-			} else {
-				routes.push({
-					method: 'GET',
-					path: rPath,
-					file: filePath,
-				})
-			}
-		}
-	}
+	const { routes, routesByFile } = extractProjectRoutes(filesMap, isNonProductionFile)
 
 	// 7. Env vars read in code
 	const envVarsSet = new Set()
@@ -309,6 +679,7 @@ function extractProjectProfile({
 		ciProvider,
 		nodeVersionSources,
 		routes,
+		routesByFile,
 		envVars,
 		envMap,
 	}
@@ -1531,6 +1902,8 @@ async function evaluateProjectRulesAsync(args = {}) {
 
 module.exports = {
 	extractProjectProfile,
+	extractProjectRoutes,
+	joinRoutePaths,
 	evaluateProjectRules,
 	evaluateProjectRulesAsync,
 	maskSecret,
