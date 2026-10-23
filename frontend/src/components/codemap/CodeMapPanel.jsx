@@ -2052,6 +2052,10 @@ export default function CodeMapPanel({
                       selectedFile={activeFile}
                       imports={activeImports}
                       importers={activeImporters}
+                      graph={graph}
+                      cycles={cycles}
+                      summary={summary}
+                      includeNonProd={includeNonProd}
                       onSelectFile={(path) => setSelectedFile(path)}
                     />
                   </>

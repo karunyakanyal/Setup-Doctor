@@ -3,7 +3,7 @@ const { rateLimit } = require('express-rate-limit')
 const { runDiagnostics } = require('../rules')
 const { ghFetch, TIMEOUT_ERROR_MESSAGE } = require('../services/github')
 const { fetchRepoArchive } = require('../services/archive')
-const { buildGraph, getCachedGraph, setCachedGraph, getPreviousScan, setPreviousScan } = require('../services/graph')
+const { buildGraph, getCachedGraph, getCachedGraphCaseInsensitive, setCachedGraph, getPreviousScan, setPreviousScan } = require('../services/graph')
 const { evaluateGithubHygiene } = require('../services/githubHygiene')
 const { extractProductionDepsFromLockfile, queryOsvVulnerabilities } = require('../services/osv')
 
@@ -32,25 +32,30 @@ function generateBadgeSvg(grade = 'unknown') {
 		E: '#e05d44',
 		F: '#e05d44',
 	}
-	const color = colors[grade] || '#9f9f9f'
+	const isNoAnalysis = !grade || grade === 'unknown' || grade === 'run an analysis first'
+	const color = isNoAnalysis ? '#9f9f9f' : (colors[grade] || '#9f9f9f')
 	const label = 'SetupDoctor'
-	const value = grade === 'unknown' ? 'unknown' : `Grade ${grade}`
-	const textLen = grade === 'unknown' ? 480 : 440
-	const textX = grade === 'unknown' ? 1050 : 1030
+	const value = isNoAnalysis ? 'run an analysis first' : `Grade ${grade}`
 
-	return `<svg xmlns="http://www.w3.org/2000/svg" width="130" height="20" role="img" aria-label="${label}: ${value}">
+	const leftWidth = 78
+	const rightWidth = isNoAnalysis ? 140 : 52
+	const totalWidth = leftWidth + rightWidth
+	const textLen = isNoAnalysis ? 1300 : 440
+	const textX = (leftWidth + rightWidth / 2) * 10
+
+	return `<svg xmlns="http://www.w3.org/2000/svg" width="${totalWidth}" height="20" role="img" aria-label="${label}: ${value}">
   <title>${label}: ${value}</title>
   <linearGradient id="s" x2="0" y2="100%">
     <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
     <stop offset="1" stop-opacity=".1"/>
   </linearGradient>
   <clipPath id="r">
-    <rect width="130" height="20" rx="3" fill="#fff"/>
+    <rect width="${totalWidth}" height="20" rx="3" fill="#fff"/>
   </clipPath>
   <g clip-path="url(#r)">
-    <rect width="78" height="20" fill="#555"/>
-    <rect x="78" width="52" height="20" fill="${color}"/>
-    <rect width="130" height="20" fill="url(#s)"/>
+    <rect width="${leftWidth}" height="20" fill="#555"/>
+    <rect x="${leftWidth}" width="${rightWidth}" height="20" fill="${color}"/>
+    <rect width="${totalWidth}" height="20" fill="url(#s)"/>
   </g>
   <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110">
     <text aria-hidden="true" x="400" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="680">${label}</text>
@@ -65,20 +70,30 @@ async function handleBadge(req, res) {
 	const { owner, repo } = req.params
 
 	if (!isValidIdentifier(owner) || !isValidIdentifier(repo)) {
-		const svg = generateBadgeSvg('unknown')
+		const svg = generateBadgeSvg('run an analysis first')
 		res.setHeader('Content-Type', 'image/svg+xml')
 		res.setHeader('Cache-Control', 'public, max-age=600')
 		return res.status(400).send(svg)
 	}
 
-	const cached = getPreviousScan(owner, repo) || getCachedGraph(owner, repo, 'main') || getCachedGraph(owner, repo, 'master')
-	const grade = cached?.grade || cached?.summary?.grade || 'unknown'
-	const svg = generateBadgeSvg(grade)
-	const host = req.get('host') || 'localhost:3000'
+	const cached = getPreviousScan(owner, repo) ||
+		getCachedGraphCaseInsensitive(owner, repo) ||
+		getCachedGraph(owner, repo, 'main') ||
+		getCachedGraph(owner, repo, 'master')
+
+	const rawGrade = cached?.grade || cached?.summary?.grade || cached?.dimensions?.overallGrade || null
+	const hasAnalysis = Boolean(rawGrade && rawGrade !== 'unknown' && rawGrade !== 'N/A')
+	const grade = hasAnalysis ? rawGrade : null
+
+	const svg = generateBadgeSvg(grade || 'run an analysis first')
+
+	const host = (typeof req.get === 'function' ? req.get('host') : req.headers?.host) || 'localhost:3000'
 	const proto = req.protocol || 'http'
-	const badgeUrl = `${proto}://${host}/api/badge/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+	const baseUrl = (process.env.PUBLIC_BASE_URL || `${proto}://${host}`).replace(/\/+$/, '')
+	const badgeUrl = `${baseUrl}/api/badge/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
 	const repoUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
-	const markdown = `[![SetupDoctor Grade](${badgeUrl})](${repoUrl})`
+	const disclaimer = 'Note: The backend must be publicly reachable for this badge to render on GitHub.'
+	const markdown = `[![SetupDoctor Grade](${badgeUrl})](${repoUrl})\n\n> ${disclaimer}`
 
 	res.setHeader('Cache-Control', 'public, max-age=600')
 	res.setHeader('X-Markdown-Snippet', markdown)
@@ -86,7 +101,9 @@ async function handleBadge(req, res) {
 	if (req.headers.accept?.includes('application/json') || req.query?.format === 'json') {
 		return res.json({
 			success: true,
-			grade,
+			grade: hasAnalysis ? grade : 'unknown',
+			status: hasAnalysis ? `Grade ${grade}` : 'run an analysis first',
+			message: hasAnalysis ? null : 'run an analysis first',
 			markdown,
 			svg,
 		})
@@ -672,8 +689,13 @@ const handleGraph = async (req, res, next) => {
 			graphFiles: graphResult.nodes.length,
 		}
 
-		const badgeUrl = '/api/badge/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo);
-		const badgeMarkdown = '[![SetupDoctor Grade](' + badgeUrl + ')](https://github.com/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + ')';
+		const host = (typeof req.get === 'function' ? req.get('host') : req.headers?.host) || 'localhost:3000'
+		const proto = req.protocol || 'http'
+		const baseUrl = (process.env.PUBLIC_BASE_URL || `${proto}://${host}`).replace(/\/+$/, '')
+		const badgeUrl = `${baseUrl}/api/badge/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+		const repoUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+		const disclaimer = 'Note: The backend must be publicly reachable for this badge to render on GitHub.'
+		const badgeMarkdown = `[![SetupDoctor Grade](${badgeUrl})](${repoUrl})\n\n> ${disclaimer}`
 
 		const responsePayload = {
 			inventory: archiveResult.inventory,

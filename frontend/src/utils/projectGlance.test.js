@@ -177,7 +177,7 @@ test('getHealthVerdict: verdict mapping and one sentence why derived from produc
       },
     },
   })
-  assert.equal(undeclaredVerdict.label, 'Needs attention')
+  assert.equal(undeclaredVerdict.label, 'A few things to fix')
   assert.equal(undeclaredVerdict.whySentence, '2 undeclared packages were found.')
   assert.equal(undeclaredVerdict.grade, 'C')
   assert.equal(undeclaredVerdict.capReason, '2 undeclared packages')
@@ -292,7 +292,7 @@ test('undeclared package: caps at C', () => {
     deepScanData: deepScan,
   })
 
-  assert.equal(verdict.label, 'Needs attention')
+  assert.equal(verdict.label, 'A few things to fix')
   assert.equal(verdict.grade, 'C')
   assert.equal(verdict.capReason, '1 undeclared package')
   assert.equal(verdict.gradeText, 'Grade C (capped: 1 undeclared package)')
@@ -501,4 +501,79 @@ test('getWhatToDoNext: orders recommendations by severity, caps at 3, and provid
   assert.equal(zeroSteps[0].isZeroState, true)
   assert.equal(zeroSteps[0].title, 'Nothing to fix right now')
   assert.equal(zeroSteps[0].action?.value, 'npm outdated')
+})
+
+
+test('formatStackInPlainWords: Skinveda shape gives JavaScript (JSX) dominant language and backend stack sentence', () => {
+  const skinvedaByLanguage = {
+    jsx: 31,
+    python: 15,
+    javascript: 14,
+    css: 7,
+    svg: 4,
+    json: 2,
+    markdown: 1,
+    html: 1,
+    txt: 1,
+    'config/other': 1,
+    binary: 1,
+  }
+  const skinvedaProfile = {
+    stacks: ['node', 'react', 'vite', 'python', 'fastapi'],
+  }
+
+  const sentence = formatStackInPlainWords({
+    framework: null,
+    stack: ['node', 'react', 'vite'],
+    language: 'JavaScript',
+    profile: skinvedaProfile,
+    byLanguage: skinvedaByLanguage,
+  })
+
+  assert.equal(
+    sentence,
+    'A React app built with Vite, written in JavaScript (JSX), with a Python (FastAPI) backend'
+  )
+})
+
+test('Phase 1: Verdict mapping (A=Looking healthy, B/C=A few things to fix, D/E=Needs attention)', () => {
+  // Grade A
+  const verdictA = getHealthVerdict({
+    health: { score: 98, grade: 'A' },
+    diagnostics: [],
+    deepScanData: { grade: 'A', score: 98, summary: { cycles: [], usedButUndeclared: [] } },
+  })
+  assert.equal(verdictA.label, 'Looking healthy')
+  assert.equal(verdictA.icon, '✓')
+  assert.equal(verdictA.tone, 'healthy')
+
+  // Grade B
+  const verdictB = getHealthVerdict({
+    health: { score: 85, grade: 'B' },
+    diagnostics: [],
+    deepScanData: { grade: 'B', score: 85, capReason: '1 runtime cycle', summary: { cycles: [{ isTypeOnly: false }], usedButUndeclared: [] } },
+  })
+  assert.equal(verdictB.label, 'A few things to fix')
+  assert.equal(verdictB.icon, '⚠')
+  assert.equal(verdictB.tone, 'warning')
+
+  // Grade C
+  const verdictC = getHealthVerdict({
+    health: { score: 75, grade: 'C' },
+    diagnostics: [],
+    deepScanData: { grade: 'C', score: 75, capReason: '1 undeclared package', summary: { cycles: [], usedButUndeclared: ['foo'] } },
+  })
+  assert.equal(verdictC.label, 'A few things to fix')
+  assert.equal(verdictC.icon, '⚠')
+  assert.equal(verdictC.tone, 'warning')
+
+  // Grade D
+  const verdictD = getHealthVerdict({
+    health: { score: 62, grade: 'D' },
+    diagnostics: [{ status: 'error', rule: 'missing-build' }],
+    deepScanData: { grade: 'D', score: 62, summary: { cycles: [], usedButUndeclared: [] } },
+  })
+  assert.equal(verdictD.label, 'Needs attention')
+  assert.equal(verdictD.icon, '✖')
+  assert.equal(verdictD.tone, 'attention')
 })

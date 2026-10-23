@@ -20,8 +20,10 @@ export default function ProjectGlanceCard({
       stack,
       language: repository?.language,
       monorepo,
+      profile: deepScanData?.profile || deepScanData?.summary?.profile,
+      byLanguage: deepScanData?.inventory?.byLanguage || deepScanData?.coverage?.byLanguage || deepScanData?.coverage?.graphLanguages,
     })
-  }, [framework, stack, repository?.language, monorepo])
+  }, [framework, stack, repository?.language, monorepo, deepScanData])
 
   const verdict = useMemo(() => {
     return getHealthVerdict({

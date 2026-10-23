@@ -37,6 +37,8 @@ export function formatStackInPlainWords({
   stack = [],
   language = null,
   monorepo = false,
+  profile = null,
+  byLanguage = null,
 } = {}) {
   const rawNames = (Array.isArray(stack) ? stack : [])
     .map((item) => (typeof item === 'string' ? item : item?.name))
@@ -53,8 +55,23 @@ export function formatStackInPlainWords({
     }
   }
 
-  const cleanFramework = capitalizeKnownName(framework)
-  const fwLower = cleanFramework.toLowerCase()
+  // Also include stacks from profile if available
+  const profileStacks = (Array.isArray(profile?.stacks) ? profile.stacks : [])
+    .map((s) => String(s || '').trim())
+    .filter(Boolean)
+  for (const name of profileStacks) {
+    const lower = name.toLowerCase()
+    if (lower && !seen.has(lower)) {
+      seen.add(lower)
+      stackNames.push(capitalizeKnownName(name))
+    }
+  }
+
+  let cleanFramework = capitalizeKnownName(framework)
+  if (!cleanFramework && stackNames.some((s) => /^react$/i.test(s))) {
+    cleanFramework = 'React'
+  }
+  let fwLower = cleanFramework.toLowerCase()
 
   const hasVite = stackNames.some((s) => /^vite$/i.test(s)) || fwLower === 'vite'
   const hasWebpack = stackNames.some((s) => /^webpack$/i.test(s)) || fwLower === 'webpack'
@@ -63,13 +80,39 @@ export function formatStackInPlainWords({
   const isTypeScript = /^typescript$/i.test(language) || stackNames.some((s) => /^typescript$/i.test(s))
   const isNode = /^node(\.js)?$/i.test(language) || stackNames.some((s) => /^node(\.js)?$/i.test(s))
 
+  // Dominant language derived from real By Language counts if provided
   let langName = 'JavaScript'
-  if (isTypeScript) {
-    langName = 'TypeScript'
-  } else if (isNode) {
-    langName = 'Node.js'
-  } else if (language) {
-    langName = capitalizeKnownName(language)
+  if (byLanguage && typeof byLanguage === 'object') {
+    const jsxCount = byLanguage.jsx || 0
+    const jsCount = (byLanguage.javascript || 0) + (byLanguage.js || 0)
+    const tsxCount = byLanguage.tsx || 0
+    const tsCount = (byLanguage.typescript || 0) + (byLanguage.ts || 0)
+    const pyCount = (byLanguage.python || 0) + (byLanguage.py || 0)
+
+    const totalTs = tsCount + tsxCount
+    const totalJs = jsCount + jsxCount
+
+    if (totalTs > totalJs && totalTs > 0) {
+      langName = tsxCount > tsCount ? 'TypeScript (TSX)' : 'TypeScript'
+    } else if (totalJs > 0) {
+      langName = jsxCount > 0 ? 'JavaScript (JSX)' : 'JavaScript'
+    } else if (pyCount > 0) {
+      langName = 'Python'
+    } else if (isTypeScript) {
+      langName = 'TypeScript'
+    } else if (isNode) {
+      langName = 'Node.js'
+    } else if (language) {
+      langName = capitalizeKnownName(language)
+    }
+  } else {
+    if (isTypeScript) {
+      langName = 'TypeScript'
+    } else if (isNode) {
+      langName = 'Node.js'
+    } else if (language) {
+      langName = capitalizeKnownName(language)
+    }
   }
 
   let baseType = 'project'
@@ -93,6 +136,33 @@ export function formatStackInPlainWords({
     bundlerPart = 'built with Vite'
   } else if (hasWebpack && !hasNext && !hasNuxt && fwLower !== 'webpack') {
     bundlerPart = 'built with Webpack'
+  }
+
+  // Detect backend / other stacks
+  const allLowerStacks = stackNames.map((s) => s.toLowerCase())
+  const hasPython = allLowerStacks.some((s) => s.includes('python')) || (byLanguage && (byLanguage.python || 0) > 0)
+  const hasFastAPI = allLowerStacks.some((s) => s.includes('fastapi'))
+  const hasFlask = allLowerStacks.some((s) => s.includes('flask'))
+  const hasDjango = allLowerStacks.some((s) => s.includes('django'))
+  const hasExpress = allLowerStacks.some((s) => s.includes('express'))
+  const hasGo = allLowerStacks.some((s) => s === 'go' || s === 'golang')
+  const hasRust = allLowerStacks.some((s) => s === 'rust')
+
+  let backendPart = ''
+  if (hasPython && hasFastAPI) {
+    backendPart = 'Python (FastAPI) backend'
+  } else if (hasPython && hasFlask) {
+    backendPart = 'Python (Flask) backend'
+  } else if (hasPython && hasDjango) {
+    backendPart = 'Python (Django) backend'
+  } else if (hasPython && !langName.startsWith('Python')) {
+    backendPart = 'Python backend'
+  } else if (hasExpress && fwLower !== 'express') {
+    backendPart = 'Node.js (Express) backend'
+  } else if (hasGo) {
+    backendPart = 'Go backend'
+  } else if (hasRust) {
+    backendPart = 'Rust backend'
   }
 
   let description
@@ -124,6 +194,10 @@ export function formatStackInPlainWords({
     description = `A ${langName} ${baseType} ${bundlerPart}`
   } else {
     description = `A ${langName} ${baseType}`
+  }
+
+  if (backendPart) {
+    description += `, with a ${backendPart}`
   }
 
   // Capitalize known names in the sentence (React, Vue, Svelte, Vite, TypeScript, JavaScript, Node.js)
@@ -258,10 +332,6 @@ export function getHealthVerdict({
 } = {}) {
   const prodErrors = diagnostics.filter((d) => normalizeStatus(d.status) === 'error').length
   const prodWarnings = diagnostics.filter((d) => normalizeStatus(d.status) === 'warning').length
-  const nonPassingDiag = diagnostics.filter((d) => {
-    const s = normalizeStatus(d.status)
-    return s !== 'pass' && s !== 'info'
-  }).length
 
   // 1. While the graph is still loading:
   if (deepScanStatus === 'scanning') {
@@ -308,21 +378,6 @@ export function getHealthVerdict({
   // 2. If the graph scan fails or is unavailable:
   const isGraphUnavailable = deepScanStatus === 'error' || (!deepScanData && deepScanStatus !== 'scanning')
   if (isGraphUnavailable) {
-    let verdict = 'Looking healthy'
-    let icon = '✓'
-    let tone = 'healthy'
-
-    if (prodErrors > 0) {
-      verdict = 'Needs attention'
-      icon = '✖'
-      tone = 'attention'
-    } else if (prodWarnings > 0 || deepScanStatus === 'error') {
-      verdict = 'A few things to fix'
-      icon = '⚠'
-      tone = 'warning'
-    }
-
-    const whySentence = 'Code Map unavailable, so this verdict covers setup checks only.'
     const fallbackScore = typeof health?.score === 'number'
       ? health.score
       : (prodErrors > 0 ? 60 : (prodWarnings > 0 ? 80 : 100))
@@ -345,6 +400,25 @@ export function getHealthVerdict({
       }
     }
 
+    let verdict
+    let icon
+    let tone
+
+    if (grade === 'D' || grade === 'E' || grade === 'F') {
+      verdict = 'Needs attention'
+      icon = '✖'
+      tone = 'attention'
+    } else if (grade === 'B' || grade === 'C') {
+      verdict = 'A few things to fix'
+      icon = '⚠'
+      tone = 'warning'
+    } else {
+      verdict = 'Looking healthy'
+      icon = '✓'
+      tone = 'healthy'
+    }
+
+    const whySentence = 'Code Map unavailable, so this verdict covers setup checks only.'
     const gradeText = grade ? (capReason ? `Grade ${grade} (capped: ${capReason})` : `Grade ${grade}`) : null
 
     return {
@@ -521,29 +595,23 @@ export function getHealthVerdict({
   // - A few things to fix: any runtime cycle, orphan, unresolved import, unused dependency,
   //   any non-passing diagnostic, truncated scan, or grade B.
   // - Looking healthy: none of the above (grade A).
-  let verdict = 'Looking healthy'
-  let icon = '✓'
-  let tone = 'healthy'
+  let verdict
+  let icon
+  let tone
 
-  const hasCritical = prodErrors > 0 || undeclaredCount >= 1 || finalGrade === 'C' || finalGrade === 'D' || finalGrade === 'F'
-  const hasFixable =
-    runtimeCyclesCount > 0 ||
-    orphansCount > 0 ||
-    unresolvedCount > 0 ||
-    unusedCount > 0 ||
-    nonPassingDiag > 0 ||
-    isTruncated ||
-    isFailedScan ||
-    finalGrade === 'B'
-
-  if (hasCritical) {
+  // Verdict mapping: A = "Looking healthy", B and C = "A few things to fix", D and E = "Needs attention"
+  if (finalGrade === 'D' || finalGrade === 'E' || finalGrade === 'F') {
     verdict = 'Needs attention'
     icon = '✖'
     tone = 'attention'
-  } else if (hasFixable) {
+  } else if (finalGrade === 'B' || finalGrade === 'C') {
     verdict = 'A few things to fix'
     icon = '⚠'
     tone = 'warning'
+  } else {
+    verdict = 'Looking healthy'
+    icon = '✓'
+    tone = 'healthy'
   }
 
   // The one-line reason must list the real counts.
@@ -619,9 +687,108 @@ export function getWhatToDoNext({
   deepScanStatus = 'idle',
   includeNonProd = false,
 } = {}) {
-  const steps = []
+  if (deepScanStatus === 'scanning') {
+    return [{
+      id: 'scanning-step',
+      severity: 'Scanning',
+      isZeroState: true,
+      title: 'Scanning code in progress...',
+      why: 'We are analyzing repository structure, imports, and dependencies.',
+      action: null,
+    }]
+  }
 
-  // 1. Runtime cycles (Critical)
+  const merged = buildMergedFindings({
+    diagnostics,
+    deepScanData,
+    includeNonProd,
+  })
+
+  if (merged.length === 0) {
+    return [{
+      id: 'all-clear',
+      severity: 'Info',
+      isZeroState: true,
+      title: 'Nothing to fix right now',
+      why: 'All whole-repository checks and diagnostic rules passed cleanly.',
+      action: {
+        type: 'command',
+        value: 'npm outdated',
+        label: 'Run npm outdated periodically to check for dependency updates.',
+      },
+    }]
+  }
+
+  const formatSeverity = (sev) => {
+    if (!sev) return 'Important'
+    const s = String(sev).toLowerCase().replace(/\s+/g, '-')
+    if (s === 'critical') return 'Critical'
+    if (s === 'important') return 'Important'
+    if (s === 'nice-to-have') return 'Nice to have'
+    if (s === 'info') return 'Info'
+    return s.charAt(0).toUpperCase() + s.slice(1)
+  }
+
+  return merged.map((finding, idx) => ({
+    id: finding.id || `step-${idx}`,
+    severity: formatSeverity(finding.severity),
+    title: finding.fixTitle || finding.name,
+    why: finding.why,
+    action: finding.action || (finding.fix ? { type: 'command', value: finding.fix, label: finding.fix } : null),
+  }))
+}
+
+export function isCoveredTopic(ruleId) {
+  if (!ruleId) return false
+  const r = String(ruleId).toLowerCase()
+  return (
+    r.includes('test') ||
+    r.includes('engine') ||
+    r.includes('nvmrc') ||
+    r.includes('node-version') ||
+    r.includes('ci') ||
+    r.includes('license') ||
+    r.includes('security') ||
+    r.includes('lockfile') ||
+    r.includes('outdated') ||
+    r.includes('cycle') ||
+    r.includes('undeclared') ||
+    r.includes('orphan') ||
+    r.includes('unresolved') ||
+    r.includes('unused')
+  )
+}
+
+/**
+ * Builds a unified list of findings by merging diagnostic checks and rule findings by topic.
+ * Each issue appears ONCE, with rule evidence and the rule's why and fix.
+ */
+export function buildMergedFindings({
+  diagnostics = [],
+  deepScanData = null,
+  includeNonProd = false,
+} = {}) {
+  const merged = []
+  const coveredTopics = new Set()
+
+  const rawFindings = Array.isArray(deepScanData?.findings)
+    ? deepScanData.findings
+    : Array.isArray(deepScanData?.summary?.findings)
+    ? deepScanData.summary.findings
+    : []
+
+  const diagMap = new Map()
+  for (const d of diagnostics) {
+    const key = (d.rule || d.ruleId || '').toLowerCase()
+    if (key) diagMap.set(key, d)
+  }
+
+  const rawMap = new Map()
+  for (const f of rawFindings) {
+    if (f?.id) rawMap.set(f.id.toLowerCase(), f)
+  }
+
+  // 1. RUNTIME CYCLES (Critical)
   let cycles = deepScanData?.summary?.cycles || deepScanData?.cycles || []
   if (includeNonProd) {
     if (deepScanData?.summary?.allCycles) {
@@ -630,276 +797,429 @@ export function getWhatToDoNext({
       cycles = [...cycles, ...deepScanData.summary.nonProdCycles]
     }
   }
+  const runtimeCycles = cycles.filter((c) => !c?.isTypeOnly)
+  if (runtimeCycles.length > 0) {
+    coveredTopics.add('cycles')
+    for (let idx = 0; idx < runtimeCycles.length; idx++) {
+      const cycle = runtimeCycles[idx]
+      const files = Array.isArray(cycle) ? cycle : (cycle?.files || [])
+      const shortest = (Array.isArray(cycle?.shortest) && cycle.shortest.length > 0)
+        ? cycle.shortest
+        : files
+      const loopStr = (shortest.length > 1 && shortest[0] !== shortest[shortest.length - 1])
+        ? [...shortest, shortest[0]].join(' → ')
+        : shortest.join(' → ')
+      const targetFile = shortest[0] || files[0] || 'cycle'
 
-  for (let idx = 0; idx < cycles.length; idx++) {
-    const cycle = cycles[idx]
-    if (cycle?.isTypeOnly) continue
-
-    const files = Array.isArray(cycle) ? cycle : (cycle?.files || [])
-    const shortest = (Array.isArray(cycle?.shortest) && cycle.shortest.length > 0)
-      ? cycle.shortest
-      : files
-    const loopStr = (shortest.length > 1 && shortest[0] !== shortest[shortest.length - 1])
-      ? [...shortest, shortest[0]].join(' → ')
-      : shortest.join(' → ')
-
-    const targetFile = shortest[0] || files[0] || 'cycle'
-
-    steps.push({
-      id: `cycle-${idx}-${targetFile}`,
-      severity: 'Critical',
-      severityOrder: 0,
-      title: `Break circular dependency: ${loopStr}`,
-      why: 'Circular imports cause tight coupling and can evaluate modules before their exports are initialized.',
-      action: {
-        type: 'file',
-        value: targetFile,
-        label: `Inspect ${targetFile}`,
-      },
-    })
-  }
-
-  // 2. Used but undeclared dependencies (Critical)
-  const undeclared = deepScanData?.summary?.usedButUndeclared || deepScanData?.usedButUndeclared || []
-  for (const pkg of undeclared) {
-    steps.push({
-      id: `undeclared-${pkg}`,
-      severity: 'Critical',
-      severityOrder: 0.1,
-      title: `Install undeclared package "${pkg}"`,
-      why: 'Missing packages will cause build and execution failures in clean installs and CI pipelines.',
-      action: {
-        type: 'command',
-        value: `npm install ${pkg}`,
-        label: `npm install ${pkg}`,
-      },
-    })
-  }
-
-  // 3. Critical diagnostics errors (Critical)
-  for (let idx = 0; idx < diagnostics.length; idx++) {
-    const d = diagnostics[idx]
-    const status = normalizeStatus(d.status)
-    if (status !== 'error') continue
-
-    const fixContent = d.fix?.content
-    const fixType = d.fix?.type === 'command' ? 'command' : (fixContent ? 'snippet' : null)
-
-    let action
-    if (fixType === 'command') {
-      action = { type: 'command', value: fixContent, label: fixContent }
-    } else if (d.file || d.filePath) {
-      const file = d.file || d.filePath
-      action = { type: 'file', value: file, label: `Open ${file}` }
-    } else if (fixContent) {
-      action = { type: 'command', value: fixContent, label: `Copy fix snippet` }
-    } else {
-      action = {
-        type: 'command',
-        value: d.recommendation || d.fix?.description || d.message,
-        label: d.recommendation || 'View check details',
-      }
-    }
-
-    steps.push({
-      id: `diag-error-${d.ruleId || d.rule || idx}`,
-      severity: 'Critical',
-      severityOrder: 0.2,
-      title: d.title || d.rule || d.message,
-      why: d.why || 'Critical setup issues degrade project health and reliability.',
-      action,
-    })
-  }
-
-  // 4. Unresolved imports (Important)
-  const rawUnresolved = deepScanData?.unresolvedImports || deepScanData?.summary?.unresolvedImports || []
-  let unresolvedList
-  if (includeNonProd) {
-    unresolvedList = rawUnresolved
-  } else {
-    unresolvedList = rawUnresolved.filter((item) => item.category !== 'non-production')
-  }
-
-  if (unresolvedList.length === 0 && deepScanData?.summary?.unresolvedItems) {
-    const missingRel = deepScanData.summary.unresolvedItems.missingRelative || []
-    const missingAli = deepScanData.summary.unresolvedItems.unresolvedAlias || []
-    const combined = [...missingRel, ...missingAli]
-    unresolvedList = includeNonProd ? combined : combined.filter((item) => item.category !== 'non-production')
-  }
-
-  for (let idx = 0; idx < unresolvedList.length; idx++) {
-    const item = unresolvedList[idx]
-    const spec = item.specifier || item.target || 'module'
-    const from = item.from || item.file || 'source'
-
-    steps.push({
-      id: `unresolved-${idx}-${from}-${spec}`,
-      severity: 'Important',
-      severityOrder: 1,
-      title: `Resolve missing import "${spec}" in ${from}`,
-      why: 'This import could not be resolved to any file or package, which may cause runtime or build errors.',
-      action: {
-        type: 'file',
-        value: from,
-        label: `Inspect ${from}`,
-      },
-    })
-  }
-
-  // 5. Diagnostics warnings (Important)
-  for (let idx = 0; idx < diagnostics.length; idx++) {
-    const d = diagnostics[idx]
-    const status = normalizeStatus(d.status)
-    if (status !== 'warning') continue
-
-    const fixContent = d.fix?.content
-    const fixType = d.fix?.type === 'command' ? 'command' : (fixContent ? 'snippet' : null)
-
-    let action
-    if (fixType === 'command') {
-      action = { type: 'command', value: fixContent, label: fixContent }
-    } else if (d.file || d.filePath) {
-      const file = d.file || d.filePath
-      action = { type: 'file', value: file, label: `Open ${file}` }
-    } else if (fixContent) {
-      action = { type: 'command', value: fixContent, label: `Copy fix snippet` }
-    } else {
-      action = {
-        type: 'command',
-        value: d.recommendation || d.fix?.description || d.message,
-        label: d.recommendation || 'View check details',
-      }
-    }
-
-    steps.push({
-      id: `diag-warn-${d.ruleId || d.rule || idx}`,
-      severity: 'Important',
-      severityOrder: 1.2,
-      title: d.title || d.rule || d.message,
-      why: d.why || 'Resolving setup warnings avoids unexpected tooling drift.',
-      action,
-    })
-  }
-
-  // 6. Orphan files (Important)
-  const orphans = deepScanData?.summary?.orphans || deepScanData?.orphans || []
-  for (const orphan of orphans) {
-    steps.push({
-      id: `orphan-${orphan}`,
-      severity: 'Important',
-      severityOrder: 1.5,
-      title: `Review orphan file "${orphan}"`,
-      why: 'Orphan files are never imported in your project and may be dead code that increases maintenance load.',
-      action: {
-        type: 'file',
-        value: orphan,
-        label: `Inspect ${orphan}`,
-      },
-    })
-  }
-
-  // 7. Declared but unused dependencies (Nice to have)
-  const unused = deepScanData?.summary?.declaredButUnused || deepScanData?.declaredButUnused || []
-  for (const pkg of unused) {
-    steps.push({
-      id: `unused-${pkg}`,
-      severity: 'Nice to have',
-      severityOrder: 2,
-      title: `Remove unused dependency "${pkg}"`,
-      why: 'Unused dependencies bloat install times and needlessly increase security scan surfaces.',
-      action: {
-        type: 'command',
-        value: `npm uninstall ${pkg}`,
-        label: `npm uninstall ${pkg}`,
-      },
-    })
-  }
-
-  // 8. Rule engine findings (Phase 1-4 rules)
-  const rawFindings = deepScanData?.findings || deepScanData?.summary?.findings || []
-  const genericRuleIds = new Set([
-    'runtime-cycles',
-    'undeclared-packages',
-    'unresolved-imports',
-    'orphans',
-    'unused-dependencies',
-  ])
-
-  for (let idx = 0; idx < rawFindings.length; idx++) {
-    const f = rawFindings[idx]
-    if (!f || !f.id) continue
-    if (genericRuleIds.has(f.id)) continue
-
-    const s = f.severity?.toLowerCase()
-    const sevLabel = s === 'critical' ? 'Critical' : (s === 'important' ? 'Important' : 'Nice to have')
-    const sevOrder = s === 'critical' ? 0.15 : (s === 'important' ? 1.3 : 2.2)
-
-    let action
-    if (f.evidence && f.evidence[0]?.file) {
-      action = {
-        type: 'file',
-        value: f.evidence[0].file,
-        label: `Inspect ${f.evidence[0].file}`,
-      }
-    } else if (f.fix) {
-      action = {
-        type: 'command',
-        value: f.fix,
-        label: f.fix,
-      }
-    } else {
-      action = {
-        type: 'command',
-        value: f.name || f.id,
-        label: f.name || f.id,
-      }
-    }
-
-    steps.push({
-      id: `rule-${f.id}-${idx}`,
-      severity: sevLabel,
-      severityOrder: sevOrder,
-      title: f.name || f.id,
-      why: f.why || 'Identified by project rule analysis.',
-      action,
-      docsUrl: f.docsUrl,
-    })
-  }
-
-  // Sort by severity (Critical -> Important -> Nice to have)
-  steps.sort((a, b) => a.severityOrder - b.severityOrder)
-
-  if (steps.length === 0) {
-    if (deepScanStatus === 'scanning') {
-      return [
-        {
-          id: 'scanning-step',
-          isZeroState: true,
-          severity: 'Scanning',
-          severityOrder: 0,
-          title: 'Scanning repository code...',
-          why: 'Analyzing file dependencies, cycles, and imports in the background.',
-          action: null,
+      merged.push({
+        id: `runtime-cycle-${idx}`,
+        topic: 'cycles',
+        name: `Runtime Circular Dependency: ${loopStr}`,
+        fixTitle: `Break circular dependency: ${loopStr}`,
+        severity: 'critical',
+        dimension: 'reliability',
+        why: 'Circular imports cause tight coupling and can evaluate modules before their exports are initialized.',
+        fix: `Refactor ${targetFile} or extract shared types/functions into a separate module.`,
+        evidence: shortest.map((f, i) => ({ file: f, line: 1, snippet: `cycle step ${i + 1}` })),
+        count: 1,
+        action: {
+          type: 'file',
+          value: targetFile,
+          label: `Inspect ${targetFile}`,
         },
-      ]
+        docsUrl: 'https://nodejs.org/api/modules.html#cycles',
+      })
     }
+  }
 
-    return [
-      {
-        id: 'clean-maintenance',
-        isZeroState: true,
-        severity: 'Maintenance',
-        severityOrder: 3,
-        title: 'Nothing to fix right now',
-        why: 'All setup checks, dependencies, and imports are currently in good order.',
+  // 2. UNDECLARED PACKAGES (Critical)
+  const undeclared = deepScanData?.summary?.usedButUndeclared || deepScanData?.usedButUndeclared || []
+  if (undeclared.length > 0) {
+    coveredTopics.add('undeclared')
+    const undeclaredSources = deepScanData?.summary?.undeclaredSources || {}
+    for (const pkg of undeclared) {
+      const srcFiles = undeclaredSources[pkg] || []
+      merged.push({
+        id: `undeclared-${pkg}`,
+        topic: 'undeclared',
+        name: `Undeclared package "${pkg}"`,
+        fixTitle: `Install undeclared package "${pkg}"`,
+        severity: 'critical',
+        dimension: 'security',
+        why: `Imported in source code but not declared in package.json dependencies. Will break in clean installs and CI.`,
+        fix: `npm install ${pkg}`,
+        evidence: srcFiles.length > 0
+          ? srcFiles.map((f) => ({ file: f, line: 1, snippet: `import ... from '${pkg}'` }))
+          : [{ file: 'package.json', line: 1, snippet: `Missing dependency: ${pkg}` }],
+        count: 1,
         action: {
           type: 'command',
-          value: 'npm outdated',
-          label: 'Run npm outdated (maintenance)',
+          value: `npm install ${pkg}`,
+          label: `npm install ${pkg}`,
         },
-      },
-    ]
+        docsUrl: 'https://docs.npmjs.com/cli/v10/commands/npm-install',
+      })
+    }
   }
 
-  return steps
+  // 3. UNRESOLVED IMPORTS (Important)
+  const rawUnresolved = deepScanData?.unresolvedImports || deepScanData?.summary?.unresolvedImports || []
+  const unresolvedList = includeNonProd ? rawUnresolved : rawUnresolved.filter((item) => item.category !== 'non-production')
+  if (unresolvedList.length > 0) {
+    coveredTopics.add('unresolved')
+    for (let i = 0; i < unresolvedList.length; i++) {
+      const item = unresolvedList[i]
+      const spec = item.specifier || item.target || 'module'
+      const from = item.from || item.file || 'source'
+      merged.push({
+        id: `unresolved-${i}-${from}-${spec}`,
+        topic: 'unresolved',
+        name: `Unresolved import "${spec}" in ${from}`,
+        fixTitle: `Resolve missing import "${spec}" in ${from}`,
+        severity: 'important',
+        dimension: 'reliability',
+        why: `Import "${spec}" in ${from} could not be resolved to any file or package.`,
+        fix: `Fix the relative import path in ${from} or install the package.`,
+        evidence: [{ file: from, line: 1, snippet: `import '${spec}'` }],
+        count: 1,
+        action: {
+          type: 'file',
+          value: from,
+          label: `Inspect ${from}`,
+        },
+        docsUrl: 'https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import',
+      })
+    }
+  }
+
+  // 4. TESTS (Important) - Merge missing-tests, no-test-script, low-test-ratio into one "No automated tests"
+  const testDiagFailing = [
+    diagMap.get('missing-test-script'),
+    diagMap.get('no-test-script'),
+    diagMap.get('missing-tests'),
+    diagMap.get('low-test-ratio'),
+  ].filter((d) => d && normalizeStatus(d.status) !== 'pass')
+
+  const noTestScriptRaw = rawMap.get('no-test-script')
+  const lowRatioRaw = rawMap.get('low-test-ratio')
+  const missingTestsRaw = rawMap.get('missing-tests')
+  const testRawFailing = [noTestScriptRaw, lowRatioRaw, missingTestsRaw].filter((r) => r && r.count > 0)
+
+  if (testDiagFailing.length > 0 || testRawFailing.length > 0) {
+    coveredTopics.add('tests')
+    const primaryTest = testRawFailing[0] || testDiagFailing[0]
+    merged.push({
+      id: 'no-automated-tests',
+      topic: 'tests',
+      name: 'No automated tests',
+      fixTitle: 'Add automated tests and test script',
+      severity: 'important',
+      dimension: 'maintainability',
+      why: 'package.json does not define a runnable "test" script and no automated test files were found, so regressions must be caught manually.',
+      fix: 'Add a "test" script in package.json (e.g. "test": "vitest run" or "npm test") and write automated tests.',
+      evidence: primaryTest?.evidence?.length > 0
+        ? primaryTest.evidence
+        : [{ file: 'package.json', line: 1, snippet: 'Missing "test" script in package.json' }],
+      count: 1,
+      action: {
+        type: 'command',
+        value: 'npm test',
+        label: 'npm test',
+      },
+      docsUrl: 'https://docs.npmjs.com/cli/v10/using-npm/scripts',
+    })
+  }
+
+  // 5. NODE VERSION - Merge "Node.js Engine Requirement" and "Node.js Version Pinning"
+  const nodeDiagFailing = [
+    diagMap.get('node-engine'),
+    diagMap.get('missing-nvmrc-or-engines'),
+    diagMap.get('engines-status'),
+  ].filter((d) => d && normalizeStatus(d.status) !== 'pass')
+
+  const nodeRawFailing = [
+    rawMap.get('missing-engines-field'),
+    rawMap.get('node-version-mismatch'),
+  ].filter((r) => r && r.count > 0)
+
+  if (nodeDiagFailing.length > 0 || nodeRawFailing.length > 0) {
+    coveredTopics.add('node-version')
+    const hasMismatch = rawMap.get('node-version-mismatch')?.count > 0
+    merged.push({
+      id: 'node-version-requirement',
+      topic: 'node-version',
+      name: 'Node.js Version Requirement and Pinning',
+      fixTitle: 'Pin Node.js version in package.json engines and .nvmrc',
+      severity: hasMismatch ? 'important' : 'nice-to-have',
+      dimension: 'reliability',
+      why: hasMismatch
+        ? 'Node version declarations conflict across configuration files.'
+        : 'package.json lacks an "engines.node" field and .nvmrc is missing to pin the Node.js runtime version.',
+      fix: 'Add "engines": { "node": ">=20.0.0" } to package.json and create a .nvmrc file with your Node version.',
+      evidence: hasMismatch
+        ? [{ file: '.nvmrc', line: 1, snippet: 'Node version mismatch' }]
+        : [{ file: 'package.json', line: 1, snippet: 'Missing engines.node requirement' }],
+      count: 1,
+      action: {
+        type: 'command',
+        value: 'echo "v20" > .nvmrc',
+        label: 'Create .nvmrc',
+      },
+      docsUrl: 'https://nodejs.org/en/about/previous-releases',
+    })
+  }
+
+  // 6. ORPHANS (Important)
+  const orphans = deepScanData?.summary?.orphans || deepScanData?.orphans || []
+  if (orphans.length > 0) {
+    coveredTopics.add('orphans')
+    for (const orphan of orphans) {
+      merged.push({
+        id: `orphan-${orphan}`,
+        topic: 'orphans',
+        name: `Orphan file "${orphan}"`,
+        fixTitle: `Review orphan file "${orphan}"`,
+        severity: 'important',
+        dimension: 'maintainability',
+        why: `Never imported by any file in the repository. May be dead code increasing maintenance burden.`,
+        fix: `Import ${orphan} or delete the file if no longer needed.`,
+        evidence: [{ file: orphan, line: 1, snippet: '0 incoming imports (orphan file)' }],
+        count: 1,
+        action: {
+          type: 'file',
+          value: orphan,
+          label: `Inspect ${orphan}`,
+        },
+        docsUrl: 'https://en.wikipedia.org/wiki/Dead_code',
+      })
+    }
+  }
+
+  // 7. CI (Nice-to-have)
+  const ciDiagFailing = [
+    diagMap.get('missing-ci'),
+    diagMap.get('no-ci-workflow'),
+  ].filter((d) => d && normalizeStatus(d.status) !== 'pass')
+  const ciRawFailing = rawMap.get('no-ci')?.count > 0
+
+  if (ciDiagFailing.length > 0 || ciRawFailing) {
+    coveredTopics.add('ci')
+    merged.push({
+      id: 'missing-ci',
+      topic: 'ci',
+      name: 'Missing Continuous Integration (CI)',
+      fixTitle: 'Add a CI workflow in .github/workflows',
+      severity: 'nice-to-have',
+      dimension: 'hygiene',
+      why: 'No CI workflow configured to automatically build and test code on pull requests.',
+      fix: 'Create .github/workflows/ci.yml with automated build and test steps.',
+      evidence: [{ file: '.github/workflows', line: 1, snippet: 'No workflow files found' }],
+      count: 1,
+      action: {
+        type: 'file',
+        value: '.github/workflows/ci.yml',
+        label: 'Create .github/workflows/ci.yml',
+      },
+      docsUrl: 'https://docs.github.com/en/actions',
+    })
+  }
+
+  // 8. LICENSE (Nice-to-have)
+  const licenseDiagFailing = [diagMap.get('missing-license')].filter((d) => d && normalizeStatus(d.status) !== 'pass')
+  const licenseRawFailing = rawMap.get('missing-license')?.count > 0
+
+  if (licenseDiagFailing.length > 0 || licenseRawFailing) {
+    coveredTopics.add('license')
+    merged.push({
+      id: 'missing-license',
+      topic: 'license',
+      name: 'Missing License',
+      fixTitle: 'Add an open-source LICENSE file',
+      severity: 'nice-to-have',
+      dimension: 'hygiene',
+      why: 'No LICENSE file found in repository root. Default copyright applies and others cannot contribute or use it.',
+      fix: 'Create a LICENSE file (e.g. MIT, Apache-2.0) in the root directory.',
+      evidence: [{ file: 'LICENSE', line: 1, snippet: 'Missing LICENSE file in repository root' }],
+      count: 1,
+      action: {
+        type: 'file',
+        value: 'LICENSE',
+        label: 'Create LICENSE',
+      },
+      docsUrl: 'https://choosealicense.com',
+    })
+  }
+
+  // 9. SECURITY POLICY (Nice-to-have)
+  const secDiagFailing = [
+    diagMap.get('missing-security-policy'),
+    diagMap.get('security-policy'),
+  ].filter((d) => d && normalizeStatus(d.status) !== 'pass')
+  const secRawFailing = rawMap.get('missing-security-policy')?.count > 0
+
+  if (secDiagFailing.length > 0 || secRawFailing) {
+    coveredTopics.add('security-policy')
+    merged.push({
+      id: 'missing-security-policy',
+      topic: 'security-policy',
+      name: 'Missing Security Policy',
+      fixTitle: 'Add a SECURITY.md vulnerability reporting policy',
+      severity: 'nice-to-have',
+      dimension: 'security',
+      why: 'No SECURITY.md file found explaining how to report security vulnerabilities responsibly.',
+      fix: 'Create a SECURITY.md file with contact information for confidential disclosure.',
+      evidence: [{ file: 'SECURITY.md', line: 1, snippet: 'Missing SECURITY.md' }],
+      count: 1,
+      action: {
+        type: 'file',
+        value: 'SECURITY.md',
+        label: 'Create SECURITY.md',
+      },
+      docsUrl: 'https://docs.github.com/en/code-security/getting-started/adding-a-security-policy-to-your-repository',
+    })
+  }
+
+  // 10. DEPENDENCY UPDATES / LOCKFILE (Important)
+  const lockDiagFailing = [
+    diagMap.get('missing-lockfile'),
+    diagMap.get('no-lockfile'),
+  ].filter((d) => d && normalizeStatus(d.status) !== 'pass')
+  const lockRawFailing = rawMap.get('missing-lockfile')?.count > 0
+
+  if (lockDiagFailing.length > 0 || lockRawFailing) {
+    coveredTopics.add('dependency-updates')
+    merged.push({
+      id: 'missing-lockfile',
+      topic: 'dependency-updates',
+      name: 'Missing Dependency Lockfile',
+      fixTitle: 'Generate package-lock.json',
+      severity: 'important',
+      dimension: 'reliability',
+      why: 'No lockfile found. Lockfiles ensure identical dependency versions across developer machines and CI.',
+      fix: 'Run npm install to generate package-lock.json and commit it to git.',
+      evidence: [{ file: 'package-lock.json', line: 1, snippet: 'Missing lockfile' }],
+      count: 1,
+      action: {
+        type: 'command',
+        value: 'npm install',
+        label: 'npm install',
+      },
+      docsUrl: 'https://docs.npmjs.com/cli/v10/configuring-npm/package-lock-json',
+    })
+  }
+
+  // 11. UNUSED DEPENDENCIES (Nice-to-have)
+  const unused = deepScanData?.summary?.declaredButUnused || deepScanData?.declaredButUnused || []
+  if (unused.length > 0) {
+    coveredTopics.add('unused')
+    for (const pkg of unused) {
+      merged.push({
+        id: `unused-${pkg}`,
+        topic: 'unused',
+        name: `Unused dependency "${pkg}"`,
+        fixTitle: `Remove unused dependency "${pkg}"`,
+        severity: 'nice-to-have',
+        dimension: 'hygiene',
+        why: `Declared in package.json dependencies but never imported in source files.`,
+        fix: `npm uninstall ${pkg}`,
+        evidence: [{ file: 'package.json', line: 1, snippet: `"${pkg}": "..."` }],
+        count: 1,
+        action: {
+          type: 'command',
+          value: `npm uninstall ${pkg}`,
+          label: `npm uninstall ${pkg}`,
+        },
+        docsUrl: 'https://docs.npmjs.com/cli/v10/commands/npm-uninstall',
+      })
+    }
+  }
+
+  // 12. OTHER FAILING DIAGNOSTICS NOT IN COVERED TOPICS
+  for (const d of diagnostics) {
+    const s = normalizeStatus(d.status)
+    if (s !== 'error' && s !== 'warning') continue
+    const rKey = (d.rule || d.ruleId || '').toLowerCase()
+    if (isCoveredTopic(rKey)) continue
+
+    const fixContent = d.fix?.content
+    const fixType = d.fix?.type === 'command' ? 'command' : (fixContent ? 'snippet' : null)
+    let action
+    if (d.file || d.filePath) {
+      const file = d.file || d.filePath
+      action = { type: 'file', value: file, label: `Inspect ${file}` }
+    } else if (fixType === 'command') {
+      action = { type: 'command', value: fixContent, label: fixContent }
+    } else if (fixContent) {
+      action = { type: 'command', value: fixContent, label: 'Copy fix snippet' }
+    } else {
+      action = {
+        type: 'command',
+        value: d.recommendation || d.fix?.description || d.message,
+        label: d.recommendation || 'View check details',
+      }
+    }
+
+    merged.push({
+      id: `diag-${d.ruleId || d.rule}`,
+      topic: d.ruleId || d.rule,
+      name: d.title || d.rule || d.message,
+      fixTitle: d.title || d.rule || d.message,
+      severity: s === 'error' ? 'critical' : 'important',
+      dimension: d.category ? d.category.toLowerCase() : 'reliability',
+      why: d.why || 'Setup discrepancy degrades project health and reproducibility.',
+      fix: fixContent || d.recommendation || 'Review check details.',
+      evidence: d.file ? [{ file: d.file, line: 1, snippet: d.message }] : [],
+      count: 1,
+      action,
+      docsUrl: d.docsUrl || null,
+    })
+  }
+
+  // 13. OTHER RULE FINDINGS FROM RAW FINDINGS
+  for (const f of rawFindings) {
+    if (!f || !f.id || f.count <= 0) continue
+    const fid = f.id.toLowerCase()
+    if (
+      fid === 'runtime-cycles' ||
+      fid === 'undeclared-packages' ||
+      fid === 'unresolved-imports' ||
+      fid === 'no-test-script' ||
+      fid === 'low-test-ratio' ||
+      fid === 'missing-tests' ||
+      fid === 'missing-engines-field' ||
+      fid === 'node-version-mismatch' ||
+      fid === 'orphans' ||
+      fid === 'no-ci' ||
+      fid === 'missing-license' ||
+      fid === 'missing-security-policy' ||
+      fid === 'missing-lockfile' ||
+      fid === 'unused-dependencies'
+    ) {
+      continue
+    }
+
+    merged.push({
+      id: f.id,
+      topic: f.id,
+      name: f.name || f.id,
+      fixTitle: f.name || f.id,
+      severity: f.severity || 'important',
+      dimension: f.dimension || 'reliability',
+      why: f.why || 'Identified potential issue during whole-project analysis.',
+      fix: f.fix || 'Review finding details.',
+      evidence: Array.isArray(f.evidence) ? f.evidence : [],
+      count: f.count || 1,
+      action: (f.evidence && f.evidence.length > 0 && f.evidence[0].file)
+        ? { type: 'file', value: f.evidence[0].file, label: `Inspect ${f.evidence[0].file}` }
+        : (f.fix ? { type: 'command', value: f.fix, label: f.fix } : null),
+      docsUrl: f.docsUrl || null,
+    })
+  }
+
+  // Sort by severity (critical first, then important, then nice-to-have)
+  const rank = { critical: 0, important: 1, 'nice-to-have': 2, 'nice to have': 2 }
+  const getRank = (s) => rank[String(s || '').toLowerCase().replace(/\s+/g, '-')] ?? 3
+  merged.sort((a, b) => getRank(a.severity) - getRank(b.severity))
+
+  return merged
 }
