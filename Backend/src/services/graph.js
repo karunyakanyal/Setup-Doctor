@@ -191,10 +191,62 @@ function isTestSetupFile(filePath) {
 	)
 }
 
-function isDeclarationFile(filePath) {
+function isDeclarationFile(filePath, fileText = '') {
 	if (!filePath) return false
 	const lower = filePath.toLowerCase()
-	return lower.endsWith('.d.ts') || lower.endsWith('.d.mts') || lower.endsWith('.d.cts')
+	if (lower.endsWith('.d.ts') || lower.endsWith('.d.mts') || lower.endsWith('.d.cts')) {
+		return true
+	}
+	if (fileText && typeof fileText === 'string') {
+		const stripped = fileText
+			.replace(/\/\*[\s\S]*?\*\//g, '')
+			.replace(/\/\/.*/g, '')
+			.trim()
+		if (stripped) {
+			const lines = stripped.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+			if (
+				lines.length > 0 &&
+				lines.every((line) =>
+					/^(export\s+)?declare\s+/.test(line) ||
+					/^(export\s+)?(type|interface)\s+/.test(line) ||
+					/^import\s+type\s+/.test(line) ||
+					/^[}{;]+$/.test(line)
+				)
+			) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+function matchesVirtualModule(filePath, referencedVirtualModules) {
+	if (!filePath || !referencedVirtualModules || referencedVirtualModules.size === 0) return false
+	const cleanPath = filePath.replace(/\\/g, '/').toLowerCase()
+	const ext = path.posix.extname(cleanPath)
+	const baseNoExt = path.posix.basename(cleanPath, ext) // e.g. 'env'
+	const dirName = path.posix.dirname(cleanPath)
+	const parentDir = path.posix.basename(dirName) // e.g. 'client'
+	const dirAndBase = `${parentDir}/${baseNoExt}` // e.g. 'client/env'
+
+	for (const vm of referencedVirtualModules) {
+		const cleanVm = vm.toLowerCase().replace(/^[\0/\\]+/, '').replace(/^virtual:/, '')
+		const vmParts = cleanVm.split('/')
+		const vmTail = vmParts[vmParts.length - 1] // e.g. 'env'
+
+		if (
+			cleanPath.endsWith(`/${cleanVm}${ext}`) ||
+			cleanPath.endsWith(`/${cleanVm}`) ||
+			cleanPath.endsWith(`/${dirAndBase}${ext}`) ||
+			(cleanPath.endsWith(`/${baseNoExt}${ext}`) && vmTail === baseNoExt && (cleanVm.includes('vite') || cleanVm.includes('virtual') || cleanVm.startsWith('@'))) ||
+			cleanVm === dirAndBase ||
+			cleanVm.endsWith(`/${dirAndBase}`) ||
+			cleanVm === baseNoExt
+		) {
+			return true
+		}
+	}
+	return false
 }
 
 function isToolEntryCandidate(filePath) {
@@ -2238,6 +2290,28 @@ function buildGraph(files, packageJsons = [], options = {}) {
 
 	const allUnresolvedImports = []
 
+	const referencedVirtualModules = new Set()
+	for (const [fPath, fData] of filesMap.entries()) {
+		if (!fData || !fData.text) continue
+		const source = fPath.endsWith('.vue') ? extractVueScript(fData.text) : fData.text
+		const entries = extractImports(source)
+		for (const { specifier } of entries) {
+			if (
+				specifier.startsWith('virtual:') ||
+				specifier.startsWith('@vite/') ||
+				specifier.startsWith('/@vite/') ||
+				specifier.startsWith('\0') ||
+				specifier.startsWith('\\0')
+			) {
+				referencedVirtualModules.add(specifier)
+			}
+		}
+		const vmMatches = source.match(/['"](@vite\/[a-zA-Z0-9_-]+|\/@vite\/[a-zA-Z0-9_-]+|virtual:[a-zA-Z0-9_/-]+)['"]/g) || []
+		for (const m of vmMatches) {
+			referencedVirtualModules.add(m.slice(1, -1))
+		}
+	}
+
 	for (const node of nodes) {
 		const fileData = filesMap.get(node.path)
 		if (!fileData || !fileData.text) continue
@@ -2527,7 +2601,7 @@ function buildGraph(files, packageJsons = [], options = {}) {
 						}
 
 						// But they never produce usedButUndeclared entries
-						const isTypeContext = Boolean(typeOnly || isDeclarationFile(node.path))
+						const isTypeContext = Boolean(typeOnly || isDeclarationFile(node.path, fileData.text))
 						if (!isTypeContext) {
 							prodRuntimeExternalsAll.add(normName)
 							if (nearestPkg && pkgProdRuntimeExternals.has(nearestPkg.dir)) {
@@ -2586,6 +2660,7 @@ function buildGraph(files, packageJsons = [], options = {}) {
 	// Identify orphans: only production nodes, not special
 	const orphans = []
 	for (const node of nodes) {
+		const fileText = filesMap.get(node.path)?.text || ''
 		const isSpecial =
 			node.isEntry ||
 			node.isConfig ||
@@ -2594,7 +2669,8 @@ function buildGraph(files, packageJsons = [], options = {}) {
 			isConfigFile(node.path) ||
 			isTestFile(node.path) ||
 			isTestSetupFile(node.path) ||
-			isDeclarationFile(node.path)
+			isDeclarationFile(node.path, fileText) ||
+			matchesVirtualModule(node.path, referencedVirtualModules)
 
 		if (node.fanIn === 0 && node.fanOut === 0 && !isSpecial) {
 			node.isOrphan = true
@@ -2644,7 +2720,8 @@ function buildGraph(files, packageJsons = [], options = {}) {
 			!isConfigFile(n.path) &&
 			!isTestFile(n.path) &&
 			!isTestSetupFile(n.path) &&
-			!isDeclarationFile(n.path)
+			!isDeclarationFile(n.path, filesMap.get(n.path)?.text) &&
+			!matchesVirtualModule(n.path, referencedVirtualModules)
 	)
 
 	const summaryNonProduction = {
@@ -3396,6 +3473,7 @@ module.exports = {
 	isTestFile,
 	isTestSetupFile,
 	isDeclarationFile,
+	matchesVirtualModule,
 	isIgnoredToolingPackage,
 	BIN_ALIASES,
 	extractImports,
