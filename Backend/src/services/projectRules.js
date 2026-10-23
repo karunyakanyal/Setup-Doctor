@@ -329,10 +329,11 @@ function evaluateProjectRules({
 	const rootPkg = parsedPackageJsons.find((p) => !p.dir) || parsedPackageJsons[0] || { content: {} }
 	const p = rootPkg.content || {}
 	const allFilePaths = Array.from(filesMap.keys())
-	const allDeps = {
-		...(p.dependencies || {}),
-		...(p.devDependencies || {}),
+	const allDeps = {}
+	for (const pkg of parsedPackageJsons) {
+		Object.assign(allDeps, pkg.content?.dependencies || {}, pkg.content?.devDependencies || {})
 	}
+	Object.assign(allDeps, p.dependencies || {}, p.devDependencies || {})
 	const prodNodes = nodes.filter((n) => n.category === 'production' && !isNonProductionFile(n.path))
 
 	// Helper to find line & masked snippet for secrets
@@ -433,14 +434,71 @@ function evaluateProjectRules({
 		})
 	)
 
+	// Helper to check if a file exists in filesMap, inventory, or options
+	function hasFile(name) {
+		const target = name.toLowerCase()
+		for (const k of filesMap.keys()) {
+			const kLower = k.toLowerCase()
+			if (kLower === target || kLower.endsWith('/' + target)) return true
+		}
+		const inv = options?.inventory?.allFiles || options?.inventory?.largest || options?.allFiles || []
+		for (const item of inv) {
+			const p = typeof item === 'string' ? item : item?.path
+			if (p) {
+				const pLower = p.toLowerCase()
+				if (pLower === target || pLower.endsWith('/' + target)) return true
+			}
+		}
+		return false
+	}
+
 	// 3. Universal: Missing lockfile
-	const hasPackageJson = filesMap.has('package.json')
-	const hasLockfile =
-		filesMap.has('package-lock.json') ||
-		filesMap.has('yarn.lock') ||
-		filesMap.has('pnpm-lock.yaml') ||
-		filesMap.has('bun.lockb')
-	const missingLockfileCount = hasPackageJson && !hasLockfile && allFilePaths.length >= 4 ? 1 : 0
+	// Accept package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lockb, bun.lock, and Cargo/poetry/Pipfile locks for their stacks
+	const hasPackageJson = hasFile('package.json')
+	const hasNodeLock =
+		hasFile('package-lock.json') ||
+		hasFile('yarn.lock') ||
+		hasFile('pnpm-lock.yaml') ||
+		hasFile('bun.lockb') ||
+		hasFile('bun.lock')
+
+	const hasCargo = hasFile('Cargo.toml')
+	const hasCargoLock = hasFile('Cargo.lock')
+
+	const hasPipfile = hasFile('Pipfile')
+	const hasPipfileLock = hasFile('Pipfile.lock')
+
+	const hasPoetry =
+		hasFile('poetry.lock') ||
+		(hasFile('pyproject.toml') && (filesMap.get('pyproject.toml')?.text || '').includes('tool.poetry'))
+	const hasPoetryLock = hasFile('poetry.lock')
+
+	let missingLockfile = false
+	let missingWhy = 'Package lockfile is present and tracked.'
+	let missingFix = 'No action required.'
+	let missingEvidence = []
+
+	if (hasPackageJson && !hasNodeLock && allFilePaths.length >= 4) {
+		missingLockfile = true
+		missingWhy = 'No package lockfile was found in the repository root alongside package.json.'
+		missingFix = 'Generate and commit package-lock.json, pnpm-lock.yaml, yarn.lock, or bun.lock.'
+		missingEvidence = [{ file: 'package.json', line: 1, snippet: 'Missing lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, or bun.lock)' }]
+	} else if (hasCargo && !hasCargoLock && allFilePaths.length >= 4) {
+		missingLockfile = true
+		missingWhy = 'No Cargo.lock was found alongside Cargo.toml.'
+		missingFix = 'Generate and commit Cargo.lock.'
+		missingEvidence = [{ file: 'Cargo.toml', line: 1, snippet: 'Missing Cargo.lock' }]
+	} else if (hasPipfile && !hasPipfileLock && allFilePaths.length >= 4) {
+		missingLockfile = true
+		missingWhy = 'No Pipfile.lock was found alongside Pipfile.'
+		missingFix = 'Generate and commit Pipfile.lock.'
+		missingEvidence = [{ file: 'Pipfile', line: 1, snippet: 'Missing Pipfile.lock' }]
+	} else if (hasPoetry && !hasPoetryLock && allFilePaths.length >= 4) {
+		missingLockfile = true
+		missingWhy = 'No poetry.lock was found alongside pyproject.toml.'
+		missingFix = 'Generate and commit poetry.lock.'
+		missingEvidence = [{ file: 'pyproject.toml', line: 1, snippet: 'Missing poetry.lock' }]
+	}
 
 	findings.push(
 		createRuleResult({
@@ -448,17 +506,11 @@ function evaluateProjectRules({
 			name: 'Missing Package Lockfile',
 			severity: 'important',
 			dimension: 'hygiene',
-			why:
-				missingLockfileCount > 0
-					? 'No package lockfile was found in the repository root alongside package.json.'
-					: 'Package lockfile is present and tracked.',
-			fix:
-				missingLockfileCount > 0
-					? 'Generate and commit package-lock.json, pnpm-lock.yaml, or yarn.lock.'
-					: 'No action required.',
+			why: missingWhy,
+			fix: missingFix,
 			docsUrl: 'https://docs.npmjs.com/cli/v10/configuring-npm/package-lock-json',
-			evidence: missingLockfileCount > 0 ? [{ file: 'package.json', line: 1, snippet: 'Missing lockfile' }] : [],
-			count: missingLockfileCount,
+			evidence: missingEvidence,
+			count: missingLockfile ? 1 : 0,
 		})
 	)
 
@@ -788,42 +840,95 @@ function evaluateProjectRules({
 		)
 
 		// 13. Wildcard CORS
+		// Only fire for cors() with no options, origin: '*', origin: true, or an allowedOrigins/array that contains '*'. Resolve variable if defined in the same file.
+		function resolveVariableContainsWildcard(text, varName, seen = new Set()) {
+			if (!varName || seen.has(varName)) return false
+			seen.add(varName)
+			const declRegex = new RegExp(`(?:const|let|var)\\s+${varName}\\s*=\\s*([^;\\n]+)`, 'g')
+			let m
+			while ((m = declRegex.exec(text)) !== null) {
+				const expr = m[1].trim()
+				if (/['"]\*['"]/.test(expr) || expr === 'true') return true
+				const idents = expr.match(/[A-Za-z0-9_$]+/g) || []
+				for (const id of idents) {
+					if (id !== varName && !seen.has(id)) {
+						if (resolveVariableContainsWildcard(text, id, seen)) return true
+					}
+				}
+			}
+			return false
+		}
+
+		function checkWildcardCorsInFile(text) {
+			const hasCorsImport = /\b(require\s*\(\s*['"]cors['"]|from\s*['"]cors['"])/.test(text)
+			const hasHeader = /Access-Control-Allow-Origin['"]\s*,\s*['"]\*['"]/i.test(text)
+			if (!hasCorsImport && !hasHeader) return null
+
+			const lines = text.split(/\r?\n/)
+			// Check direct response headers
+			for (let i = 0; i < lines.length; i++) {
+				const l = lines[i]
+				if (/Access-Control-Allow-Origin['"]\s*,\s*['"]\*['"]/i.test(l)) {
+					return { line: i + 1, snippet: formatSnippet(l, 120) }
+				}
+			}
+
+			// Check cors(...)
+			const corsRegex = /\bcors\s*\(([^)]*)\)/g
+			let match
+			while ((match = corsRegex.exec(text)) !== null) {
+				const args = match[1].trim()
+				const upToMatch = text.slice(0, match.index)
+				const lineNum = upToMatch.split(/\r?\n/).length
+				const lineText = lines[lineNum - 1] || match[0]
+
+				if (/^\s*\/\//.test(lineText) || /^\s*\*/.test(lineText) || /^\s*const\s+\w+Regex\s*=/.test(lineText)) {
+					continue
+				}
+
+				// cors() or cors({})
+				if (!args || args === '' || args === '{}') {
+					return { line: lineNum, snippet: formatSnippet(lineText, 120) }
+				}
+
+				// origin: '*' or origin: "*"
+				if (/origin\s*:\s*['"]\*['"]/.test(args)) {
+					return { line: lineNum, snippet: formatSnippet(lineText, 120) }
+				}
+
+				// origin: true
+				if (/origin\s*:\s*true\b/.test(args)) {
+					return { line: lineNum, snippet: formatSnippet(lineText, 120) }
+				}
+
+				// origin: ['*', ...]
+				const arrMatch = args.match(/origin\s*:\s*\[([^\]]*)\]/)
+				if (arrMatch && /['"]\*['"]/.test(arrMatch[1])) {
+					return { line: lineNum, snippet: formatSnippet(lineText, 120) }
+				}
+
+				// origin: varName
+				const identMatch = args.match(/origin\s*:\s*([A-Za-z0-9_$]+)/)
+				if (identMatch) {
+					const varName = identMatch[1]
+					if (resolveVariableContainsWildcard(text, varName)) {
+						return { line: lineNum, snippet: formatSnippet(lineText, 120) }
+					}
+				}
+			}
+			return null
+		}
+
 		const wildcardCorsEvidence = []
 		for (const [filePath, fileData] of filesMap.entries()) {
 			if (isNonProductionFile(filePath) || !fileData.text) continue
 			if (!/\.[mc]?[jt]sx?$|\.vue$/.test(filePath)) continue
-			const text = fileData.text
-			if (
-				/cors\s*\(\s*\{\s*origin\s*:\s*['"]\*['"]/i.test(text) ||
-				/cors\s*\(\s*\)/.test(text) ||
-				/res\.header\s*\(\s*['"]Access-Control-Allow-Origin['"]\s*,\s*['"]\*['"]\)/i.test(text) ||
-				/res\.setHeader\s*\(\s*['"]Access-Control-Allow-Origin['"]\s*,\s*['"]\*['"]\)/i.test(text)
-			) {
-				const lines = text.split(/\r?\n/)
-				let line = 1
-				let snippet = ''
-				for (let i = 0; i < lines.length; i++) {
-					const l = lines[i]
-					if (
-						/app\.use\s*\(\s*cors/i.test(l) ||
-						/cors\s*\(\s*(?:\{\s*\}\s*)?\)/i.test(l) ||
-						/Access-Control-Allow-Origin/i.test(l) ||
-						/origin\s*:\s*['"]\*['"]/i.test(l)
-					) {
-						line = i + 1
-						snippet = formatSnippet(l, 120)
-						break
-					}
-				}
-				if (!snippet) {
-					const info = findLineAndSnippet(text, 'cors')
-					line = info.line
-					snippet = info.snippet
-				}
+			const corsFinding = checkWildcardCorsInFile(fileData.text)
+			if (corsFinding) {
 				wildcardCorsEvidence.push({
 					file: filePath,
-					line,
-					snippet,
+					line: corsFinding.line,
+					snippet: corsFinding.snippet,
 				})
 			}
 		}
@@ -861,9 +966,12 @@ function evaluateProjectRules({
 		if (!hasValidationLib) {
 			for (const r of profile.routes || []) {
 				const fileText = filesMap.get(r.file)?.text || ''
+				const hasValidationHelper =
+					/\b(validate\w*|schema\w*|parse\w*|sanitize\w*|assert\w*|check\w*)\b/i.test(fileText) ||
+					/\b(validate|schema|parse|check|assert|sanitize)\s*\(/i.test(fileText)
 				if (
 					(fileText.includes('req.body') || fileText.includes('req.query') || fileText.includes('req.params')) &&
-					!/validate\b|schema\b/i.test(fileText)
+					!hasValidationHelper
 				) {
 					unvalidatedRoutes.push({
 						file: r.file,
@@ -1315,47 +1423,7 @@ function evaluateProjectRules({
 			})
 		)
 
-		// 23. Missing __init__.py in package folders
-		const pyDirs = new Set()
-		for (const f of allFilePaths) {
-			if (f.endsWith('.py') && !isNonProductionFile(f)) {
-				const dir = path.posix.dirname(f)
-				if (dir !== '.' && !dir.startsWith('tests') && !dir.startsWith('test')) {
-					pyDirs.add(dir)
-				}
-			}
-		}
-		const missingInitDirs = []
-		for (const dir of pyDirs) {
-			const initPath = path.posix.join(dir, '__init__.py')
-			if (!filesMap.has(initPath)) {
-				missingInitDirs.push({
-					file: dir,
-					line: 1,
-					snippet: `Missing ${initPath}`,
-				})
-			}
-		}
 
-		findings.push(
-			createRuleResult({
-				id: 'python-missing-init-py',
-				name: 'Missing __init__.py in Python Package Directory',
-				severity: 'nice-to-have',
-				dimension: 'maintainability',
-				why:
-					missingInitDirs.length > 0
-						? `Directory "${missingInitDirs[0].file}" contains Python modules but lacks an __init__.py file.`
-						: 'Python package directories contain __init__.py files.',
-				fix:
-					missingInitDirs.length > 0
-						? `Add an empty __init__.py file inside "${missingInitDirs[0].file}".`
-						: 'No action required.',
-				docsUrl: 'https://docs.python.org/3/tutorial/modules.html#packages',
-				evidence: missingInitDirs,
-				count: missingInitDirs.length,
-			})
-		)
 	} else {
 		// Push inactive Python rules
 		findings.push(createRuleResult({
@@ -1388,16 +1456,7 @@ function evaluateProjectRules({
 			docsUrl: 'https://flask.palletsprojects.com/en/stable/quickstart/#debug-mode',
 			count: 0,
 		}))
-		findings.push(createRuleResult({
-			id: 'python-missing-init-py',
-			name: 'Missing __init__.py in Python Package Directory',
-			severity: 'nice-to-have',
-			dimension: 'maintainability',
-			why: 'Project does not use Python.',
-			fix: 'No action required.',
-			docsUrl: 'https://docs.python.org/3/tutorial/modules.html#packages',
-			count: 0,
-		}))
+
 	}
 
 	// 24. Known Vulnerabilities from OSV

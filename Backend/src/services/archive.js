@@ -364,6 +364,24 @@ function parseArchiveStream(inputStream, options = {}) {
 					byLanguage['binary'] = (byLanguage['binary'] || 0) + 1
 					const folder = getTopFolder(cleanPath)
 					byFolder[folder] = (byFolder[folder] || 0) + 1
+					// Preserve lockfiles in files map so rules recognize their presence
+					const baseLower = path.posix.basename(cleanPath).toLowerCase()
+					if (
+						baseLower === 'pnpm-lock.yaml' ||
+						baseLower === 'package-lock.json' ||
+						baseLower === 'yarn.lock' ||
+						baseLower === 'bun.lock' ||
+						baseLower === 'bun.lockb' ||
+						baseLower === 'cargo.lock' ||
+						baseLower === 'poetry.lock' ||
+						baseLower === 'pipfile.lock'
+					) {
+						files.set(cleanPath, {
+							size: fileSize,
+							lang,
+							text: Buffer.concat(chunks).toString('utf8'),
+						})
+					}
 					return next()
 				}
 
@@ -422,6 +440,7 @@ function parseArchiveStream(inputStream, options = {}) {
 				totalFiles,
 				analyzedFiles: files.size,
 				skipped,
+				allFiles: allFilesList.map((f) => f.path),
 			}
 
 			resolve({
