@@ -8,7 +8,7 @@ const rule = {
 	category: 'structure',
 	check(ctx) {
 		const { filePaths } = normalizeContext(ctx)
-		const lockfiles = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'].filter((fileName) => filePaths.has(fileName))
+		const lockfiles = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'bun.lock'].filter((fileName) => filePaths.has(fileName))
 
 		if (lockfiles.length === 1) {
 			return {

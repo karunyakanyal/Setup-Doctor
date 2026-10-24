@@ -1,3 +1,38 @@
+export function formatCapReasonPlainWords(capReason, grade = 'B', dimension = null) {
+  if (!capReason || typeof capReason !== 'string') return null
+  let text = capReason.trim()
+  text = text.replace(/\s*\([a-z0-9_-]+\)/gi, '')
+  if (text.startsWith('Capped at')) return text
+
+  if (text.includes(':')) {
+    const parts = text.split(':')
+    const dim = parts[0].trim()
+    const reason = parts.slice(1).join(':').trim()
+    const cleanReason = (reason.toLowerCase() === 'missing-tests' || reason.toLowerCase() === 'no-test-script')
+      ? 'no automated tests'
+      : (reason.toLowerCase() === 'missing-license' ? 'missing license' : reason.toLowerCase())
+    return `Capped at ${grade} by ${dim}: ${cleanReason}`
+  }
+
+  if (text.includes('cycle')) {
+    return `Capped at ${grade || 'B'} by Reliability: ${text}`
+  }
+  if (text.includes('undeclared')) {
+    return `Capped at ${grade || 'C'} by Security: ${text}`
+  }
+  if (text.includes('secret') || text.includes('vulnerabilit')) {
+    return `Capped at ${grade || 'C'} by Security: ${text}`
+  }
+  if (text.toLowerCase().includes('truncated') || text.toLowerCase().includes('failed')) {
+    return `Capped at ${grade || 'B'} by Reliability: ${text}`
+  }
+  if (text.includes('test')) {
+    return `Capped at ${grade || 'C'} by Maintainability: no automated tests`
+  }
+  const dim = dimension || (grade === 'C' ? 'Maintainability' : 'Reliability')
+  return `Capped at ${grade} by ${dim}: ${text.toLowerCase()}`
+}
+
 import { normalizeStatus } from './diagnosisFormatters.js'
 
 const KNOWN_CAPITALIZATIONS = {
@@ -293,14 +328,14 @@ export function calculateScoreAndGrade(rules = [], options = {}) {
       finalGrade = 'C'
       finalScore = Math.min(finalScore, 79)
       capReason = undeclaredCount > 0
-        ? `${undeclaredCount} undeclared ${undeclaredCount === 1 ? 'package' : 'packages'}`
-        : 'failed critical diagnostic'
+        ? `Capped at C by Security: ${undeclaredCount} undeclared ${undeclaredCount === 1 ? 'package' : 'packages'}`
+        : 'Capped at C by Reliability: failed critical diagnostic'
     }
   } else if (runtimeCyclesCount > 0) {
     if (finalGrade === 'A' || finalGrade === 'B') {
       finalGrade = 'B'
       finalScore = Math.min(finalScore, 89)
-      capReason = `${runtimeCyclesCount} runtime ${runtimeCyclesCount === 1 ? 'cycle' : 'cycles'}`
+      capReason = `Capped at B by Reliability: ${runtimeCyclesCount} runtime ${runtimeCyclesCount === 1 ? 'cycle' : 'cycles'}`
     }
   } else if (isTruncated || isFailedScan) {
     if (finalGrade === 'A' || finalGrade === 'B') {
@@ -588,7 +623,6 @@ export function getHealthVerdict({
     }
   }
 
-  const gradeText = finalGrade ? (capReason ? `Grade ${finalGrade} (capped: ${capReason})` : `Grade ${finalGrade}`) : null
 
   // Verdict rules (production only):
   // - Needs attention: any failed critical diagnostic, or >= 1 undeclared package, or grade C/D/F.
@@ -654,15 +688,27 @@ export function getHealthVerdict({
     whySentence = `Found ${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}.`
   }
 
+  // Compute summary line from merged findings: e.g. "1 critical, 2 important, 6 nice-to-have", never "5 setup warnings"
+  const mergedForSummary = buildMergedFindings({ diagnostics, deepScanData, includeNonProd })
+  const critCount = mergedForSummary.filter((f) => f.severity === 'critical').length
+  const impCount = mergedForSummary.filter((f) => f.severity === 'important').length
+  const niceCount = mergedForSummary.filter((f) => f.severity === 'nice-to-have').length
+  const sumParts = []
+  if (critCount > 0) sumParts.push(`${critCount} critical`)
+  if (impCount > 0) sumParts.push(`${impCount} important`)
+  if (niceCount > 0) sumParts.push(`${niceCount} nice-to-have`)
+  const summaryLine = sumParts.length > 0 ? sumParts.join(', ') : 'All checks passed with no issues found.'
+
   return {
     label: verdict,
     icon,
     tone,
     score: finalScore,
     grade: finalGrade,
-    capReason,
-    gradeText,
+    capReason: formatCapReasonPlainWords(capReason, finalGrade),
+    gradeText: formatCapReasonPlainWords(capReason, finalGrade) || (finalGrade ? `Grade ${finalGrade}` : null),
     showScore: true,
+    summaryLine,
     whySentence,
     counts: {
       critical: prodErrors + undeclaredCount,
@@ -811,6 +857,33 @@ export function buildMergedFindings({
         : shortest.join(' → ')
       const targetFile = shortest[0] || files[0] || 'cycle'
 
+      const hub = cycle?.hub || (deepScanData?.summary?.cycles && deepScanData.summary.cycles[idx]?.hub) || deepScanData?.summary?.hub || null
+      let cycleWhy = 'Circular imports cause tight coupling and can evaluate modules before their exports are initialized.'
+      let cycleFix
+      const nFiles = hub?.totalFilesInCycle || files.length || shortest.length || 2
+      if (hub && hub.file && hub.symbol && hub.count) {
+        cycleWhy = `${hub.count} files import ${hub.symbol} from ${hub.file}.`
+        cycleFix = `Move ${hub.symbol} to a new file (e.g. ${hub.suggestedFile || 'src/context/AppContext.jsx'}); this one change breaks the loop through all ${nFiles} files.`
+      } else {
+        cycleFix = `Refactor ${targetFile} or extract shared types/functions into a separate module; this one change breaks the loop through all ${nFiles} files.`
+      }
+
+      // Evidence: real import lines, never placeholders like "cycle step 1"
+      let cycleEv = []
+      if (Array.isArray(cycle?.evidence) && cycle.evidence.length > 0) {
+        cycleEv = cycle.evidence
+      } else {
+        for (let i = 0; i < shortest.length; i++) {
+          const from = shortest[i]
+          const to = shortest[(i + 1) % shortest.length]
+          cycleEv.push({
+            file: from,
+            line: 1,
+            snippet: `import from '${to}'`,
+          })
+        }
+      }
+
       merged.push({
         id: `runtime-cycle-${idx}`,
         topic: 'cycles',
@@ -818,9 +891,9 @@ export function buildMergedFindings({
         fixTitle: `Break circular dependency: ${loopStr}`,
         severity: 'critical',
         dimension: 'reliability',
-        why: 'Circular imports cause tight coupling and can evaluate modules before their exports are initialized.',
-        fix: `Refactor ${targetFile} or extract shared types/functions into a separate module.`,
-        evidence: shortest.map((f, i) => ({ file: f, line: 1, snippet: `cycle step ${i + 1}` })),
+        why: cycleWhy,
+        fix: cycleFix,
+        evidence: cycleEv,
         count: 1,
         action: {
           type: 'file',
@@ -923,8 +996,8 @@ export function buildMergedFindings({
       count: 1,
       action: {
         type: 'command',
-        value: 'npm test',
-        label: 'npm test',
+        value: 'npm pkg set scripts.test="node --test"',
+        label: 'npm pkg set scripts.test="node --test"',
       },
       docsUrl: 'https://docs.npmjs.com/cli/v10/using-npm/scripts',
     })
@@ -999,6 +1072,7 @@ export function buildMergedFindings({
   const ciDiagFailing = [
     diagMap.get('missing-ci'),
     diagMap.get('no-ci-workflow'),
+    diagMap.get('missing-ci-config'),
   ].filter((d) => d && normalizeStatus(d.status) !== 'pass')
   const ciRawFailing = rawMap.get('no-ci')?.count > 0
 

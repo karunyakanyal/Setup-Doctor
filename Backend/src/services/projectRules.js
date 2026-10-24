@@ -142,11 +142,12 @@ function extractProjectRoutes(filesMap = new Map(), isNonProductionFile = () => 
 
 		if (isPy) {
 			// Python imports: from foo.bar import baz [as qux]
-			const fromImportRegex = /from\s+([\w.]+)\s+import\s+([^#\n]+)/g
+			const fromImportRegex = /(?:^|\n)\s*from\s+([\w.]+)\s+import\s+(?:\(([\s\S]*?)\)|([^#\n]+))/g
 			let fm
 			while ((fm = fromImportRegex.exec(text)) !== null) {
 				const modPath = fm[1]
-				const items = fm[2].split(',')
+				const rawItems = fm[2] || fm[3] || ''
+				const items = rawItems.split(',')
 				for (const item of items) {
 					const parts = item.trim().split(/\s+as\s+/)
 					const name = parts[0]?.trim()
@@ -162,7 +163,7 @@ function extractProjectRoutes(filesMap = new Map(), isNonProductionFile = () => 
 			}
 
 			// import foo.bar [as qux]
-			const importRegex = /import\s+([\w.]+)(?:\s+as\s+(\w+))?/g
+			const importRegex = /(?:^|\n)\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?/g
 			let im
 			while ((im = importRegex.exec(text)) !== null) {
 				const modPath = im[1]
@@ -174,7 +175,7 @@ function extractProjectRoutes(filesMap = new Map(), isNonProductionFile = () => 
 			}
 
 			// FastAPI APIRouter(prefix="/...")
-			const pyRouterRegex = /(\w+)\s*=\s*(?:fastapi\.)?APIRouter\s*\(([^)]*)\)/g
+			const pyRouterRegex = /(\w+)\s*=\s*(?:fastapi\.)?APIRouter\s*\(([\s\S]*?)\)/g
 			let rm
 			while ((rm = pyRouterRegex.exec(text)) !== null) {
 				const varName = rm[1]
@@ -191,7 +192,7 @@ function extractProjectRoutes(filesMap = new Map(), isNonProductionFile = () => 
 			}
 
 			// FastAPI include_router / Flask register_blueprint
-			const incRegex = /(\w+)\.include_router\s*\(([^)]+)\)/g
+			const incRegex = /(\w+)\.include_router\s*\(([\s\S]*?)\)/g
 			let incm
 			while ((incm = incRegex.exec(text)) !== null) {
 				const parentVar = incm[1]
@@ -199,9 +200,18 @@ function extractProjectRoutes(filesMap = new Map(), isNonProductionFile = () => 
 				const pMatch = /prefix\s*=\s*['"]([^'"]+)['"]/.exec(args)
 				const mountPrefix = pMatch ? pMatch[1] : ''
 
-				const targetMatch = /(?:router\s*=\s*)?([\w.]+)/.exec(args)
-				if (targetMatch) {
-					const fullTarget = targetMatch[1]
+				let fullTarget = ''
+				const explicitMatch = /router\s*=\s*([\w.]+)/.exec(args)
+				if (explicitMatch) {
+					fullTarget = explicitMatch[1]
+				} else {
+					const firstArg = args.split(',')[0].trim()
+					if (!firstArg.includes('=')) {
+						const tm = /([\w.]+)/.exec(firstArg)
+						if (tm) fullTarget = tm[1]
+					}
+				}
+				if (fullTarget) {
 					const [modOrVar, prop] = fullTarget.split('.')
 					let targetFile = filePath
 					let targetVar = modOrVar

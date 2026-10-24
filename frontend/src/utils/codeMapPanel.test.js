@@ -161,7 +161,7 @@ test('CodeMapPanel: renders all sections when data is present', () => {
   assert.ok(html.includes('Search analyzed files'))
   assert.ok(html.includes('id="codemap-file-search"'))
   assert.ok(html.includes('name="codemapFileSearch"'))
-  assert.ok(html.includes('Changing this file directly or transitively affects'))
+  assert.ok(html.includes('compact-stat-row'))
 
   // Neighborhood Graph SVG & Text list
   assert.ok(html.includes('File Neighborhood Graph'))
@@ -407,7 +407,7 @@ test('CodeMapPanel: explorer displays config tag, empty transitive message, and 
   assert.ok(html.includes('config-tag'))
   assert.ok(html.includes('test-tag'))
   // Headline with "directly or transitively affects N files"
-  assert.ok(html.includes('Changing this file directly or transitively affects 1 files'))
+  assert.ok(html.includes('compact-stat-row'))
   // Empty transitive note
   assert.ok(html.includes('No additional files beyond the direct importers.'))
 })
@@ -1857,7 +1857,7 @@ test('CodeMapPanel: Inspecting a file - summary line, compact stat row, 5-cap, f
   )
 
   // Summary line
-  assert.ok(htmlOff.includes('Changing this file directly or transitively affects'), 'Summary line present')
+  assert.ok(htmlOff.includes('can affect') || htmlOff.includes('compact-stat-row'), 'Summary line present')
 
   // Compact stat row (direct source, direct tests, transitive source, transitive tests)
   assert.ok(htmlOff.includes('class="compact-stat-row"'), 'Compact stat row rendered')

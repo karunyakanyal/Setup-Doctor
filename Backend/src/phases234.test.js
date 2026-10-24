@@ -1,11 +1,11 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
 const { buildGraph, clearPreviousScans, getPreviousScan, setPreviousScan } = require('./services/graph')
-const { maskSecret } = require('./services/projectRules')
+const { maskSecret, extractProjectRoutes } = require('./services/projectRules')
 const { queryOsvVulnerabilities, clearOsvCache } = require('./services/osv')
 const { evaluateGithubHygieneSync, evaluateGithubHygiene } = require('./services/githubHygiene')
 const { calculateDimensionsAndGrade } = require('./services/dimensions')
-const { handleBadge } = require('./routes/repository')
+const { handleBadge, getBadgeMarkdown, getBadgeUrl } = require('./routes/repository')
 
 test('Phase 2 & 4: Universal Rule 1 - committed-secrets (positive and negative, and secret masking)', () => {
 	// Secret masking helper check
@@ -702,4 +702,144 @@ export declare function doSomething(): void;
 	}
 	const resultDts = buildGraph(filesDts)
 	assert.ok(!resultDts.summary.orphans.includes('src/global.d.ts'))
+})
+
+test('FastAPI routes: resolves full path by applying include_router(prefix=...) and APIRouter(prefix=...) and handles multi-line/nested imports', () => {
+	const files = new Map([
+		[
+			'backend/main.py',
+			{
+				text: `
+from fastapi import FastAPI
+from app.routers import auth, diagnosis
+from app.middleware.auth import AuthMiddleware
+
+app = FastAPI()
+app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(diagnosis.router, prefix="/api/diagnosis")
+`,
+			},
+		],
+		[
+			'backend/app/middleware/auth.py',
+			{
+				text: `
+class AuthMiddleware:
+    pass
+`,
+			},
+		],
+		[
+			'backend/app/routers/auth.py',
+			{
+				text: `
+from fastapi import APIRouter
+router = APIRouter()
+
+@router.post("/register")
+def register():
+    return {}
+
+@router.post("/login")
+def login():
+    return {}
+
+@router.get("/me")
+def me():
+    return {}
+`,
+			},
+		],
+		[
+			'backend/app/routers/diagnosis.py',
+			{
+				text: `
+from fastapi import APIRouter
+router = APIRouter(prefix="/v1")
+
+@router.post("/analyze")
+def analyze():
+    return {}
+`,
+			},
+		],
+	])
+
+	const res = extractProjectRoutes(files)
+	assert.ok(res.routes.length >= 4)
+
+	const registerRoute = res.routes.find((r) => r.path === '/api/auth/register')
+	assert.ok(registerRoute, 'POST /register under include_router(prefix="/api/auth") must resolve to /api/auth/register')
+	assert.equal(registerRoute.method, 'POST')
+
+	const loginRoute = res.routes.find((r) => r.path === '/api/auth/login')
+	assert.ok(loginRoute, 'POST /login under include_router(prefix="/api/auth") must resolve to /api/auth/login')
+
+	const meRoute = res.routes.find((r) => r.path === '/api/auth/me')
+	assert.ok(meRoute, 'GET /me must resolve to /api/auth/me')
+
+	const analyzeRoute = res.routes.find((r) => r.path === '/api/diagnosis/v1/analyze')
+	assert.ok(analyzeRoute, 'APIRouter(prefix="/v1") combined with include_router(prefix="/api/diagnosis") must resolve to /api/diagnosis/v1/analyze')
+})
+
+test('Badge README snippet: always produces an absolute URL using PUBLIC_BASE_URL or request host', async () => {
+	// 1. Using request host fallback
+	const reqWithHost = {
+		params: { owner: 'vitejs', repo: 'vite' },
+		get: (h) => (h === 'host' ? 'example.com:3000' : null),
+		protocol: 'http',
+		headers: { host: 'example.com:3000' },
+	}
+	const snippetHost = getBadgeMarkdown('vitejs', 'vite', reqWithHost)
+	assert.ok(snippetHost.startsWith('[![SetupDoctor Grade](http://example.com:3000/api/badge/vitejs/vite)]'))
+	assert.ok(snippetHost.includes('https://github.com/vitejs/vite'))
+	assert.ok(!snippetHost.includes('(/api/badge/'), 'Must not contain relative badge URL')
+
+	// 2. Using PUBLIC_BASE_URL environment variable
+	const origEnv = process.env.PUBLIC_BASE_URL
+	try {
+		process.env.PUBLIC_BASE_URL = 'https://badge.setupdoctor.io'
+		const snippetEnv = getBadgeMarkdown('Amanyadav0556', 'Skinveda.ai')
+		assert.ok(snippetEnv.startsWith('[![SetupDoctor Grade](https://badge.setupdoctor.io/api/badge/Amanyadav0556/Skinveda.ai)]'))
+		assert.ok(snippetEnv.includes('https://github.com/Amanyadav0556/Skinveda.ai'))
+
+		// 3. handleBadge route handler sets absolute X-Markdown-Snippet header
+		let capturedHeaders = {}
+		let capturedBody = null
+		const res = {
+			setHeader: (k, v) => { capturedHeaders[k] = v },
+			status: () => res,
+			send: (b) => { capturedBody = b },
+			json: (d) => { capturedBody = d },
+		}
+		await handleBadge({ params: { owner: 'Amanyadav0556', repo: 'Skinveda.ai' }, headers: {} }, res)
+		assert.ok(capturedHeaders['X-Markdown-Snippet'])
+		assert.ok(capturedHeaders['X-Markdown-Snippet'].startsWith('[![SetupDoctor Grade](https://badge.setupdoctor.io/api/badge/'))
+	} finally {
+		if (origEnv !== undefined) process.env.PUBLIC_BASE_URL = origEnv
+		else delete process.env.PUBLIC_BASE_URL
+	}
+})
+
+test('Cycle fix text: states "this one change breaks the loop through all N files"', () => {
+	const files = {
+		'package.json': JSON.stringify({ name: 'cycle-hub-app' }),
+		'src/App.jsx': `
+import Landing from './pages/Landing';
+export function useApp() { return {}; }
+`,
+		'src/pages/Landing.jsx': `
+import { useApp } from '../App';
+export default function Landing() {}
+`,
+		'src/pages/Other.jsx': `
+import { useApp } from '../App';
+export default function Other() {}
+`,
+	}
+	const result = buildGraph(files)
+	const cycleRule = result.summary.allRules.find((r) => r.id === 'runtime-cycles')
+	assert.ok(cycleRule)
+	assert.ok(cycleRule.fix.includes('this one change breaks the loop through all'))
+	assert.ok(/this one change breaks the loop through all \d+ files/.test(cycleRule.fix))
 })

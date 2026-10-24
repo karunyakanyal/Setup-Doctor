@@ -1235,6 +1235,8 @@ function detectSccCycles(nodeSubset, edgeList, nodes, pathToId) {
 							files: this.files,
 							shortest: this.shortest,
 							hint: this.hint,
+							evidence: this.evidence,
+							hub: this.hub,
 						}
 					},
 				})
@@ -1509,26 +1511,125 @@ function computeProductionRules({
 	}
 
 	const cycleEvidence = []
-	for (const cycle of runtimeCyclesList.slice(0, 3)) {
+	let detectedHub = null
+
+	for (const cycle of runtimeCyclesList) {
 		const shortest = (Array.isArray(cycle.shortest) && cycle.shortest.length > 0)
 			? cycle.shortest
 			: (Array.isArray(cycle) ? cycle : (cycle.files || []))
-		const lastNode = shortest[shortest.length - 1] || shortest[0]
-		const firstNode = shortest[0] || lastNode
-		let ev = findClosingImportLine(lastNode, firstNode)
-		if (ev.line === 1 && shortest.length > 1) {
-			const alt = findClosingImportLine(firstNode, shortest[1])
-			if (alt.line !== 1) ev = alt
+		const hopsEvidence = []
+		if (shortest.length > 0) {
+			for (let i = 0; i < shortest.length; i++) {
+				const fromFile = shortest[i]
+				const toFile = shortest[(i + 1) % shortest.length]
+				const ev = findClosingImportLine(fromFile, toFile)
+				hopsEvidence.push(ev)
+			}
 		}
-		cycleEvidence.push(ev)
+		cycle.evidence = hopsEvidence
+		if (cycleEvidence.length < 10) {
+			cycleEvidence.push(...hopsEvidence)
+		}
+
+		// Hub detection
+		const candidateFiles = Array.isArray(cycle.files) && cycle.files.length > 0
+			? cycle.files
+			: shortest
+		let bestHubForCycle = null
+		let maxImporters = 0
+
+		for (const candFile of candidateFiles) {
+			const candBase = path.posix.basename(candFile, path.posix.extname(candFile))
+			const symbolCounts = new Map()
+			let totalImporters = 0
+
+			for (const [filePath, fileData] of filesMap.entries()) {
+				if (filePath === candFile || !fileData?.text) continue
+				const text = fileData.text
+				const lines = text.split(/\r?\n/)
+				let importsCand = false
+				for (const line of lines) {
+					if (
+						(/\bimport\b|\brequire\b/.test(line)) &&
+						(line.includes(candBase) || line.includes(candFile))
+					) {
+						importsCand = true
+						const namedMatch = line.match(/import\s*\{([^}]+)\}/)
+						if (namedMatch) {
+							const names = namedMatch[1].split(',').map((s) => s.trim().split(/\s+as\s+/)[0]).filter(Boolean)
+							for (const name of names) {
+								symbolCounts.set(name, (symbolCounts.get(name) || 0) + 1)
+							}
+						} else {
+							const defaultMatch = line.match(/import\s+([\w$]+)\s+from/)
+							if (defaultMatch) {
+								const dName = defaultMatch[1].trim()
+								symbolCounts.set(dName, (symbolCounts.get(dName) || 0) + 1)
+							}
+						}
+					}
+				}
+				if (importsCand) {
+					totalImporters++
+				}
+			}
+
+			let topSymbol = null
+			let topCount = 0
+			for (const [sym, cnt] of symbolCounts.entries()) {
+				if (cnt > topCount) {
+					topCount = cnt
+					topSymbol = sym
+				}
+			}
+
+			if (topCount >= 2 && topCount > maxImporters) {
+				maxImporters = topCount
+				const ext = path.posix.extname(candFile) || '.jsx'
+				const dir = path.posix.dirname(candFile)
+				let suggestedFile
+				if (candFile === 'src/App.jsx' || candFile.endsWith('/App.jsx') || candFile === 'App.jsx') {
+					suggestedFile = 'src/context/AppContext.jsx'
+				} else if (topSymbol.startsWith('use') || topSymbol.toLowerCase().includes('context')) {
+					const cleanName = topSymbol.startsWith('use') ? topSymbol.slice(3) : topSymbol
+					suggestedFile = path.posix.join(dir, 'context', `${cleanName}Context${ext}`)
+				} else {
+					suggestedFile = path.posix.join(dir, `${topSymbol}${ext}`)
+				}
+
+				bestHubForCycle = {
+					file: candFile,
+					symbol: topSymbol,
+					count: topCount,
+					suggestedFile,
+					brokenCyclesCount: 1,
+					totalFilesInCycle: candidateFiles.length,
+					sentence: `${topCount} files import ${topSymbol} from ${candFile}`,
+				}
+			}
+		}
+
+		if (bestHubForCycle) {
+			cycle.hub = bestHubForCycle
+			if (!detectedHub || bestHubForCycle.count > detectedHub.count) {
+				detectedHub = bestHubForCycle
+			}
+		}
 	}
-	const firstCycleShortest = runtimeCyclesList[0]?.shortest || runtimeCyclesList[0]?.files || []
-	const cycleWhy = runtimeCyclesList.length > 0
-		? `The production file "${firstCycleShortest[0] || 'file'}" forms a circular dependency loop with "${firstCycleShortest[1] || 'dependency'}".`
-		: 'No circular dependencies detected in production code.'
-	const cycleFix = runtimeCyclesList.length > 0
-		? `Refactor "${firstCycleShortest[0] || 'file'}" or extract shared logic into a separate module to break the cycle.`
-		: 'No action required.'
+
+	let cycleWhy = 'No circular dependencies detected in production code.'
+	let cycleFix = 'No action required.'
+
+	if (detectedHub) {
+		const nFiles = detectedHub.totalFilesInCycle || (runtimeCyclesList[0]?.files?.length || runtimeCyclesList[0]?.shortest?.length || 2)
+		cycleWhy = `${detectedHub.count} files import ${detectedHub.symbol} from ${detectedHub.file}.`
+		cycleFix = `Move ${detectedHub.symbol} to a new file (e.g. ${detectedHub.suggestedFile}); this one change breaks the loop through all ${nFiles} files.`
+	} else if (runtimeCyclesList.length > 0) {
+		const firstCycleShortest = runtimeCyclesList[0]?.shortest || runtimeCyclesList[0]?.files || []
+		const nFiles = runtimeCyclesList[0]?.files?.length || runtimeCyclesList[0]?.shortest?.length || firstCycleShortest.length || 2
+		cycleWhy = `The production file "${firstCycleShortest[0] || 'file'}" forms a circular dependency loop with "${firstCycleShortest[1] || 'dependency'}".`
+		cycleFix = `Refactor "${firstCycleShortest[0] || 'file'}" or extract shared logic into a separate module; this one change breaks the loop through all ${nFiles} files.`
+	}
 
 	const runtimeCyclesRule = createRuleResult({
 		id: 'runtime-cycles',

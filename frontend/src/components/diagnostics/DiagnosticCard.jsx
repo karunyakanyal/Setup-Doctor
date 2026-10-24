@@ -2,26 +2,11 @@ import { useState } from 'react'
 import { getCopyableFix, normalizeStatus } from '../../utils/diagnosisFormatters.js'
 import { isDiagnosticSavedInVault } from '../../utils/bugVaultData.js'
 
-function getWhyItMatters(diagnostic, status) {
+function getWhyItMatters(diagnostic) {
   if (typeof diagnostic.why === 'string' && diagnostic.why.trim()) {
     return diagnostic.why.trim()
   }
-  if (status === 'pass') {
-    return 'Consistent configuration prevents regressions and maintains project health.'
-  }
-  if (diagnostic.category === 'Dependencies') {
-    return 'Dependencies must be declared, pinned, and kept in sync to prevent build breakages and security vulnerabilities.'
-  }
-  if (diagnostic.category === 'Configuration') {
-    return 'Misconfigured tool files can cause build inconsistencies, unexpected environment behavior, or developer setup errors.'
-  }
-  if (diagnostic.category === 'Scripts') {
-    return 'Standardized scripts ensure automated workflows, CI pipelines, and contributors can run builds and tests reliably.'
-  }
-  if (diagnostic.category === 'Environment') {
-    return 'Environment mismatches across Node versions or package managers lead to subtle runtime failures.'
-  }
-  return 'Addressing setup discrepancies early prevents unexpected build failures and improves developer productivity.'
+  return null
 }
 
 function DiagnosticCard({
@@ -56,6 +41,7 @@ function DiagnosticCard({
   )
   const fixDescription = typeof diagnostic.fix?.description === 'string' ? diagnostic.fix.description.trim() : null
   const whyItMatters = getWhyItMatters(diagnostic, status)
+  const hasHowToFix = Boolean(fixDescription || copyableFix || diagnostic.recommendation)
 
   const isSavedInVault = isDiagnosticSavedInVault(bugs, repositoryName, diagnostic)
 
@@ -128,86 +114,82 @@ function DiagnosticCard({
             <p className="diagnostic-message-text">{diagnostic.message}</p>
           </div>
 
-          <div className="finding-part finding-why">
-            <strong className="finding-part-label">Why it matters</strong>
-            <p className="finding-why-text">{whyItMatters}</p>
-          </div>
+          {whyItMatters && (
+            <div className="finding-part finding-why">
+              <strong className="finding-part-label">Why it matters</strong>
+              <p className="finding-why-text">{whyItMatters}</p>
+            </div>
+          )}
 
-          <div className="finding-part finding-how">
-            <strong className="finding-part-label">How to fix it</strong>
+          {hasHowToFix && (
+            <div className="finding-part finding-how">
+              <strong className="finding-part-label">How to fix it</strong>
 
-            {fixDescription && (
-              <p className="diagnostic-fix-description">
-                <strong>Suggested fix:</strong> {fixDescription}
-              </p>
-            )}
+              {fixDescription && (
+                <p className="diagnostic-fix-description">
+                  <strong>Suggested fix:</strong> {fixDescription}
+                </p>
+              )}
 
-            {copyableFix && (
-              <div className="diagnostic-fix-block">
-                <div className="fix-block-header">
-                  <span className="fix-type-badge">
-                    {copyableFix.type === 'command' ? 'Terminal Command' : 'Configuration Snippet'}
-                  </span>
+              {copyableFix && (
+                <div className="diagnostic-fix-block">
+                  <div className="fix-block-header">
+                    <span className="fix-type-badge">
+                      {copyableFix.type === 'command' ? 'Terminal Command' : 'Configuration Snippet'}
+                    </span>
 
-                  <button
-                    type="button"
-                    className="fix-toggle-button"
-                    onClick={() => setIsFixExpanded((prev) => !prev)}
-                    aria-expanded={isFixExpanded}
-                  >
-                    {isFixExpanded ? 'Collapse' : 'Expand'}
-                  </button>
-                </div>
-
-                {isFixExpanded && (
-                  <div className="fix-content-wrapper">
-                    <pre
-                      className={`fix-code-pre ${copyableFix.type === 'command' ? 'is-command' : 'is-snippet'}`}
-                      tabIndex={0}
-                      aria-label={copyableFix.type === 'command' ? 'Terminal command to run' : 'Configuration code snippet to add'}
+                    <button
+                      type="button"
+                      className="fix-toggle-button"
+                      onClick={() => setIsFixExpanded((prev) => !prev)}
+                      aria-expanded={isFixExpanded}
                     >
-                      {copyableFix.type === 'command' && <span className="shell-prompt" aria-hidden="true">$ </span>}
-                      <code>{copyableFix.content}</code>
-                    </pre>
-
-                    <div className="fix-actions">
-                      <button
-                        type="button"
-                        className={`btn-secondary fix-copy-btn ${copyState === 'copied' ? 'is-copied' : ''}`}
-                        onClick={() => handleCopy(copyableFix.content)}
-                        aria-label={`Copy ${copyableFix.type === 'command' ? 'command' : 'snippet'} to clipboard`}
-                      >
-                        {copyState === 'copied'
-                          ? '✓ Copied'
-                          : copyState === 'error'
-                          ? 'Select text manually'
-                          : copyableFix.type === 'command'
-                          ? 'Copy Command'
-                          : 'Copy Snippet'}
-                      </button>
-
-                      <span className="copy-feedback-sr" aria-live="polite">
-                        {copyState === 'copied' && 'Copied to clipboard'}
-                        {copyState === 'error' && 'Clipboard copy failed. Please select text manually.'}
-                      </span>
-                    </div>
+                      {isFixExpanded ? 'Collapse' : 'Expand'}
+                    </button>
                   </div>
-                )}
-              </div>
-            )}
 
-            {!fixDescription && !copyableFix && diagnostic.recommendation && (
-              <p className="diagnostic-fix-description">{diagnostic.recommendation}</p>
-            )}
+                  {isFixExpanded && (
+                    <div className="fix-content-wrapper">
+                      <pre
+                        className={`fix-code-pre ${copyableFix.type === 'command' ? 'is-command' : 'is-snippet'}`}
+                        tabIndex={0}
+                        aria-label={copyableFix.type === 'command' ? 'Terminal command to run' : 'Configuration code snippet to add'}
+                      >
+                        {copyableFix.type === 'command' && <span className="shell-prompt" aria-hidden="true">$ </span>}
+                        <code>{copyableFix.content}</code>
+                      </pre>
 
-            {!fixDescription && !copyableFix && !diagnostic.recommendation && (
-              <p className="diagnostic-fix-description">
-                {status === 'pass'
-                  ? 'No action required. This check is properly configured.'
-                  : 'Review the issue details above and update project settings accordingly.'}
-              </p>
-            )}
-          </div>
+                      <div className="fix-actions">
+                        <button
+                          type="button"
+                          className={`btn-secondary fix-copy-btn ${copyState === 'copied' ? 'is-copied' : ''}`}
+                          onClick={() => handleCopy(copyableFix.content)}
+                          aria-label={`Copy ${copyableFix.type === 'command' ? 'command' : 'snippet'} to clipboard`}
+                        >
+                          {copyState === 'copied'
+                            ? '✓ Copied'
+                            : copyState === 'error'
+                            ? 'Select text manually'
+                            : copyableFix.type === 'command'
+                            ? 'Copy Command'
+                            : 'Copy Snippet'}
+                        </button>
+
+                        <span className="copy-feedback-sr" aria-live="polite">
+                          {copyState === 'copied' && 'Copied to clipboard'}
+                          {copyState === 'error' && 'Clipboard copy failed. Please select text manually.'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!fixDescription && !copyableFix && diagnostic.recommendation && (
+                <p className="diagnostic-fix-description">{diagnostic.recommendation}</p>
+              )}
+            </div>
+          )}
         </div>
 
         {isFailedOrWarning && (

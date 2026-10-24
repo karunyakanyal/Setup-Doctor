@@ -15,7 +15,7 @@ import DiagnosticsLoadingSkeleton from '../components/diagnostics/DiagnosticsLoa
 import DiagnosticsErrorState from '../components/diagnostics/DiagnosticsErrorState'
 import CodeMapPanel from '../components/codemap/CodeMapPanel'
 import ProjectGlanceCard from '../components/diagnostics/ProjectGlanceCard'
-import { buildMergedFindings, isCoveredTopic } from '../utils/projectGlance.js'
+import { buildMergedFindings, isCoveredTopic, formatCapReasonPlainWords } from '../utils/projectGlance.js'
 import WhatToDoNextPanel from '../components/diagnostics/WhatToDoNextPanel'
 import ProjectProfileCard from '../components/diagnostics/ProjectProfileCard'
 import DimensionRatingTiles from '../components/diagnostics/DimensionRatingTiles'
@@ -391,7 +391,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
       }
     }
 
-    const gradeText = capReason ? `Grade ${grade} (capped: ${capReason})` : `Grade ${grade}`
+    const plainCap = formatCapReasonPlainWords(capReason, grade)
+    const gradeText = plainCap ? plainCap : `Grade ${grade}`
 
     if (timeStr && grade && grade !== 'N/A') {
       return { text: `Analyzed at ${timeStr} • ${gradeText}`, isFailed: false }

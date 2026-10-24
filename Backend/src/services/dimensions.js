@@ -271,9 +271,12 @@ function calculateDimensionsAndGrade(rules = [], options = {}) {
 
 			const dimLabel = worstDimObj.dimension.charAt(0).toUpperCase() + worstDimObj.dimension.slice(1)
 			if (topFailingCheck) {
-				capReason = `${dimLabel}: ${topFailingCheck.name} (${topFailingCheck.id})`
+				const checkName = (topFailingCheck.id === 'missing-tests' || topFailingCheck.id === 'no-test-script')
+					? 'no automated tests'
+					: (topFailingCheck.id === 'missing-license' ? 'missing license' : (topFailingCheck.name ? topFailingCheck.name.toLowerCase() : worstDimObj.reason))
+				capReason = `Capped at ${finalGrade} by ${dimLabel}: ${checkName}`
 			} else {
-				capReason = `${dimLabel}: ${worstDimObj.reason}`
+				capReason = `Capped at ${finalGrade} by ${dimLabel}: ${worstDimObj.reason}`
 			}
 		}
 	}
