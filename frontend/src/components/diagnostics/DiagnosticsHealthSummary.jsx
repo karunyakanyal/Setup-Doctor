@@ -1,3 +1,4 @@
+import { formatCapReasonPlainWords } from '../../utils/projectGlance.js'
 import {
   getGrade,
   getCategoryScore,
@@ -36,22 +37,25 @@ function DiagnosticsHealthSummary({
 
       <div className="diagnostics-health-top">
         <div className="diagnostics-health-score-card">
+          <div className="health-grade-line">
+            <span className={`grade-badge grade-badge-${grade}`}>{grade}</span>
+          </div>
+          <div className="health-verdict-line">
+            <span className={`health-status health-${verdictLabel.toLowerCase().replace(/\s+/g, '-')}`}>
+              {verdictLabel}
+            </span>
+          </div>
           <div className="health-score-display">
             <span className="health-score-number">
               {score !== null ? score : 'N/A'}
             </span>
             <span className="health-score-max">/ 100</span>
           </div>
-
-          <div className="health-grade-container">
-            <span className={`grade-badge grade-badge-${grade}`}>{grade}</span>
-            <span className={`health-status health-${verdictLabel.toLowerCase().replace(/\s+/g, '-')}`}>
-              {verdictLabel}
-            </span>
-            {cap && (
-              <span className="health-cap-tag">(capped: {cap})</span>
-            )}
-          </div>
+          {cap && (
+            <div className="health-cap-line">
+              <span className="health-cap-tag">{formatCapReasonPlainWords(cap, grade)}</span>
+            </div>
+          )}
 
           {setupChecksScore !== null && (
             <div className="setup-checks-score-row">

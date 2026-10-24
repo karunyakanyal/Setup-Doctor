@@ -87,9 +87,11 @@ async function handleBadge(req, res) {
 
 	const svg = generateBadgeSvg(grade || 'run an analysis first')
 
+	const proto = req.headers?.['x-forwarded-proto'] || req.protocol || 'http'
 	const host = (typeof req.get === 'function' ? req.get('host') : req.headers?.host) || 'localhost:3000'
-	const proto = req.protocol || 'http'
-	const baseUrl = (process.env.PUBLIC_BASE_URL || `${proto}://${host}`).replace(/\/+$/, '')
+	const defaultBase = `${proto}://${host}`
+	const rawBase = (process.env.PUBLIC_BASE_URL || defaultBase).trim()
+	const baseUrl = (rawBase.startsWith('http://') || rawBase.startsWith('https://') ? rawBase : `https://${rawBase}`).replace(/\/+$/, '')
 	const badgeUrl = `${baseUrl}/api/badge/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
 	const repoUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
 	const disclaimer = 'Note: The backend must be publicly reachable for this badge to render on GitHub.'
@@ -689,9 +691,11 @@ const handleGraph = async (req, res, next) => {
 			graphFiles: graphResult.nodes.length,
 		}
 
+		const proto = req.headers?.['x-forwarded-proto'] || req.protocol || 'http'
 		const host = (typeof req.get === 'function' ? req.get('host') : req.headers?.host) || 'localhost:3000'
-		const proto = req.protocol || 'http'
-		const baseUrl = (process.env.PUBLIC_BASE_URL || `${proto}://${host}`).replace(/\/+$/, '')
+		const defaultBase = `${proto}://${host}`
+		const rawBase = (process.env.PUBLIC_BASE_URL || defaultBase).trim()
+		const baseUrl = (rawBase.startsWith('http://') || rawBase.startsWith('https://') ? rawBase : `https://${rawBase}`).replace(/\/+$/, '')
 		const badgeUrl = `${baseUrl}/api/badge/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
 		const repoUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
 		const disclaimer = 'Note: The backend must be publicly reachable for this badge to render on GitHub.'
@@ -772,6 +776,23 @@ router.get('/repository/badge/:owner/:repo', handleBadge)
 
 module.exports = router
 module.exports.handleGraph = handleGraph
+function getBadgeUrl(owner, repo, req = {}) {
+	const proto = req?.headers?.['x-forwarded-proto'] || req?.protocol || 'http'
+	const host = (typeof req?.get === 'function' ? req.get('host') : req?.headers?.host) || 'localhost:3000'
+	const defaultBase = `${proto}://${host}`
+	const rawBase = (process.env.PUBLIC_BASE_URL || defaultBase).trim()
+	const baseUrl = (rawBase.startsWith('http://') || rawBase.startsWith('https://') ? rawBase : `https://${rawBase}`).replace(/\/+$/, '')
+	return `${baseUrl}/api/badge/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+}
+
+function getBadgeMarkdown(owner, repo, req = {}) {
+	const badgeUrl = getBadgeUrl(owner, repo, req)
+	const repoUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+	return `[![SetupDoctor Grade](${badgeUrl})](${repoUrl})`
+}
+
+module.exports.getBadgeUrl = getBadgeUrl
+module.exports.getBadgeMarkdown = getBadgeMarkdown
 module.exports.handleBadge = handleBadge
 module.exports.handleDiagnose = handleDiagnose
 module.exports.graphLimiter = graphLimiter

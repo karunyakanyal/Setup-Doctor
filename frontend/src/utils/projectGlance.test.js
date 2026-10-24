@@ -129,8 +129,8 @@ test('getHealthVerdict: verdict mapping and one sentence why derived from produc
   assert.equal(cycleVerdict.tone, 'warning')
   assert.equal(cycleVerdict.whySentence, '1 circular dependency was found.')
   assert.equal(cycleVerdict.grade, 'B')
-  assert.equal(cycleVerdict.capReason, '1 runtime cycle')
-  assert.equal(cycleVerdict.gradeText, 'Grade B (capped: 1 runtime cycle)')
+  assert.equal(cycleVerdict.capReason, 'Capped at B by Reliability: 1 runtime cycle')
+  assert.equal(cycleVerdict.gradeText, 'Capped at B by Reliability: 1 runtime cycle')
   assert.equal(cycleVerdict.showScore, true)
   assert.equal(cycleVerdict.score, 89)
 
@@ -180,8 +180,8 @@ test('getHealthVerdict: verdict mapping and one sentence why derived from produc
   assert.equal(undeclaredVerdict.label, 'A few things to fix')
   assert.equal(undeclaredVerdict.whySentence, '2 undeclared packages were found.')
   assert.equal(undeclaredVerdict.grade, 'C')
-  assert.equal(undeclaredVerdict.capReason, '2 undeclared packages')
-  assert.equal(undeclaredVerdict.gradeText, 'Grade C (capped: 2 undeclared packages)')
+  assert.equal(undeclaredVerdict.capReason, 'Capped at C by Security: 2 undeclared packages')
+  assert.equal(undeclaredVerdict.gradeText, 'Capped at C by Security: 2 undeclared packages')
   assert.equal(undeclaredVerdict.showScore, true)
   assert.equal(undeclaredVerdict.score, 79)
 
@@ -294,8 +294,8 @@ test('undeclared package: caps at C', () => {
 
   assert.equal(verdict.label, 'A few things to fix')
   assert.equal(verdict.grade, 'C')
-  assert.equal(verdict.capReason, '1 undeclared package')
-  assert.equal(verdict.gradeText, 'Grade C (capped: 1 undeclared package)')
+  assert.equal(verdict.capReason, 'Capped at C by Security: 1 undeclared package')
+  assert.equal(verdict.gradeText, 'Capped at C by Security: 1 undeclared package')
   assert.equal(verdict.score, 79)
   assert.equal(verdict.showScore, true)
 })
@@ -322,8 +322,8 @@ test('truncated scan: caps at B', () => {
 
   assert.equal(verdict.label, 'A few things to fix')
   assert.equal(verdict.grade, 'B')
-  assert.equal(verdict.capReason, 'Code Map scan truncated')
-  assert.equal(verdict.gradeText, 'Grade B (capped: Code Map scan truncated)')
+  assert.equal(verdict.capReason, 'Capped at B by Reliability: Code Map scan truncated')
+  assert.equal(verdict.gradeText, 'Capped at B by Reliability: Code Map scan truncated')
   assert.equal(verdict.score, 89)
   assert.equal(verdict.showScore, true)
 })
@@ -364,8 +364,8 @@ test('vite-shaped response: is capped at B because of runtime cycles', () => {
 
   assert.equal(verdict.label, 'A few things to fix')
   assert.equal(verdict.grade, 'B')
-  assert.equal(verdict.capReason, '2 runtime cycles')
-  assert.equal(verdict.gradeText, 'Grade B (capped: 2 runtime cycles)')
+  assert.equal(verdict.capReason, 'Capped at B by Reliability: 2 runtime cycles')
+  assert.equal(verdict.gradeText, 'Capped at B by Reliability: 2 runtime cycles')
   assert.equal(verdict.showScore, true)
   assert.equal(verdict.score, 89)
   assert.ok(verdict.whySentence.includes('2 circular dependencies'))
@@ -422,12 +422,12 @@ test('Skinveda-shaped response: is capped at B (1 cycle)', () => {
 
   assert.equal(verdict.label, 'A few things to fix')
   assert.equal(verdict.grade, 'B')
-  assert.equal(verdict.capReason, '1 runtime cycle')
-  assert.equal(verdict.gradeText, 'Grade B (capped: 1 runtime cycle)')
+  assert.equal(verdict.capReason, 'Capped at B by Reliability: 1 runtime cycle')
+  assert.equal(verdict.gradeText, 'Capped at B by Reliability: 1 runtime cycle')
   assert.equal(verdict.showScore, true)
   assert.equal(verdict.score, 89)
-  assert.ok(verdict.whySentence.includes('1 circular dependency'))
-  assert.ok(verdict.whySentence.includes('5 setup warnings'))
+  assert.ok(verdict.summaryLine.includes('critical'))
+  assert.ok(!verdict.summaryLine.includes('5 setup warnings'))
 
   const steps = getWhatToDoNext({
     diagnostics: skinvedaDiag,

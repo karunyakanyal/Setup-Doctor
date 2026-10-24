@@ -97,10 +97,11 @@ export default function NeighborhoodGraph({
     return map
   }, [graph?.nodes])
 
+
   // Classify file type: source, test, config, entry point, hotspot, file in a cycle
   const getFileType = (path) => {
     if (!path) return { type: 'source', label: 'Source file', tag: 'source' }
-    if (cycleFilesSet.has(path)) return { type: 'cycle', label: 'In a cycle', tag: 'cycle' }
+    if (cycleFilesSet.has(path) && !isCycleDominant) return { type: 'cycle', label: 'In a cycle', tag: 'cycle' }
     if (entryPointsSet.has(path)) return { type: 'entry', label: 'Entry point', tag: 'entry' }
     if (hotspotsSet.has(path)) return { type: 'hotspot', label: 'Hotspot', tag: 'hotspot' }
     const node = nodesMap.get(path)
@@ -198,6 +199,35 @@ export default function NeighborhoodGraph({
     )
   }, [imports, includeNonProd, nodesMap])
 
+  // Cycle dominance check: if >50% of visible nodes are in cycles,
+  // replace per-node CYCLE tag with one note ("26 of 35 are part of the App.jsx cycle")
+  const { isCycleDominant, cycleDominantNote } = useMemo(() => {
+    const visibleFiles = [selectedFile, ...dependsOnFiles, ...layers.layer1, ...layers.layer2, ...layers.layer3Plus].filter(Boolean)
+    const uniqueVisible = Array.from(new Set(visibleFiles))
+    const inCycle = uniqueVisible.filter((f) => cycleFilesSet.has(f))
+    if (uniqueVisible.length > 0 && inCycle.length > uniqueVisible.length / 2) {
+      let hubBase = 'App.jsx'
+      const allCycles = Array.isArray(cycles) ? cycles : []
+      for (const c of allCycles) {
+        if (c?.hub?.file) {
+          hubBase = c.hub.file.split('/').pop()
+          break
+        }
+        const shortest = c?.shortest || []
+        const app = shortest.find((f) => f.includes('App.'))
+        if (app) {
+          hubBase = app.split('/').pop()
+          break
+        }
+      }
+      return {
+        isCycleDominant: true,
+        cycleDominantNote: `${inCycle.length} of ${uniqueVisible.length} are part of the ${hubBase} cycle`,
+      }
+    }
+    return { isCycleDominant: false, cycleDominantNote: null }
+  }, [selectedFile, dependsOnFiles, layers, cycleFilesSet, cycles])
+
   // Direct dependents sorted descending by fan-in
   const directDependentsOrdered = useMemo(() => {
     const list = [...layers.layer1]
@@ -284,44 +314,48 @@ export default function NeighborhoodGraph({
     return allAffected.filter((f) => entryPointsSet.has(f))
   }, [allAffected, entryPointsSet])
 
-  // Cycle check for selected file
-  const isSelectedInCycle = cycleFilesSet.has(selectedFile)
-
   // Risk badge:
   // Low (<10% and no entry point and not in cycle)
   // Medium (10-40%)
   // High (>40%, reaches an entry point, or is in a cycle)
   const riskVerdict = useMemo(() => {
-    if (percentOfRepo > 40 || affectedEntryPoints.length > 0 || isSelectedInCycle) {
+    // Being in a cycle NEVER makes risk High by itself; risk uses percent of files and entry points reached, and badge shows its rule.
+    const isHigh = percentOfRepo > 40 || affectedEntryPoints.length > 0
+    const isMedium = !isHigh && percentOfRepo >= 10
+    if (isHigh) {
+      const ruleText = affectedEntryPoints.length > 0
+        ? `${affectedEntryPoints.length} entry point${affectedEntryPoints.length === 1 ? '' : 's'} affected`
+        : `>40% of repo blast radius (${percentOfRepo}%)`
       return {
         level: 'High',
         label: 'High risk',
         icon: '▲',
         tone: 'high',
-        reason: isSelectedInCycle
-          ? 'File is in a circular dependency'
-          : affectedEntryPoints.length > 0
-            ? `${affectedEntryPoints.length} entry point${affectedEntryPoints.length === 1 ? '' : 's'} affected`
-            : `${percentOfRepo}% repo blast radius`,
+        reason: ruleText,
+        rule: ruleText,
       }
     }
-    if (percentOfRepo >= 10) {
+    if (isMedium) {
+      const ruleText = `10-40% of repo blast radius (${percentOfRepo}%)`
       return {
         level: 'Medium',
         label: 'Medium risk',
         icon: '⚠',
         tone: 'medium',
-        reason: `${percentOfRepo}% repo blast radius`,
+        reason: ruleText,
+        rule: ruleText,
       }
     }
+    const ruleText = `<10% of repo blast radius (${percentOfRepo}%) and no entry points`
     return {
       level: 'Low',
       label: 'Low risk',
       icon: '✓',
       tone: 'low',
-      reason: 'Low blast radius and no critical topology risks',
+      reason: ruleText,
+      rule: ruleText,
     }
-  }, [percentOfRepo, affectedEntryPoints.length, isSelectedInCycle])
+  }, [percentOfRepo, affectedEntryPoints.length])
 
   // Test hint calculation:
   // "N tests cover this area" or "No tests touch this file"
@@ -431,7 +465,6 @@ export default function NeighborhoodGraph({
                 aria-label={`Select ${file}`}
                 onClick={() => {
                   setSelectedTarget(file)
-                  if (onSelectFile) onSelectFile(file)
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
@@ -498,28 +531,33 @@ export default function NeighborhoodGraph({
               🚀 {affectedEntryPoints.length} entry point{affectedEntryPoints.length === 1 ? '' : 's'} affected
             </span>
           )}
+          {cycleDominantNote && (
+            <span className="impact-cycle-hub-note" role="note">
+              ⚠️ {cycleDominantNote}
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Visual Legend (text + color, never color alone) */}
+      {/* Visual Legend (visible colors + shape or icon per type) */}
       <div className="impact-visual-legend" aria-label="Visual legend">
         <span className="legend-item">
-          <span className="legend-swatch type-entry"></span> Entry point
+          <span className="legend-swatch type-entry" aria-hidden="true">●</span> Entry point
         </span>
         <span className="legend-item">
-          <span className="legend-swatch type-hotspot"></span> Hotspot
+          <span className="legend-swatch type-hotspot" aria-hidden="true">▲</span> Hotspot
         </span>
         <span className="legend-item">
-          <span className="legend-swatch type-cycle"></span> In a cycle
+          <span className="legend-swatch type-cycle" aria-hidden="true">◆</span> In a cycle
         </span>
         <span className="legend-item">
-          <span className="legend-swatch type-config"></span> Config
+          <span className="legend-swatch type-config" aria-hidden="true">■</span> Config
         </span>
         <span className="legend-item">
-          <span className="legend-swatch type-test"></span> Test
+          <span className="legend-swatch type-test" aria-hidden="true">🧪</span> Test
         </span>
         <span className="legend-item">
-          <span className="legend-swatch type-source"></span> Source
+          <span className="legend-swatch type-source" aria-hidden="true">▫</span> Source
         </span>
       </div>
 
@@ -586,7 +624,6 @@ export default function NeighborhoodGraph({
                 aria-label={`Select ${file}`}
                 onClick={() => {
                   setSelectedTarget(file)
-                  if (onSelectFile) onSelectFile(file)
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
@@ -605,11 +642,11 @@ export default function NeighborhoodGraph({
                   className={`svg-rect-side type-${meta.type}`}
                 />
                 <title>{file}</title>
-                <text x="38" y={y + 4} textAnchor="start" className="svg-text-side">
-                  {formatNodeLabel(file)}
+                <text x="38" y={y - 3} textAnchor="start" className="svg-text-side">
+                  {formatNodeLabel(file, 16)}
                 </text>
-                <text x="182" y={y + 4} textAnchor="end" className="svg-node-tag">
-                  {meta.tag}
+                <text x="38" y={y + 11} textAnchor="start" className="svg-node-tag">
+                  [{meta.tag.toUpperCase()}]
                 </text>
               </g>
             )
@@ -652,7 +689,6 @@ export default function NeighborhoodGraph({
                 aria-label={`Select ${file}`}
                 onClick={() => {
                   setSelectedTarget(file)
-                  if (onSelectFile) onSelectFile(file)
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
@@ -671,11 +707,11 @@ export default function NeighborhoodGraph({
                   className={`svg-rect-side type-${meta.type}`}
                 />
                 <title>{file}</title>
-                <text x="458" y={y + 4} textAnchor="start" className="svg-text-side">
-                  {formatNodeLabel(file)}
+                <text x="458" y={y - 3} textAnchor="start" className="svg-text-side">
+                  {formatNodeLabel(file, 16)}
                 </text>
-                <text x="602" y={y + 4} textAnchor="end" className="svg-node-tag">
-                  {meta.tag}
+                <text x="458" y={y + 11} textAnchor="start" className="svg-node-tag">
+                  [{meta.tag.toUpperCase()}]
                 </text>
               </g>
             )
@@ -699,7 +735,6 @@ export default function NeighborhoodGraph({
                 aria-label={`Select ${file}`}
                 onClick={() => {
                   setSelectedTarget(file)
-                  if (onSelectFile) onSelectFile(file)
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
@@ -718,11 +753,11 @@ export default function NeighborhoodGraph({
                   className={`svg-rect-side type-${meta.type}`}
                 />
                 <title>{file}</title>
-                <text x="648" y={y + 4} textAnchor="start" className="svg-text-side">
-                  {formatNodeLabel(file)}
+                <text x="648" y={y - 3} textAnchor="start" className="svg-text-side">
+                  {formatNodeLabel(file, 16)}
                 </text>
-                <text x="792" y={y + 4} textAnchor="end" className="svg-node-tag">
-                  {meta.tag}
+                <text x="648" y={y + 11} textAnchor="start" className="svg-node-tag">
+                  [{meta.tag.toUpperCase()}]
                 </text>
               </g>
             )
@@ -746,7 +781,6 @@ export default function NeighborhoodGraph({
                 aria-label={`Select ${file}`}
                 onClick={() => {
                   setSelectedTarget(file)
-                  if (onSelectFile) onSelectFile(file)
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
@@ -787,21 +821,37 @@ export default function NeighborhoodGraph({
         <div className="impact-why-callout" role="status" aria-live="polite">
           <div className="why-header">
             <strong>Why is {selectedTarget} affected?</strong>
-            <button
-              type="button"
-              className="close-callout-btn"
-              onClick={() => setSelectedTarget(null)}
-              aria-label="Close why affected callout"
-            >
-              ✕
-            </button>
+            <div className="why-header-actions">
+              <button
+                type="button"
+                className="btn-secondary inspect-file-btn"
+                onClick={() => onSelectFile && onSelectFile(selectedTarget)}
+                aria-label={`Inspect ${selectedTarget}`}
+              >
+                Inspect this file
+              </button>
+              <button
+                type="button"
+                className="close-callout-btn"
+                onClick={() => setSelectedTarget(null)}
+                aria-label="Close why affected callout"
+              >
+                ✕
+              </button>
+            </div>
           </div>
           <div className="why-chain font-mono">
             {activeChain.map((step, idx) => (
               <span key={step} className="chain-step">
-                <span className="step-file" title={step}>
+                <button
+                  type="button"
+                  className="codemap-link-button chain-step-btn"
+                  onClick={() => setSelectedTarget(step)}
+                  title={step}
+                  aria-label={`View ${step}`}
+                >
                   {formatNodeLabel(step)}
-                </span>
+                </button>
                 {idx < activeChain.length - 1 && <span className="chain-arrow"> → </span>}
               </span>
             ))}

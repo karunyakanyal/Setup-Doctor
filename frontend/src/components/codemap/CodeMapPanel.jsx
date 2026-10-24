@@ -1876,11 +1876,6 @@ export default function CodeMapPanel({
 
                     {/* Impact Notice */}
                     <div className="codemap-impact-box" aria-label="Downstream modification impact">
-                      <div className="impact-header-row">
-                        <strong className="impact-headline">
-                          Changing this file directly or transitively affects {fileImpact.totalAffected ?? (fileImpact.direct.length + fileImpact.transitive.length)} files, {fileImpact.percentOfRepo}% of the repo
-                        </strong>
-                      </div>
 
                       {/* Compact stat row (direct source, direct tests, transitive source, transitive tests) */}
                       <div className="compact-stat-row" aria-label="Impact breakdown">

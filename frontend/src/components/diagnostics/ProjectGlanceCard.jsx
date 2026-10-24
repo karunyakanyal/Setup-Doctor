@@ -55,19 +55,24 @@ export default function ProjectGlanceCard({
   }, [changes])
 
   const badgeUrl = useMemo(() => {
-    if (deepScanData?.badge?.url) return deepScanData.badge.url
-    if (deepScanData?.summary?.badge?.url) return deepScanData.summary.badge.url
+    if (deepScanData?.badge?.url && /^https?:\/\//i.test(deepScanData.badge.url)) return deepScanData.badge.url
+    if (deepScanData?.summary?.badge?.url && /^https?:\/\//i.test(deepScanData.summary.badge.url)) return deepScanData.summary.badge.url
     if (repository?.owner && (repository?.name || repository?.repo)) {
       const o = encodeURIComponent(repository.owner)
       const r = encodeURIComponent(repository.name || repository.repo)
-      return `/api/badge/${o}/${r}`
+      const base = (typeof window !== 'undefined' && window.location?.origin) || 'http://localhost:3000'
+      return `${base}/api/badge/${o}/${r}`
     }
     return null
   }, [deepScanData, repository])
 
   const badgeMarkdown = useMemo(() => {
-    if (deepScanData?.badge?.markdown) return deepScanData.badge.markdown
-    if (deepScanData?.summary?.badge?.markdown) return deepScanData.summary.badge.markdown
+    if (deepScanData?.badge?.markdown && /^\[!\[SetupDoctor Grade\]\(https?:\/\//i.test(deepScanData.badge.markdown)) {
+      return deepScanData.badge.markdown
+    }
+    if (deepScanData?.summary?.badge?.markdown && /^\[!\[SetupDoctor Grade\]\(https?:\/\//i.test(deepScanData.summary.badge.markdown)) {
+      return deepScanData.summary.badge.markdown
+    }
     if (badgeUrl && repository?.owner && (repository?.name || repository?.repo)) {
       const o = encodeURIComponent(repository.owner)
       const r = encodeURIComponent(repository.name || repository.repo)
@@ -153,7 +158,7 @@ export default function ProjectGlanceCard({
         </div>
 
         <div className="glance-verdict-reason">
-          <p className="glance-why-sentence">{verdict.whySentence}</p>
+          <p className="glance-why-sentence">{verdict.summaryLine || verdict.whySentence}</p>
         </div>
       </div>
 

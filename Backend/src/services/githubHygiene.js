@@ -53,8 +53,14 @@ function evaluateGithubHygieneSync({
 			lower === '.github/dependabot.yaml' ||
 			lower === 'dependabot.yml' ||
 			lower === 'renovate.json' ||
+			lower === 'renovate.json5' ||
+			lower === '.renovaterc' ||
 			lower === '.renovaterc.json' ||
-			lower === '.github/renovate.json'
+			lower === '.renovaterc.json5' ||
+			lower === '.renovaterc.js' ||
+			lower === 'renovate.js' ||
+			lower === '.github/renovate.json' ||
+			lower === '.github/renovate.json5'
 		)
 	})
 	const depBotCount = hasDepBot || allFilePaths.length < 4 ? 0 : 1
