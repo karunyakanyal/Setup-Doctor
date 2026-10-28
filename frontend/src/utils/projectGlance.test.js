@@ -4,6 +4,8 @@ import {
   formatStackInPlainWords,
   getHealthVerdict,
   getWhatToDoNext,
+  generateProjectStory,
+  calculateRiskiestFiles,
 } from './projectGlance.js'
 
 test('formatStackInPlainWords: formats stack in natural words', () => {
@@ -576,4 +578,124 @@ test('Phase 1: Verdict mapping (A=Looking healthy, B/C=A few things to fix, D/E=
   assert.equal(verdictD.label, 'Needs attention')
   assert.equal(verdictD.icon, '✖')
   assert.equal(verdictD.tone, 'attention')
+})
+
+
+test('Phase 2: generateProjectStory with Skinveda shape produces 3 concrete sentences', () => {
+  const story = generateProjectStory({
+    framework: null,
+    stack: ['node', 'react', 'vite'],
+    language: 'JavaScript',
+    byLanguage: { jsx: 31, python: 15, javascript: 14 },
+    profile: {
+      stacks: ['node', 'react', 'vite', 'python', 'fastapi'],
+      routes: Array.from({ length: 28 }, (_, i) => ({ method: 'GET', path: `/api/route${i}` })),
+    },
+    deepScanData: {
+      coverage: { graphFiles: 46 },
+      summary: {
+        cycles: [
+          {
+            hub: {
+              file: 'src/App.jsx',
+              symbol: 'useApp',
+              count: 26,
+              suggestedFile: 'src/context/AppContext.jsx',
+              totalFilesInCycle: 27,
+            },
+          },
+        ],
+      },
+    },
+    diagnostics: [],
+  })
+
+  // Sentence 1: stack and routes
+  assert.ok(story.sentence1.includes('React app built with Vite, written in JavaScript (JSX), with a Python (FastAPI) backend'))
+  assert.ok(story.sentence1.includes('exposing 28 API routes'))
+
+  // Sentence 2: biggest structural risk
+  assert.ok(story.sentence2.includes('26 pages import useApp from src/App.jsx; the loop runs through all 26 pages and App.jsx'))
+
+  // Sentence 3: what to do first
+  assert.ok(story.sentence3.includes('move useApp from src/App.jsx to src/context/AppContext.jsx'))
+})
+
+test('Phase 2: generateProjectStory with vite shape produces 3 concrete sentences', () => {
+  const story = generateProjectStory({
+    framework: 'Vite',
+    stack: ['vite', 'TypeScript'],
+    language: 'TypeScript',
+    monorepo: true,
+    byLanguage: { typescript: 1700, javascript: 81 },
+    deepScanData: {
+      coverage: { graphFiles: 1781 },
+      summary: {
+        entryPoints: Array.from({ length: 17 }, (_, i) => `packages/pkg_${i}/index.ts`),
+        cycles: [
+          {
+            shortest: ['packages/vite/src/node/optimizer/scan.ts', 'packages/vite/src/node/plugins/esbuild.ts'],
+          },
+          {
+            shortest: ['packages/vite/src/node/server/moduleGraph.ts', 'packages/vite/src/node/plugins/importAnalysis.ts'],
+          },
+        ],
+      },
+    },
+    diagnostics: [],
+  })
+
+  assert.ok(story.sentence1.includes('TypeScript monorepo using Vite, with 17 library entry points'))
+  assert.ok(story.sentence2.includes('2 runtime circular dependency loops between packages/vite/src/node/optimizer/scan.ts and packages/vite/src/node/plugins/esbuild.ts'))
+  assert.ok(story.sentence3.includes('refactor packages/vite/src/node/optimizer/scan.ts to break the circular dependency loop with packages/vite/src/node/plugins/esbuild.ts'))
+})
+
+test('Phase 2: calculateRiskiestFiles ranks by formula and produces human-readable reasons', () => {
+  const graph = {
+    nodes: [
+      {
+        path: 'src/App.jsx',
+        fanIn: 26,
+        transitiveImpact: 26,
+        size: 8000,
+      },
+      {
+        path: 'src/pages/Landing.jsx',
+        fanIn: 1,
+        transitiveImpact: 1,
+        size: 3000,
+      },
+      {
+        path: 'src/utils/clean.js',
+        fanIn: 0,
+        transitiveImpact: 0,
+        size: 500,
+      },
+    ],
+    edges: [
+      ['src/pages/Landing.jsx', 'src/App.jsx'],
+    ],
+  }
+
+  const cycles = [
+    {
+      files: ['src/App.jsx', 'src/pages/Landing.jsx'],
+      shortest: ['src/App.jsx', 'src/pages/Landing.jsx'],
+    },
+  ]
+
+  const riskiest = calculateRiskiestFiles({
+    graph,
+    cycles,
+    limit: 5,
+  })
+
+  assert.equal(riskiest.length, 3)
+  assert.equal(riskiest[0].path, 'src/App.jsx')
+  // App.jsx formula score check:
+  // (26 * 3) + (26 * 2) + 25 (cycle) + 20 (no tests) + Math.min(15, Math.floor(8000 / 2048)) = 78 + 52 + 25 + 20 + 3 = 178
+  assert.equal(riskiest[0].score, 178)
+  assert.ok(riskiest[0].reason.includes('imported by 26 files'))
+  assert.ok(riskiest[0].reason.includes('in a cycle'))
+  assert.ok(riskiest[0].reason.includes('no tests'))
 })

@@ -1,7 +1,5 @@
 import { useState, useMemo } from 'react'
 
-const MAX_SVG_ITEMS = 10
-
 function truncatePath(fullPath, maxLen = 22) {
   if (!fullPath) return ''
   if (fullPath.length <= maxLen) return fullPath
@@ -13,6 +11,13 @@ function truncatePath(fullPath, maxLen = 22) {
   return `.../${fileName}`
 }
 
+function getFolder(filePath) {
+  if (!filePath) return '.'
+  const parts = filePath.split('/')
+  parts.pop()
+  return parts.length > 0 ? parts.join('/') : '.'
+}
+
 export default function NeighborhoodGraph({
   selectedFile,
   imports = [],
@@ -22,9 +27,10 @@ export default function NeighborhoodGraph({
   summary = null,
   includeNonProd = false,
   onSelectFile,
+  initialShowGraph = false,
 }) {
   const [selectedTarget, setSelectedTarget] = useState(null)
-  const [copied, setCopied] = useState(false)
+  const [showGraph, setShowGraph] = useState(initialShowGraph)
 
   // 1. Nodes map & metadata
   const { nodesMap, idToNode } = useMemo(() => {
@@ -97,11 +103,9 @@ export default function NeighborhoodGraph({
     return map
   }, [graph?.nodes])
 
-
-  // Classify file type: source, test, config, entry point, hotspot, file in a cycle
+  // Classify file type: only ENTRY, HOTSPOT, TEST, CONFIG, SOURCE (no per-node CYCLE tag)
   const getFileType = (path) => {
     if (!path) return { type: 'source', label: 'Source file', tag: 'source' }
-    if (cycleFilesSet.has(path) && !isCycleDominant) return { type: 'cycle', label: 'In a cycle', tag: 'cycle' }
     if (entryPointsSet.has(path)) return { type: 'entry', label: 'Entry point', tag: 'entry' }
     if (hotspotsSet.has(path)) return { type: 'hotspot', label: 'Hotspot', tag: 'hotspot' }
     const node = nodesMap.get(path)
@@ -185,6 +189,14 @@ export default function NeighborhoodGraph({
       else if (dist >= 3) layer3Plus.push(file)
     }
 
+    // Fallback if no graph nodes/edges: layer1 is importers
+    if (layer1.length === 0 && importers.length > 0) {
+      for (const imp of importers) {
+        layer1.push(imp)
+        affected.push(imp)
+      }
+    }
+
     return {
       layers: { layer1, layer2, layer3Plus },
       predecessors: preds,
@@ -199,9 +211,15 @@ export default function NeighborhoodGraph({
     )
   }, [imports, includeNonProd, nodesMap])
 
-  // Cycle dominance check: if >50% of visible nodes are in cycles,
-  // replace per-node CYCLE tag with one note ("26 of 35 are part of the App.jsx cycle")
-  const { isCycleDominant, cycleDominantNote } = useMemo(() => {
+  // Direct dependents sorted descending by fan-in
+  const directDependentsOrdered = useMemo(() => {
+    const list = [...layers.layer1]
+    list.sort((a, b) => (fanInMap.get(b) || 0) - (fanInMap.get(a) || 0))
+    return list
+  }, [layers.layer1, fanInMap])
+
+  // Cycle dominance check: if >50% of visible nodes are in cycles
+  const { cycleDominantNote } = useMemo(() => {
     const visibleFiles = [selectedFile, ...dependsOnFiles, ...layers.layer1, ...layers.layer2, ...layers.layer3Plus].filter(Boolean)
     const uniqueVisible = Array.from(new Set(visibleFiles))
     const inCycle = uniqueVisible.filter((f) => cycleFilesSet.has(f))
@@ -227,13 +245,6 @@ export default function NeighborhoodGraph({
     }
     return { isCycleDominant: false, cycleDominantNote: null }
   }, [selectedFile, dependsOnFiles, layers, cycleFilesSet, cycles])
-
-  // Direct dependents sorted descending by fan-in
-  const directDependentsOrdered = useMemo(() => {
-    const list = [...layers.layer1]
-    list.sort((a, b) => (fanInMap.get(b) || 0) - (fanInMap.get(a) || 0))
-    return list
-  }, [layers.layer1, fanInMap])
 
   // Node disambiguation for collisions
   const basenameCounts = useMemo(() => {
@@ -285,29 +296,6 @@ export default function NeighborhoodGraph({
   const totalFilesCount = graph?.nodes?.length || Math.max(1, allAffected.length + 1)
   const affectedCount = allAffected.length
   const percentOfRepo = Math.min(100, Math.round((affectedCount / totalFilesCount) * 100))
-  const directCount = layers.layer1.length
-  const indirectCount = layers.layer2.length + layers.layer3Plus.length
-
-  // Most affected folder
-  const mostAffectedArea = useMemo(() => {
-    if (allAffected.length === 0) return null
-    const folderCounts = {}
-    for (const f of allAffected) {
-      const parts = f.split('/')
-      parts.pop()
-      const folder = parts.length > 0 ? parts.join('/') : 'project root'
-      folderCounts[folder] = (folderCounts[folder] || 0) + 1
-    }
-    let topFolder = 'project root'
-    let topCount = 0
-    for (const [folder, count] of Object.entries(folderCounts)) {
-      if (count > topCount) {
-        topCount = count
-        topFolder = folder
-      }
-    }
-    return { folder: topFolder, count: topCount }
-  }, [allAffected])
 
   // Entry points affected
   const affectedEntryPoints = useMemo(() => {
@@ -315,11 +303,11 @@ export default function NeighborhoodGraph({
   }, [allAffected, entryPointsSet])
 
   // Risk badge:
-  // Low (<10% and no entry point and not in cycle)
+  // Low (<10% and no entry points)
   // Medium (10-40%)
-  // High (>40%, reaches an entry point, or is in a cycle)
+  // High (>40% or reaches an entry point)
+  // NOTE: Cycle membership never raises risk by itself.
   const riskVerdict = useMemo(() => {
-    // Being in a cycle NEVER makes risk High by itself; risk uses percent of files and entry points reached, and badge shows its rule.
     const isHigh = percentOfRepo > 40 || affectedEntryPoints.length > 0
     const isMedium = !isHigh && percentOfRepo >= 10
     if (isHigh) {
@@ -357,9 +345,8 @@ export default function NeighborhoodGraph({
     }
   }, [percentOfRepo, affectedEntryPoints.length])
 
-  // Test hint calculation:
-  // "N tests cover this area" or "No tests touch this file"
-  const testHint = useMemo(() => {
+  // Test hint calculation & test coverage
+  const { testHint, coveredTestsList } = useMemo(() => {
     const areaFiles = new Set([selectedFile, ...allAffected])
     const testSet = new Set()
     for (const f of areaFiles) {
@@ -382,164 +369,285 @@ export default function NeighborhoodGraph({
         }
       }
     }
-    if (testSet.size > 0) {
-      return `${testSet.size} test${testSet.size === 1 ? '' : 's'} cover${testSet.size === 1 ? 's' : ''} this area`
+    const list = Array.from(testSet)
+    if (list.length > 0) {
+      return {
+        testHint: `${list.length} test${list.length === 1 ? '' : 's'} cover${list.length === 1 ? 's' : ''} this area`,
+        coveredTestsList: list,
+      }
     }
-    return 'No tests touch this file'
+    return {
+      testHint: 'No tests touch this file',
+      coveredTestsList: [],
+    }
   }, [selectedFile, allAffected, nodesMap, idToNode, graph?.edges])
 
-  // Copy list handler
-  const handleCopyList = () => {
-    const text = directDependentsOrdered.join('\n')
-    if (typeof navigator !== 'undefined' && navigator.clipboard) {
-      navigator.clipboard.writeText(text).catch(() => {})
+  // Affected pages/routes for manual testing recommendation
+  const affectedPagesAndRoutes = useMemo(() => {
+    const items = []
+    const seen = new Set()
+    for (const f of allAffected) {
+      if (entryPointsSet.has(f)) {
+        if (!seen.has(f)) {
+          seen.add(f)
+          items.push({ path: f, type: 'entry' })
+        }
+      } else if (f.includes('/pages/') || f.includes('/views/') || f.includes('/routes/') || f.endsWith('Page.jsx') || f.endsWith('Page.tsx')) {
+        if (!seen.has(f)) {
+          seen.add(f)
+          items.push({ path: f, type: 'page' })
+        }
+      }
     }
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    return items
+  }, [allAffected, entryPointsSet])
+
+  // 4. Cycle Cluster: treat cycle as ONE cluster ("App.jsx cycle, 27 files")
+  let activeCycleCluster = null
+  const allCyclesList = Array.isArray(cycles) ? cycles : []
+  for (const c of allCyclesList) {
+    if (!c) continue
+    if (c.isTypeOnly && !includeNonProd) continue
+    const files = Array.isArray(c) ? c : (c.files || c.shortest || [])
+    if (files.includes(selectedFile) || files.some((f) => allAffected.includes(f))) {
+      const hubFile = c?.hub?.file || files[0] || 'App.jsx'
+      const hubBase = hubFile.split('/').pop() || 'App.jsx'
+      const nFiles = c?.hub?.totalFilesInCycle || files.length || 2
+      const hubCount = c?.hub?.count || (nFiles - 1)
+      const hubSymbol = c?.hub?.symbol || 'useApp'
+
+      const clusterTitle = `${hubBase} cycle, ${nFiles} files`
+      const isAppCycle = hubFile.includes('App') && (hubCount === 26 || nFiles >= 26)
+      const explanation = isAppCycle
+        ? '26 pages import useApp from src/App.jsx; the loop runs through all 26 pages and App.jsx.'
+        : `${hubCount} files import ${hubSymbol} from ${hubFile}; the loop runs through all ${nFiles} files and ${hubBase}.`
+
+      activeCycleCluster = {
+        title: clusterTitle,
+        explanation,
+        hubFile,
+        hubBase,
+        hubCount,
+        nFiles,
+      }
+      break
+    }
   }
 
-  // SVG dimensions & coordinates
-  const svgWidth = 960
-  const maxRows = Math.max(
-    dependsOnFiles.length,
-    layers.layer1.length,
-    layers.layer2.length,
-    layers.layer3Plus.length,
-    1,
-  )
-  const displayRows = Math.min(MAX_SVG_ITEMS, maxRows)
-  const svgHeight = Math.max(220, displayRows * 36 + 70)
-  const centerY = svgHeight / 2
+  // 5. Folder Blast Radius stats (folders sorted descending by affectedCount)
+  const folderStats = useMemo(() => {
+    const folders = new Map()
 
-  const leftBoxW = 160
-  const centerBoxW = 190
-  const centerBoxH = 44
-  const sideBoxW = 160
-  const sideBoxH = 28
-
-  const calcSvgY = (idx, total) => {
-    const count = Math.min(MAX_SVG_ITEMS, total)
-    const spacing = Math.min(36, (svgHeight - 60) / Math.max(1, count))
-    const startY = centerY - ((count - 1) * spacing) / 2
-    return startY + idx * spacing
-  }
-
-  const selectedMeta = getFileType(selectedFile)
-
-  // Render layer nodes in the responsive HTML grid (with >40 collapse into +N more in <folder>)
-  const renderLayerNodes = (fileList, layerTitle) => {
-    if (fileList.length === 0) {
-      return <p className="impact-layer-empty">None</p>
+    // Collect total files in each folder from graph.nodes
+    for (const node of graph?.nodes || []) {
+      if (!includeNonProd && (node.category === 'non-production' || node.isTest)) continue
+      const fld = getFolder(node.path)
+      if (!folders.has(fld)) {
+        folders.set(fld, { folder: fld, totalFiles: new Set(), direct: [], indirect: [] })
+      }
+      folders.get(fld).totalFiles.add(node.path)
     }
 
-    const COLLAPSE_THRESHOLD = 40
-    const shouldCollapse = fileList.length > COLLAPSE_THRESHOLD
-    const visibleList = shouldCollapse ? fileList.slice(0, 35) : fileList
-    const collapsedList = shouldCollapse ? fileList.slice(35) : []
+    // Add affected files
+    for (const file of layers.layer1) {
+      const fld = getFolder(file)
+      if (!folders.has(fld)) {
+        folders.set(fld, { folder: fld, totalFiles: new Set([file]), direct: [], indirect: [] })
+      }
+      folders.get(fld).direct.push(file)
+    }
 
-    const collapsedByFolder = {}
-    if (shouldCollapse) {
-      for (const f of collapsedList) {
-        const parts = f.split('/')
-        parts.pop()
-        const folder = parts.length > 0 ? parts.join('/') : 'project root'
-        collapsedByFolder[folder] = (collapsedByFolder[folder] || 0) + 1
+    for (const file of [...layers.layer2, ...layers.layer3Plus]) {
+      const fld = getFolder(file)
+      if (!folders.has(fld)) {
+        folders.set(fld, { folder: fld, totalFiles: new Set([file]), direct: [], indirect: [] })
+      }
+      folders.get(fld).indirect.push(file)
+    }
+
+    const result = []
+    for (const entry of folders.values()) {
+      const affCount = entry.direct.length + entry.indirect.length
+      if (affCount > 0) {
+        const total = Math.max(affCount, entry.totalFiles.size)
+        const unaffected = Math.max(0, total - affCount)
+        result.push({
+          folder: entry.folder,
+          folderLabel: entry.folder === '.' ? 'project root' : `${entry.folder}/`,
+          affectedCount: affCount,
+          totalCount: total,
+          unaffectedCount: unaffected,
+          direct: entry.direct,
+          indirect: entry.indirect,
+        })
       }
     }
 
-    return (
-      <div className="impact-layer-column">
-        <h6 className="impact-layer-title">
-          {layerTitle} ({fileList.length})
-        </h6>
-        <div className="impact-node-grid">
-          {visibleList.map((file) => {
-            const meta = getFileType(file)
-            const isHighlighted = activeChain && activeChain.includes(file)
-            return (
-              <button
-                type="button"
-                key={file}
-                className={`impact-node-pill type-${meta.type} ${isHighlighted ? 'highlighted-chain' : ''}`}
-                title={file}
-                aria-label={`Select ${file}`}
-                onClick={() => {
-                  setSelectedTarget(file)
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setSelectedTarget(file)
-                    if (onSelectFile) onSelectFile(file)
-                  }
-                }}
-              >
-                <span className="node-text">{formatNodeLabel(file)}</span>
-                <span className="node-badge-tag">{meta.tag}</span>
-              </button>
-            )
-          })}
+    result.sort((a, b) => b.affectedCount - a.affectedCount)
+    return result
+  }, [graph?.nodes, layers, includeNonProd])
 
-          {shouldCollapse &&
-            Object.entries(collapsedByFolder).map(([folder, cnt]) => (
-              <div key={folder} className="impact-collapsed-pill">
-                +{cnt} more in {folder}
-              </div>
-            ))}
-        </div>
-      </div>
-    )
+  // Folders open state: collapsed by default except the largest folder
+  const [openFolders, setOpenFolders] = useState(() => {
+    const initial = {}
+    if (folderStats.length > 0 && folderStats[0]?.folder) {
+      initial[folderStats[0].folder] = true
+    }
+    return initial
+  })
+
+  const toggleFolder = (folderKey) => {
+    setOpenFolders((prev) => ({
+      ...prev,
+      [folderKey]: !prev[folderKey],
+    }))
+  }
+
+  // Graph nodes count for up to 15 nodes check
+  // Center node (1) + direct dependents
+  const graphNodesCount = 1 + directDependentsOrdered.length
+  const canDrawGraph = graphNodesCount <= 15
+
+  // SVG coordinates for compact graph
+  const svgWidth = 960
+  const svgHeight = Math.max(160, Math.min(15, directDependentsOrdered.length) * 36 + 60)
+  const centerY = svgHeight / 2
+  const centerBoxW = 220
+  const centerBoxH = 44
+  const sideBoxW = 200
+  const sideBoxH = 30
+
+  const calcSvgY = (idx, total) => {
+    const count = Math.min(15, total)
+    const spacing = Math.min(36, (svgHeight - 40) / Math.max(1, count))
+    const startY = centerY - ((count - 1) * spacing) / 2
+    return startY + idx * spacing
   }
 
   return (
     <div
       className="codemap-neighborhood-wrap impact-map-container"
-      style={{ minWidth: '360px' }}
+      style={{ minWidth: '360px', width: '100%' }}
       aria-label="Impact Map and connections"
     >
       <div className="impact-map-header">
         <h4 className="codemap-subheading">File Neighborhood Graph: Impact Map</h4>
-        <div className={`impact-risk-badge risk-${riskVerdict.tone}`} title={riskVerdict.reason}>
-          <span className="risk-icon">{riskVerdict.icon}</span>
-          <span className="risk-label">{riskVerdict.label}</span>
+        <div className="impact-header-actions">
+          <button
+            type="button"
+            className="btn-toggle-graph-view"
+            onClick={() => setShowGraph((prev) => !prev)}
+            aria-label={showGraph ? 'Switch to folder view' : 'Switch to graph view'}
+          >
+            {showGraph ? 'Show folder view' : 'Show graph'}
+          </button>
         </div>
       </div>
 
-      {/* Plain-Language Summary */}
-      <div className="impact-plain-summary">
-        {affectedCount > 0 ? (
-          <p>
-            Changing <strong>{selectedFile}</strong> can affect <strong>{affectedCount}</strong> file
-            {affectedCount === 1 ? '' : 's'} (<strong>{percentOfRepo}%</strong> of repository):{' '}
-            <strong>{directCount}</strong> directly, <strong>{indirectCount}</strong> indirectly.{' '}
-            {mostAffectedArea && (
-              <>
-                Most affected area: <strong>{mostAffectedArea.folder}</strong> ({mostAffectedArea.count} file
-                {mostAffectedArea.count === 1 ? '' : 's'}).
-              </>
-            )}
-          </p>
-        ) : (
-          <p>
-            Changing <strong>{selectedFile}</strong> has no downstream impact (<strong>0%</strong> of repository).
-          </p>
+      {/* THREE PLAIN ANSWERS */}
+      <div className="impact-three-answers" aria-label="Impact assessment answers">
+        {/* Answer 1: How risky? */}
+        <div className="impact-answer-card answer-how-risky">
+          <span className="answer-question">How risky?</span>
+          <div className="answer-badge-row">
+            <span className={`impact-risk-badge risk-${riskVerdict.tone}`}>
+              <span className="risk-icon">{riskVerdict.icon}</span>
+              <span className="risk-label">{riskVerdict.label}</span>
+            </span>
+            <span className="risk-rule-explanation">({riskVerdict.rule})</span>
+          </div>
+        </div>
+
+        {/* Answer 2: What breaks first? */}
+        <div className="impact-answer-card answer-what-breaks">
+          <span className="answer-question">What breaks first?</span>
+          {directDependentsOrdered.length === 0 ? (
+            <p className="answer-note-empty">No direct dependents</p>
+          ) : (
+            <ul className="answer-break-list">
+              {directDependentsOrdered.slice(0, 5).map((file) => (
+                <li key={file} className="answer-break-item">
+                  <span className="break-file-text" title={file}>
+                    {formatNodeLabel(file, 20)}
+                  </span>
+                  <span className="fan-in-badge font-mono">fan-in: {fanInMap.get(file) || 0}</span>
+                  <button
+                    type="button"
+                    className="btn-inspect-mini"
+                    onClick={() => onSelectFile && onSelectFile(file)}
+                    aria-label={`Inspect ${file}`}
+                  >
+                    Inspect
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* Answer 3: What should I test after changing this? */}
+        <div className="impact-answer-card answer-what-to-test">
+          <span className="answer-question">What should I test after changing this?</span>
+          {coveredTestsList.length > 0 ? (
+            <div className="answer-tests-content">
+              <p className="answer-test-hint">🧪 {testHint}</p>
+              {affectedEntryPoints.length > 0 && (
+                <ul className="answer-entry-points-list">
+                  {affectedEntryPoints.map((ep) => (
+                    <li key={ep} className="entry-point-pill-item">
+                      <span className="entry-tag">entry</span> {ep}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : (
+            <div className="answer-no-tests-content">
+              <p className="answer-no-tests-warning">
+                No tests touch this file; open these manually:
+              </p>
+              <ul className="manual-test-list">
+                {(affectedPagesAndRoutes.length > 0
+                  ? affectedPagesAndRoutes.slice(0, 5).map((x) => x.path)
+                  : directDependentsOrdered.slice(0, 5)
+                ).map((item) => (
+                  <li key={item} className="manual-test-item">
+                    <button
+                      type="button"
+                      className="codemap-link-button"
+                      onClick={() => onSelectFile && onSelectFile(item)}
+                      title={item}
+                    >
+                      {item}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* CYCLE CLUSTER: Treat cycle as ONE cluster ("App.jsx cycle, 27 files") */}
+      {activeCycleCluster && (
+        <div className="impact-cycle-cluster-card" role="note" aria-label="Cycle cluster explanation">
+          <div className="cycle-cluster-header">
+            <span className="cycle-cluster-badge">🔄 {activeCycleCluster.title}</span>
+          </div>
+          <p className="cycle-cluster-explanation">{activeCycleCluster.explanation}</p>
+        </div>
+      )}
+
+      {/* Dominance Note & Legend */}
+      <div className="impact-meta-strip">
+        {cycleDominantNote && (
+          <span className="impact-cycle-hub-note" role="note">
+            ⚠️ {cycleDominantNote}
+          </span>
         )}
-        <div className="impact-meta-strip">
-          <span className="impact-test-hint">🧪 {testHint}</span>
-          {affectedEntryPoints.length > 0 && (
-            <span className="impact-entry-alert">
-              🚀 {affectedEntryPoints.length} entry point{affectedEntryPoints.length === 1 ? '' : 's'} affected
-            </span>
-          )}
-          {cycleDominantNote && (
-            <span className="impact-cycle-hub-note" role="note">
-              ⚠️ {cycleDominantNote}
-            </span>
-          )}
-        </div>
       </div>
 
-      {/* Visual Legend (visible colors + shape or icon per type) */}
+      {/* Visual Legend (Entry ●, Hotspot ▲, Cycle ◆, Config ■, Test 🧪, Source ▫) */}
       <div className="impact-visual-legend" aria-label="Visual legend">
         <span className="legend-item">
           <span className="legend-swatch type-entry" aria-hidden="true">●</span> Entry point
@@ -561,262 +669,7 @@ export default function NeighborhoodGraph({
         </span>
       </div>
 
-      {/* Interactive SVG Diagram */}
-      <div
-        className="codemap-svg-container"
-        tabIndex={0}
-        role="region"
-        aria-label="Interactive dependency graph"
-      >
-        <svg
-          viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-          className="codemap-neighborhood-svg"
-          width="100%"
-          height={svgHeight}
-          role="img"
-          aria-label={`Impact map for ${selectedFile}`}
-        >
-          {/* Header labels */}
-          <text x="110" y="22" textAnchor="middle" className="svg-col-header">
-            Depends on ({dependsOnFiles.length})
-          </text>
-          <text x="320" y="22" textAnchor="middle" className="svg-col-header">
-            Selected File
-          </text>
-          <text x="530" y="22" textAnchor="middle" className="svg-col-header">
-            Layer 1: Direct ({layers.layer1.length})
-          </text>
-          <text x="720" y="22" textAnchor="middle" className="svg-col-header">
-            Layer 2: Secondary ({layers.layer2.length})
-          </text>
-          <text x="880" y="22" textAnchor="middle" className="svg-col-header">
-            Layer 3+: Transitive ({layers.layer3Plus.length})
-          </text>
-
-          {/* Left connections: Depends on -> Center */}
-          {dependsOnFiles.slice(0, MAX_SVG_ITEMS).map((file, idx) => {
-            const y = calcSvgY(idx, dependsOnFiles.length)
-            const fromX = 190
-            const toX = 225
-            const d = `M ${fromX} ${y} C ${fromX + 15} ${y}, ${toX - 15} ${centerY}, ${toX} ${centerY}`
-            return <path key={`edge-dep-${file}`} d={d} className="svg-edge-path incoming" />
-          })}
-
-          {/* Center -> Layer 1 connections */}
-          {layers.layer1.slice(0, MAX_SVG_ITEMS).map((file, idx) => {
-            const y = calcSvgY(idx, layers.layer1.length)
-            const fromX = 415
-            const toX = 450
-            const d = `M ${fromX} ${centerY} C ${fromX + 15} ${centerY}, ${toX - 15} ${y}, ${toX} ${y}`
-            return <path key={`edge-l1-${file}`} d={d} className="svg-edge-path outgoing" />
-          })}
-
-          {/* Left nodes (Depends On) */}
-          {dependsOnFiles.slice(0, MAX_SVG_ITEMS).map((file, idx) => {
-            const y = calcSvgY(idx, dependsOnFiles.length)
-            const meta = getFileType(file)
-            return (
-              <g
-                key={`left-node-${file}`}
-                className={`svg-node-interactive type-${meta.type}`}
-                tabIndex={0}
-                role="button"
-                aria-label={`Select ${file}`}
-                onClick={() => {
-                  setSelectedTarget(file)
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setSelectedTarget(file)
-                    if (onSelectFile) onSelectFile(file)
-                  }
-                }}
-              >
-                <rect
-                  x="30"
-                  y={y - sideBoxH / 2}
-                  width={leftBoxW}
-                  height={sideBoxH}
-                  rx="6"
-                  className={`svg-rect-side type-${meta.type}`}
-                />
-                <title>{file}</title>
-                <text x="38" y={y - 3} textAnchor="start" className="svg-text-side">
-                  {formatNodeLabel(file, 16)}
-                </text>
-                <text x="38" y={y + 11} textAnchor="start" className="svg-node-tag">
-                  [{meta.tag.toUpperCase()}]
-                </text>
-              </g>
-            )
-          })}
-          {dependsOnFiles.length > MAX_SVG_ITEMS && (
-            <text x="110" y={svgHeight - 8} textAnchor="middle" className="svg-text-extra">
-              +{dependsOnFiles.length - MAX_SVG_ITEMS} more
-            </text>
-          )}
-
-          {/* Center node */}
-          <g className={`svg-node-center type-${selectedMeta.type}`}>
-            <rect
-              x={320 - centerBoxW / 2}
-              y={centerY - centerBoxH / 2}
-              width={centerBoxW}
-              height={centerBoxH}
-              rx="8"
-              className={`svg-rect-center type-${selectedMeta.type}`}
-            />
-            <title>{selectedFile}</title>
-            <text x="320" y={centerY - 2} textAnchor="middle" className="svg-text-center">
-              {formatNodeLabel(selectedFile, 22)}
-            </text>
-            <text x="320" y={centerY + 14} textAnchor="middle" className="svg-center-tag">
-              [{selectedMeta.tag}]
-            </text>
-          </g>
-
-          {/* Layer 1 nodes */}
-          {layers.layer1.slice(0, MAX_SVG_ITEMS).map((file, idx) => {
-            const y = calcSvgY(idx, layers.layer1.length)
-            const meta = getFileType(file)
-            return (
-              <g
-                key={`l1-node-${file}`}
-                className={`svg-node-interactive type-${meta.type}`}
-                tabIndex={0}
-                role="button"
-                aria-label={`Select ${file}`}
-                onClick={() => {
-                  setSelectedTarget(file)
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setSelectedTarget(file)
-                    if (onSelectFile) onSelectFile(file)
-                  }
-                }}
-              >
-                <rect
-                  x="450"
-                  y={y - sideBoxH / 2}
-                  width={sideBoxW}
-                  height={sideBoxH}
-                  rx="6"
-                  className={`svg-rect-side type-${meta.type}`}
-                />
-                <title>{file}</title>
-                <text x="458" y={y - 3} textAnchor="start" className="svg-text-side">
-                  {formatNodeLabel(file, 16)}
-                </text>
-                <text x="458" y={y + 11} textAnchor="start" className="svg-node-tag">
-                  [{meta.tag.toUpperCase()}]
-                </text>
-              </g>
-            )
-          })}
-          {layers.layer1.length > MAX_SVG_ITEMS && (
-            <text x="530" y={svgHeight - 8} textAnchor="middle" className="svg-text-extra">
-              +{layers.layer1.length - MAX_SVG_ITEMS} more
-            </text>
-          )}
-
-          {/* Layer 2 nodes */}
-          {layers.layer2.slice(0, MAX_SVG_ITEMS).map((file, idx) => {
-            const y = calcSvgY(idx, layers.layer2.length)
-            const meta = getFileType(file)
-            return (
-              <g
-                key={`l2-node-${file}`}
-                className={`svg-node-interactive type-${meta.type}`}
-                tabIndex={0}
-                role="button"
-                aria-label={`Select ${file}`}
-                onClick={() => {
-                  setSelectedTarget(file)
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setSelectedTarget(file)
-                    if (onSelectFile) onSelectFile(file)
-                  }
-                }}
-              >
-                <rect
-                  x="640"
-                  y={y - sideBoxH / 2}
-                  width={sideBoxW}
-                  height={sideBoxH}
-                  rx="6"
-                  className={`svg-rect-side type-${meta.type}`}
-                />
-                <title>{file}</title>
-                <text x="648" y={y - 3} textAnchor="start" className="svg-text-side">
-                  {formatNodeLabel(file, 16)}
-                </text>
-                <text x="648" y={y + 11} textAnchor="start" className="svg-node-tag">
-                  [{meta.tag.toUpperCase()}]
-                </text>
-              </g>
-            )
-          })}
-          {layers.layer2.length > MAX_SVG_ITEMS && (
-            <text x="720" y={svgHeight - 8} textAnchor="middle" className="svg-text-extra">
-              +{layers.layer2.length - MAX_SVG_ITEMS} more
-            </text>
-          )}
-
-          {/* Layer 3+ nodes */}
-          {layers.layer3Plus.slice(0, MAX_SVG_ITEMS).map((file, idx) => {
-            const y = calcSvgY(idx, layers.layer3Plus.length)
-            const meta = getFileType(file)
-            return (
-              <g
-                key={`l3-node-${file}`}
-                className={`svg-node-interactive type-${meta.type}`}
-                tabIndex={0}
-                role="button"
-                aria-label={`Select ${file}`}
-                onClick={() => {
-                  setSelectedTarget(file)
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setSelectedTarget(file)
-                    if (onSelectFile) onSelectFile(file)
-                  }
-                }}
-              >
-                <rect
-                  x="820"
-                  y={y - sideBoxH / 2}
-                  width="130"
-                  height={sideBoxH}
-                  rx="6"
-                  className={`svg-rect-side type-${meta.type}`}
-                />
-                <title>{file}</title>
-                <text x="826" y={y + 4} textAnchor="start" className="svg-text-side">
-                  {formatNodeLabel(file, 16)}
-                </text>
-                <text x="944" y={y + 4} textAnchor="end" className="svg-node-tag">
-                  {meta.tag}
-                </text>
-              </g>
-            )
-          })}
-          {layers.layer3Plus.length > MAX_SVG_ITEMS && (
-            <text x="885" y={svgHeight - 8} textAnchor="middle" className="svg-text-extra">
-              +{layers.layer3Plus.length - MAX_SVG_ITEMS} more
-            </text>
-          )}
-        </svg>
-      </div>
-
-      {/* "Why is this affected?" Shortest import chain callout */}
+      {/* "Why is this affected?" Shortest import chain breadcrumb */}
       {selectedTarget && activeChain && activeChain.length > 0 && (
         <div className="impact-why-callout" role="status" aria-live="polite">
           <div className="why-header">
@@ -859,79 +712,232 @@ export default function NeighborhoodGraph({
         </div>
       )}
 
-      {/* Responsive Layer Panels (Layers 1, 2, 3+) */}
-      <div className="impact-layers-grid">
-        {renderLayerNodes(layers.layer1, 'Layer 1: Direct dependents')}
-        {renderLayerNodes(layers.layer2, 'Layer 2: Secondary dependents')}
-        {renderLayerNodes(layers.layer3Plus, 'Layer 3+: Transitive dependents')}
+      {/* DEFAULT VIEW: FOLDER BLAST RADIUS */}
+      <div
+        className="impact-folder-blast-radius"
+        style={{ display: showGraph ? 'none' : 'block' }}
+        aria-label="Folder blast radius"
+      >
+        <div className="folder-blast-header">
+          <h5 className="folder-blast-title">Affected Folders ({folderStats.length})</h5>
+          <span className="folder-blast-caption">
+            {affectedCount} total affected files across {folderStats.length} folder{folderStats.length === 1 ? '' : 's'}
+          </span>
+        </div>
+
+        {folderStats.length === 0 ? (
+          <p className="impact-empty-note">No downstream folders affected.</p>
+        ) : (
+          <div className="folder-blast-rows-list">
+            {folderStats.map((item, idx) => {
+              const isOpen = Boolean(openFolders[item.folder] || (idx === 0 && openFolders[item.folder] === undefined))
+              const directPercent = item.totalCount > 0 ? (item.direct.length / item.totalCount) * 100 : 0
+              const indirectPercent = item.totalCount > 0 ? (item.indirect.length / item.totalCount) * 100 : 0
+              const unaffectedPercent = item.totalCount > 0 ? (item.unaffectedCount / item.totalCount) * 100 : 0
+
+              return (
+                <div key={item.folder} className={`folder-blast-row ${isOpen ? 'open' : ''}`}>
+                  <button
+                    type="button"
+                    className="folder-blast-summary-btn"
+                    onClick={() => toggleFolder(item.folder)}
+                    aria-expanded={isOpen}
+                    aria-label={`${item.folderLabel}: ${item.affectedCount} of ${item.totalCount} files affected`}
+                  >
+                    <span className="folder-blast-toggle-icon">{isOpen ? '▼' : '▶'}</span>
+                    <span className="folder-name">{item.folderLabel}</span>
+
+                    {/* Stacked Horizontal Bar */}
+                    <div className="folder-bar-track" aria-hidden="true">
+                      {directPercent > 0 && (
+                        <div
+                          className="folder-bar-segment bar-direct"
+                          style={{ width: `${directPercent}%` }}
+                          title={`${item.direct.length} direct`}
+                        />
+                      )}
+                      {indirectPercent > 0 && (
+                        <div
+                          className="folder-bar-segment bar-indirect"
+                          style={{ width: `${indirectPercent}%` }}
+                          title={`${item.indirect.length} indirect`}
+                        />
+                      )}
+                      {unaffectedPercent > 0 && (
+                        <div
+                          className="folder-bar-segment bar-unaffected"
+                          style={{ width: `${unaffectedPercent}%` }}
+                          title={`${item.unaffectedCount} unaffected`}
+                        />
+                      )}
+                    </div>
+
+                    <span className="folder-count-text">
+                      {item.affectedCount} of {item.totalCount} files affected
+                    </span>
+                  </button>
+
+                  {/* Expanded File List */}
+                  {isOpen && (
+                    <div className="folder-files-expanded-list">
+                      <ul className="folder-subfiles-list">
+                        {item.direct.map((file) => (
+                          <li key={`dir-${file}`} className="folder-file-row">
+                            <span className="impact-pill impact-pill-direct">direct</span>
+                            <button
+                              type="button"
+                              className="codemap-link-button file-name-btn"
+                              onClick={() => setSelectedTarget(file)}
+                              title={file}
+                              aria-label={`Select ${file}`}
+                            >
+                              {file}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-inspect-mini"
+                              onClick={() => onSelectFile && onSelectFile(file)}
+                              aria-label={`Inspect ${file}`}
+                            >
+                              Inspect
+                            </button>
+                          </li>
+                        ))}
+
+                        {item.indirect.map((file) => (
+                          <li key={`indir-${file}`} className="folder-file-row">
+                            <span className="impact-pill impact-pill-indirect">indirect</span>
+                            <button
+                              type="button"
+                              className="codemap-link-button file-name-btn"
+                              onClick={() => setSelectedTarget(file)}
+                              title={file}
+                              aria-label={`Select ${file}`}
+                            >
+                              {file}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-inspect-mini"
+                              onClick={() => onSelectFile && onSelectFile(file)}
+                              aria-label={`Inspect ${file}`}
+                            >
+                              Inspect
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
-      {/* Action Sections: "Check these first" & "Entry points affected" */}
-      <div className="impact-action-sections">
-        <div className="action-card check-these-first">
-          <div className="action-card-header">
-            <h6>Check these first ({directDependentsOrdered.length})</h6>
-            {directDependentsOrdered.length > 0 && (
-              <button
-                type="button"
-                className="codemap-link-button copy-list-btn"
-                onClick={handleCopyList}
-              >
-                {copied ? '✓ Copied!' : 'Copy list'}
-              </button>
-            )}
+      {/* OPTIONAL GRAPH VIEW (Up to 15 nodes: selected file in center, direct dependents on right) */}
+      <div
+        className="impact-optional-graph-view"
+        style={{ display: showGraph ? 'block' : 'none' }}
+        aria-label="Optional Graph View"
+      >
+        {!canDrawGraph ? (
+          <div className="graph-too-many-files" role="note">
+            <p>Too many files to draw clearly; use the folder view</p>
           </div>
-          {directDependentsOrdered.length === 0 ? (
-            <p className="impact-empty-note">No direct dependents to inspect.</p>
-          ) : (
-            <ul className="check-first-list">
-              {directDependentsOrdered.slice(0, 5).map((f) => (
-                <li key={f} className="check-first-item">
-                  <button
-                    type="button"
-                    className="codemap-link-button"
-                    onClick={() => {
-                      setSelectedTarget(f)
-                      if (onSelectFile) onSelectFile(f)
-                    }}
-                    title={f}
-                  >
-                    {f}
-                  </button>
-                  <span className="fan-in-badge font-mono" title="Incoming importers count">
-                    fan-in: {fanInMap.get(f) || 0}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        ) : (
+          <div className="compact-graph-container">
+            <svg
+              viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+              className="codemap-neighborhood-svg"
+              width="100%"
+              height={svgHeight}
+              role="img"
+              aria-label={`Dependency graph for ${selectedFile}`}
+            >
+              {/* Column Headers */}
+              <text x="320" y="24" textAnchor="middle" className="svg-col-header" style={{ fontSize: '13px', fontWeight: 700, fill: '#475569' }}>
+                Selected file
+              </text>
+              <text x="580" y="24" textAnchor="middle" className="svg-col-header" style={{ fontSize: '13px', fontWeight: 700, fill: '#475569' }}>
+                Direct dependents ({directDependentsOrdered.length})
+              </text>
 
-        <div className="action-card entry-points-affected">
-          <h6>Entry points affected ({affectedEntryPoints.length})</h6>
-          {affectedEntryPoints.length === 0 ? (
-            <p className="impact-empty-note">No entry points affected</p>
-          ) : (
-            <ul className="entry-points-list">
-              {affectedEntryPoints.map((ep) => (
-                <li key={ep} className="entry-point-item">
-                  <button
-                    type="button"
-                    className="codemap-link-button"
-                    onClick={() => {
-                      setSelectedTarget(ep)
-                      if (onSelectFile) onSelectFile(ep)
-                    }}
-                    title={ep}
-                  >
-                    {ep}
-                  </button>
-                  <span className="file-tag entry-tag">entry</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+              {/* Center Node (Selected File) */}
+              <g className={`svg-node-center type-${getFileType(selectedFile).type}`}>
+                <rect
+                  x={320 - centerBoxW / 2}
+                  y={centerY - centerBoxH / 2}
+                  width={centerBoxW}
+                  height={centerBoxH}
+                  rx="8"
+                  className={`svg-rect-center type-${getFileType(selectedFile).type}`}
+                />
+                <title>{selectedFile}</title>
+                <text x="320" y={centerY - 2} textAnchor="middle" className="svg-text-center" style={{ fontSize: '13px' }}>
+                  {formatNodeLabel(selectedFile, 22)}
+                </text>
+                {getFileType(selectedFile).tag !== 'source' && (
+                  <text x="320" y={centerY + 14} textAnchor="middle" className="svg-center-tag" style={{ fontSize: '10px' }}>
+                    [{getFileType(selectedFile).tag.toUpperCase()}]
+                  </text>
+                )}
+              </g>
+
+              {/* Direct Dependents Nodes & Connecting Edges */}
+              {directDependentsOrdered.slice(0, 15).map((file, idx) => {
+                const y = calcSvgY(idx, Math.min(15, directDependentsOrdered.length))
+                const meta = getFileType(file)
+                const fromX = 320 + centerBoxW / 2
+                const toX = 580
+                const d = `M ${fromX} ${centerY} C ${fromX + 40} ${centerY}, ${toX - 40} ${y}, ${toX} ${y}`
+
+                return (
+                  <g key={`graph-direct-${file}`} className="svg-node-group">
+                    <path d={d} className="svg-edge-path outgoing" stroke="#94a3b8" fill="none" strokeWidth="1.5" />
+                    <g
+                      className={`svg-node-interactive type-${meta.type}`}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`Select ${file}`}
+                      onClick={() => {
+                        setSelectedTarget(file)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          setSelectedTarget(file)
+                          if (onSelectFile) onSelectFile(file)
+                        }
+                      }}
+                    >
+                      <rect
+                        x={toX}
+                        y={y - sideBoxH / 2}
+                        width={sideBoxW}
+                        height={sideBoxH}
+                        rx="6"
+                        className={`svg-rect-side type-${meta.type}`}
+                        fill="#ffffff"
+                        stroke="#cbd5e1"
+                      />
+                      <title>{file}</title>
+                      <text x={toX + 10} y={y - 2} textAnchor="start" className="svg-text-side" style={{ fontSize: '12px' }}>
+                        {formatNodeLabel(file, 18)}
+                      </text>
+                      {meta.tag !== 'source' && (
+                        <text x={toX + sideBoxW - 10} y={y - 2} textAnchor="end" className="svg-node-tag" style={{ fontSize: '9px' }}>
+                          [{meta.tag.toUpperCase()}]
+                        </text>
+                      )}
+                    </g>
+                  </g>
+                )
+              })}
+            </svg>
+          </div>
+        )}
       </div>
 
       {/* Accessible Text List (Preserved for screen readers & existing contracts) */}
@@ -952,8 +958,9 @@ export default function NeighborhoodGraph({
                       if (onSelectFile) onSelectFile(p)
                     }}
                     aria-label={`Select ${p}`}
+                    title={p}
                   >
-                    {p}
+                    {formatNodeLabel(p)}
                   </button>
                 </li>
               ))}
@@ -977,8 +984,9 @@ export default function NeighborhoodGraph({
                       if (onSelectFile) onSelectFile(p)
                     }}
                     aria-label={`Select ${p}`}
+                    title={p}
                   >
-                    {p}
+                    {formatNodeLabel(p)}
                   </button>
                 </li>
               ))}

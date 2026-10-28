@@ -11,6 +11,7 @@ import DashboardView from './views/DashboardView'
 import HistoryView from './views/HistoryView'
 import NotFoundView from './views/NotFoundView'
 import ProjectsView from './views/ProjectsView'
+import ChangeImpactView from './views/ChangeImpactView'
 
 const user = { name: 'Developer', initials: 'D' }
 
@@ -31,6 +32,7 @@ function App() {
                 <ErrorBoundary>
                   <Routes>
                     <Route path="/" element={<DashboardView user={user} />} />
+                    <Route path="/change-impact" element={<ChangeImpactView />} />
                     <Route path="/projects" element={<ProjectsView />} />
                     <Route path="/history" element={<HistoryView />} />
                     <Route path="/bug-vault" element={<BugVaultView key="vault" />} />

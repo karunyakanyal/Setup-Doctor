@@ -15,6 +15,7 @@ import DiagnosticsLoadingSkeleton from '../components/diagnostics/DiagnosticsLoa
 import DiagnosticsErrorState from '../components/diagnostics/DiagnosticsErrorState'
 import CodeMapPanel from '../components/codemap/CodeMapPanel'
 import ProjectGlanceCard from '../components/diagnostics/ProjectGlanceCard'
+import RiskiestFilesCard from '../components/diagnostics/RiskiestFilesCard'
 import { buildMergedFindings, isCoveredTopic, formatCapReasonPlainWords } from '../utils/projectGlance.js'
 import WhatToDoNextPanel from '../components/diagnostics/WhatToDoNextPanel'
 import ProjectProfileCard from '../components/diagnostics/ProjectProfileCard'
@@ -559,6 +560,17 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
             deepScanStatus={deepScanStatus}
             includeNonProd={includeNonProd}
           />
+
+          <RiskiestFilesCard
+            graph={deepScanData?.graph}
+            cycles={deepScanData?.summary?.cycles}
+            includeNonProd={includeNonProd}
+            onInspectFile={(filePath) => {
+              if (filePath) {
+                // inspect file
+              }
+            }}
+          />
         </section>
       )}
 
@@ -775,6 +787,9 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                     framework={framework}
                     monorepo={monorepo}
                     diagnostics={diagnostics}
+                    overallGrade={overallGrade}
+                    overallScore={overallScore}
+                    capReason={overallCapReason}
                   />
                 )}
 
