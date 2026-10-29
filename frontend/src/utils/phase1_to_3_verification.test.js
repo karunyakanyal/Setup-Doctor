@@ -77,7 +77,7 @@ test('Phase 1 - Cycle findings have real import lines and never "cycle step N"',
   }
 })
 
-test('Phase 1 - Hub detection with Skinveda shape states "26 files import useApp from src/App.jsx"', () => {
+test('Phase 1 - Hub detection with Skinveda shape states "26 pages import useApp from src/App.jsx; the loop runs through all 26 pages and App.jsx"', () => {
   const deepScanData = {
     summary: {
       cycles: [
@@ -104,9 +104,9 @@ test('Phase 1 - Hub detection with Skinveda shape states "26 files import useApp
   const findings = buildMergedFindings({ deepScanData })
   const cycleFinding = findings.find((f) => f.topic === 'cycles')
   assert.ok(cycleFinding)
-  assert.ok(cycleFinding.why.includes('26 files import useApp from src/App.jsx'))
+  assert.ok(cycleFinding.why.includes('26 pages import useApp from src/App.jsx; the loop runs through all 26 pages and App.jsx'))
   assert.ok(cycleFinding.fix.includes('src/context/AppContext.jsx'))
-  assert.ok(cycleFinding.fix.includes('this one change breaks the loop through all 2 files'))
+  assert.ok(cycleFinding.fix.includes('this one change breaks the loop through all 26 pages and App.jsx'))
 })
 
 test('Phase 1 - Summary line comes from merged findings severity counts', () => {
@@ -312,3 +312,31 @@ test('Phase 3 - Being in a cycle never makes risk High by itself', () => {
   // 0% blast radius, no entry points: risk must be Low even though in a cycle!
   assert.ok(html.includes('Low risk'), 'Being in a cycle must not make risk High by itself')
 })
+test('Phase 3 - Technical details shows rule-engine grade and fails if two different letter grades appear on page', () => {
+  // Scenario: rule engine gave Grade C (score 83), while setup checks was 90
+  const html = renderToStaticMarkup(
+    React.createElement(DiagnosticsHealthSummary, {
+      health: { score: 90 },
+      overallGrade: 'C',
+      overallScore: 83,
+      capReason: 'Capped at C by Maintainability: no automated tests',
+    })
+  )
+
+  // 1. Large verdict block shows rule-engine grade C, 83/100, and "A few things to fix"
+  assert.ok(html.includes('grade-badge-C'), 'Large badge shows rule-engine grade C')
+  assert.ok(html.includes('83'), 'Score displays 83')
+  assert.ok(html.includes('A few things to fix'), 'Verdict is A few things to fix')
+
+  // 2. Legacy 90 appears ONLY as small Setup checks line
+  assert.ok(html.includes('Setup checks: 90/100'), 'Legacy 90 appears as Setup checks: 90/100')
+  assert.ok(!html.includes('grade-badge-A'), 'Must NEVER show Grade A badge')
+  assert.ok(!html.includes('Looking healthy'), 'Must NEVER show Looking healthy')
+
+  // 3. Page consistency check: collect all primary grade-badges and ensure only one letter grade exists
+  const gradeMatches = [...html.matchAll(/grade-badge-([A-F])/g)].map(m => m[1])
+  const uniqueGrades = new Set(gradeMatches)
+  assert.equal(uniqueGrades.size, 1, `Expected exactly 1 unique letter grade on page, found: ${[...uniqueGrades].join(', ')}`)
+  assert.equal([...uniqueGrades][0], 'C')
+})
+

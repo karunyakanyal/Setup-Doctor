@@ -6,6 +6,14 @@ const { fetchRepoArchive } = require('../services/archive')
 const { buildGraph, getCachedGraph, getCachedGraphCaseInsensitive, setCachedGraph, getPreviousScan, setPreviousScan } = require('../services/graph')
 const { evaluateGithubHygiene } = require('../services/githubHygiene')
 const { extractProductionDepsFromLockfile, queryOsvVulnerabilities } = require('../services/osv')
+const { parseRepository } = require('../../../shared/repository')
+const {
+	computeChangeImpact,
+	fetchPullRequestChanges,
+	fetchCompareChanges,
+	getCachedChangeImpact,
+	setCachedChangeImpact,
+} = require('../services/changeImpact')
 
 const router = express.Router()
 
@@ -756,6 +764,198 @@ const handleGraph = async (req, res, next) => {
 	}
 }
 
+async function handleChangeImpact(req, res, next) {
+	let { repositoryUrl, owner, repo, pullNumber, base, head } = req.body || {}
+
+	if (typeof repositoryUrl === 'string') {
+		const pullMatch = repositoryUrl.match(/\/pull\/(\d+)/i)
+		if (pullMatch) {
+			pullNumber = parseInt(pullMatch[1], 10)
+			repositoryUrl = repositoryUrl.replace(/\/pull\/\d+.*$/, '')
+		}
+	}
+
+	if (!owner || !repo) {
+		if (!repositoryUrl) {
+			const err = new Error('Please provide repositoryUrl and pullNumber or base/head')
+			err.status = 400
+			return next(err)
+		}
+		try {
+			const parsed = parseRepository(repositoryUrl)
+			owner = parsed.owner
+			repo = parsed.repo
+		} catch (parseErr) {
+			const err = new Error(parseErr.message || 'Invalid repository URL')
+			err.status = 400
+			return next(err)
+		}
+	}
+
+	pullNumber = pullNumber ? parseInt(pullNumber, 10) : null
+	if (!pullNumber && (!base || !head)) {
+		const err = new Error('Please provide a pullNumber or both base and head')
+		err.status = 400
+		return next(err)
+	}
+
+	const clientAbortController = new AbortController()
+	let clientDisconnected = false
+	const onDisconnect = () => {
+		clientDisconnected = true
+		clientAbortController.abort(new Error('Client disconnected'))
+	}
+
+	if (req && typeof req.on === 'function') {
+		req.on('close', onDisconnect)
+		req.on('timeout', onDisconnect)
+	}
+	if (res && typeof res.on === 'function') {
+		res.on('close', onDisconnect)
+	}
+	if (req?.signal) {
+		if (req.signal.aborted) {
+			onDisconnect()
+		} else {
+			req.signal.addEventListener('abort', onDisconnect, { once: true })
+		}
+	}
+
+	try {
+		const fetchFn = req.fetchFn || req.body?.fetchFn
+		const signal = clientAbortController.signal
+
+		// 1. Fetch changed files
+		let changeData
+		if (pullNumber) {
+			changeData = await fetchPullRequestChanges({
+				owner,
+				repo,
+				pullNumber,
+				signal,
+				fetchFn,
+			})
+		} else {
+			changeData = await fetchCompareChanges({
+				owner,
+				repo,
+				base,
+				head,
+				signal,
+				fetchFn,
+			})
+		}
+
+		const { headSha, baseRef, changedFiles, truncated } = changeData
+
+		// 2. Check 10-minute cache per (repo, pull, headSha) or (repo, base, head, headSha)
+		const cacheKey = pullNumber
+			? `${owner.toLowerCase()}/${repo.toLowerCase()}/pull/${pullNumber}/${headSha}`
+			: `${owner.toLowerCase()}/${repo.toLowerCase()}/compare/${base}...${head}/${headSha}`
+
+		const cached = getCachedChangeImpact(cacheKey)
+		if (cached) {
+			return res.json({
+				success: true,
+				cached: true,
+				...cached,
+			})
+		}
+
+		// 3. Analyze base branch graph
+		const archiveOptions = {
+			signal: clientAbortController.signal,
+		}
+		if (req.archiveTotalTimeout || req.body?.archiveTotalTimeout) {
+			archiveOptions.totalTimeout = req.archiveTotalTimeout || req.body?.archiveTotalTimeout
+		}
+		if (req.archiveConnectTimeout || req.body?.archiveConnectTimeout) {
+			archiveOptions.connectTimeout = req.archiveConnectTimeout || req.body?.archiveConnectTimeout
+		}
+		if (fetchFn) {
+			archiveOptions.fetchFn = fetchFn
+		}
+
+		let baseGraphData = getCachedGraph(owner, repo, baseRef) || getCachedGraphCaseInsensitive(owner, repo)
+		let baseFiles = null
+
+		if (!baseGraphData) {
+			const archiveResult = await fetchRepoArchive(owner, repo, baseRef, archiveOptions)
+			baseFiles = archiveResult.files
+			const graphResult = buildGraph(archiveResult.files, [], {
+				truncated: Boolean(archiveResult.truncated),
+			})
+			baseGraphData = {
+				graph: {
+					nodes: graphResult.nodes,
+					edges: graphResult.edges,
+					externals: graphResult.externals,
+				},
+				summary: graphResult.summary,
+				profile: graphResult.summary?.profile,
+			}
+			setCachedGraph(owner, repo, baseRef, baseGraphData)
+		}
+
+		const graphToUse = baseGraphData.graph ? {
+			nodes: baseGraphData.graph.nodes,
+			edges: baseGraphData.graph.edges,
+			summary: baseGraphData.summary || {},
+		} : baseGraphData
+
+		// 4. Compute change impact deterministically
+		const impactResult = computeChangeImpact({
+			changedFiles,
+			baseGraph: graphToUse,
+			baseFiles,
+			owner,
+			repo,
+			pullNumber,
+			baseRef,
+			headSha,
+			truncated,
+		})
+
+		const responsePayload = {
+			repository: { owner, repo },
+			pullNumber: pullNumber || null,
+			base: baseRef,
+			head: headSha,
+			prTitle: changeData.prTitle || null,
+			...impactResult,
+		}
+
+		setCachedChangeImpact(cacheKey, responsePayload)
+
+		return res.json({
+			success: true,
+			cached: false,
+			...responsePayload,
+		})
+	} catch (error) {
+		if (clientDisconnected || error?.name === 'AbortError') {
+			return
+		}
+		if (error && (error.status === 404 || error.status === 429 || error.status === 400 || error.status === 504)) {
+			return next(error)
+		}
+		if (error && error.status) {
+			return next(error)
+		}
+		const err = new Error(error?.message || 'Unable to analyze change impact')
+		err.status = 502
+		return next(err)
+	} finally {
+		if (req && typeof req.removeListener === 'function') {
+			req.removeListener('close', onDisconnect)
+			req.removeListener('timeout', onDisconnect)
+		}
+		if (res && typeof res.removeListener === 'function') {
+			res.removeListener('close', onDisconnect)
+		}
+	}
+}
+
 router.get('/tree', handleTree)
 router.get('/repository/tree', handleTree)
 
@@ -771,11 +971,15 @@ router.post('/repository/build-check', handleBuildCheck)
 router.post('/graph', graphLimiter, handleGraph)
 router.post('/repository/graph', graphLimiter, handleGraph)
 
+router.post('/change-impact', handleChangeImpact)
+router.post('/repository/change-impact', handleChangeImpact)
+
 router.get('/badge/:owner/:repo', handleBadge)
 router.get('/repository/badge/:owner/:repo', handleBadge)
 
 module.exports = router
 module.exports.handleGraph = handleGraph
+module.exports.handleChangeImpact = handleChangeImpact
 function getBadgeUrl(owner, repo, req = {}) {
 	const proto = req?.headers?.['x-forwarded-proto'] || req?.protocol || 'http'
 	const host = (typeof req?.get === 'function' ? req.get('host') : req?.headers?.host) || 'localhost:3000'

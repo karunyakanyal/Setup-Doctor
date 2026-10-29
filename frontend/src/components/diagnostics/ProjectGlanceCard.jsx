@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { formatStackInPlainWords, getHealthVerdict } from '../../utils/projectGlance.js'
+import { formatStackInPlainWords, getHealthVerdict, generateProjectStory } from '../../utils/projectGlance.js'
 
 export default function ProjectGlanceCard({
   repository = null,
@@ -45,6 +45,20 @@ export default function ProjectGlanceCard({
       0
     )
   }, [deepScanData])
+
+  const projectStory = useMemo(() => {
+    return generateProjectStory({
+      framework,
+      stack,
+      language: repository?.language,
+      monorepo,
+      profile: deepScanData?.profile || deepScanData?.summary?.profile,
+      byLanguage: deepScanData?.inventory?.byLanguage || deepScanData?.coverage?.byLanguage || deepScanData?.coverage?.graphLanguages,
+      deepScanData,
+      diagnostics,
+      routes: deepScanData?.routes || deepScanData?.summary?.routes,
+    })
+  }, [framework, stack, repository, monorepo, deepScanData, diagnostics])
 
   const changes = deepScanData?.changes || deepScanData?.summary?.changes || null
   const changesText = useMemo(() => {
@@ -143,6 +157,16 @@ export default function ProjectGlanceCard({
             )}
           </div>
         </div>
+      </div>
+
+      {/* Your project in 3 sentences */}
+      <div className="glance-project-story" aria-label="Your project in 3 sentences">
+        <span className="story-eyebrow">Your project in 3 sentences:</span>
+        <p className="story-paragraph">
+          <span className="story-sentence sentence-stack">{projectStory.sentence1}</span>{' '}
+          <span className="story-sentence sentence-risk">{projectStory.sentence2}</span>{' '}
+          <span className="story-sentence sentence-action">{projectStory.sentence3}</span>
+        </p>
       </div>
 
       <div className="glance-card-footer">

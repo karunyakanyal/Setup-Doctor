@@ -2,6 +2,7 @@ import { NavLink } from 'react-router-dom'
 
 const navigationItems = [
   { label: 'Dashboard', icon: 'grid', to: '/', end: true },
+  { label: 'Change Impact', icon: 'git-pull-request', to: '/change-impact' },
   { label: 'Projects', icon: 'folder', to: '/projects' },
   { label: 'History', icon: 'clock', to: '/history' },
   { label: 'Bug Vault', icon: 'bug', to: '/bug-vault' },
@@ -38,6 +39,15 @@ function NavIcon({ type }) {
         <path d="M10 9V7a2 2 0 0 1 4 0v2" />
         <path d="M6 11H3M6 14H3M18 11h3M18 14h3" />
         <path d="M9 6 7 4M15 6l2-2" />
+      </>
+    ),
+
+    'git-pull-request': (
+      <>
+        <circle cx="18" cy="18" r="3" />
+        <circle cx="6" cy="6" r="3" />
+        <path d="M13 6h3a2 2 0 0 1 2 2v7" />
+        <line x1="6" y1="9" x2="6" y2="21" />
       </>
     ),
 

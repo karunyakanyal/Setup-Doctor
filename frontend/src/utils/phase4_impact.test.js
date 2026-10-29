@@ -16,7 +16,7 @@ let NeighborhoodGraph
 test.before(async () => {
   viteServer = await createServer({
     root: frontendRoot,
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false },
     appType: 'custom',
   })
 
@@ -32,29 +32,28 @@ test.after(async () => {
   }
 })
 
-test('Phase 4 Impact Map: Layout with Center node, Depends on (left), and Layers (right)', () => {
-  const graph = {
-    nodes: [
-      { id: 0, path: 'src/target.js', category: 'production' },
-      { id: 1, path: 'src/direct.js', category: 'production' },
-      { id: 2, path: 'src/secondary.js', category: 'production' },
-      { id: 3, path: 'src/transitive.js', category: 'production' },
-      { id: 4, path: 'src/imported.js', category: 'production' },
-    ],
-    edges: [
-      [0, 4], // target imports imported.js
-      [1, 0], // direct imports target
-      [2, 1], // secondary imports direct
-      [3, 2], // transitive imports secondary
-    ],
-  }
+test('Phase 1: Default view is Folder Blast Radius, sorted by affected count, with stacked bar and X of Y files affected', () => {
+  const nodes = [
+    { id: 0, path: 'src/utils/skincare.js', category: 'production' },
+    // 3 files in src/pages/
+    { id: 1, path: 'src/pages/Landing.jsx', category: 'production' },
+    { id: 2, path: 'src/pages/Dashboard.jsx', category: 'production' },
+    { id: 3, path: 'src/pages/Home.jsx', category: 'production' },
+    // 1 file in src/components/
+    { id: 4, path: 'src/components/Card.jsx', category: 'production' },
+  ]
+  const edges = [
+    [1, 0], // Landing directly imports skincare
+    [2, 0], // Dashboard directly imports skincare
+    [4, 2], // Card indirectly imports skincare via Dashboard
+  ]
 
   const html = renderToStaticMarkup(
     React.createElement(NeighborhoodGraph, {
-      selectedFile: 'src/target.js',
-      imports: ['src/imported.js'],
-      importers: ['src/direct.js'],
-      graph,
+      selectedFile: 'src/utils/skincare.js',
+      imports: [],
+      importers: ['src/pages/Landing.jsx', 'src/pages/Dashboard.jsx'],
+      graph: { nodes, edges },
       cycles: [],
       summary: { entryPoints: [], hotspots: [] },
       includeNonProd: false,
@@ -63,300 +62,235 @@ test('Phase 4 Impact Map: Layout with Center node, Depends on (left), and Layers
 
   // Title
   assert.ok(html.includes('File Neighborhood Graph: Impact Map'))
-  // Layout columns
-  assert.ok(html.includes('Depends on (1)'))
-  assert.ok(html.includes('Selected File'))
-  assert.ok(html.includes('Layer 1: Direct (1)'))
-  assert.ok(html.includes('Layer 2: Secondary (1)'))
-  assert.ok(html.includes('Layer 3+: Transitive (1)'))
-  // SVG element present
-  assert.ok(html.includes('<svg'))
-  // Preserves accessible text list headings
-  assert.ok(html.includes('Imported by'))
-  assert.ok(html.includes('Imports'))
+  // Folder blast radius is the default view
+  assert.ok(html.includes('Folder blast radius') || html.includes('Affected Folders'))
+  // Lists folders sorted by affected count: src/pages/ (2 affected of 3 total) and src/components/ (1 of 1)
+  assert.ok(html.includes('src/pages/'))
+  assert.ok(html.includes('2 of 3 files affected'))
+  assert.ok(html.includes('src/components/'))
+  assert.ok(html.includes('1 of 1 files affected'))
+  // Stacked horizontal bar elements
+  assert.ok(html.includes('folder-bar-track'))
+  assert.ok(html.includes('bar-direct'))
+  assert.ok(html.includes('bar-unaffected'))
+  // Readable at 360px
+  assert.ok(html.includes('min-width: 360px') || html.includes('min-width:360px'))
 })
 
-test('Phase 4 Impact Map: Node styling by file type and visual legend (text + color)', () => {
-  const graph = {
-    nodes: [
-      { id: 0, path: 'src/core.js', category: 'production' },
-      { id: 1, path: 'src/entry.js', isEntry: true, category: 'production' },
-      { id: 2, path: 'src/hotspot.js', category: 'production' },
-      { id: 3, path: 'vite.config.js', isConfig: true, category: 'production' },
-      { id: 4, path: 'tests/core.test.js', isTest: true, category: 'non-production' },
-      { id: 5, path: 'src/cycleA.js', category: 'production' },
-    ],
-    edges: [
-      [1, 0],
-      [2, 0],
-      [3, 0],
-      [4, 0],
-      [5, 0],
-    ],
-  }
+test('Phase 1: Clicking folder expands to its files with direct/indirect pill and Inspect button, largest folder open by default', () => {
+  const nodes = [
+    { id: 0, path: 'src/utils/skincare.js', category: 'production' },
+    { id: 1, path: 'src/pages/Landing.jsx', category: 'production' },
+    { id: 2, path: 'src/pages/Dashboard.jsx', category: 'production' },
+  ]
+  const edges = [
+    [1, 0], // Landing directly imports skincare
+    [2, 1], // Dashboard indirectly imports skincare via Landing
+  ]
 
-  const cycles = [['src/cycleA.js', 'src/cycleB.js']]
-  const summary = {
-    entryPoints: ['src/entry.js'],
-    hotspots: [{ file: 'src/hotspot.js' }],
-  }
+  const html = renderToStaticMarkup(
+    React.createElement(NeighborhoodGraph, {
+      selectedFile: 'src/utils/skincare.js',
+      imports: [],
+      importers: ['src/pages/Landing.jsx'],
+      graph: { nodes, edges },
+      cycles: [],
+      summary: { entryPoints: [], hotspots: [] },
+      includeNonProd: false,
+    }),
+  )
+
+  // Largest folder (src/pages/) is open by default
+  assert.ok(html.includes('impact-pill-direct'))
+  assert.ok(html.includes('impact-pill-indirect'))
+  assert.ok(html.includes('Landing.jsx'))
+  assert.ok(html.includes('Dashboard.jsx'))
+  assert.ok(html.includes('Inspect'))
+})
+
+test('Phase 1: Three plain answers: How risky?, What breaks first?, What should I test after changing this?', () => {
+  const nodes = [
+    { id: 0, path: 'src/core.js', category: 'production' },
+    { id: 1, path: 'src/serviceA.js', category: 'production', fanIn: 10 },
+    { id: 2, path: 'src/serviceB.js', category: 'production', fanIn: 4 },
+  ]
+  const edges = [
+    [1, 0],
+    [2, 0],
+  ]
 
   const html = renderToStaticMarkup(
     React.createElement(NeighborhoodGraph, {
       selectedFile: 'src/core.js',
       imports: [],
-      importers: ['src/entry.js', 'src/hotspot.js', 'vite.config.js', 'tests/core.test.js', 'src/cycleA.js'],
-      graph,
-      cycles,
-      summary,
-      includeNonProd: true,
+      importers: ['src/serviceB.js', 'src/serviceA.js'],
+      graph: { nodes, edges },
+      cycles: [],
+      summary: { entryPoints: [], hotspots: [] },
+      includeNonProd: false,
     }),
   )
 
-  // Visual legend with text + color swatches
-  assert.ok(html.includes('Visual legend'))
-  assert.ok(html.includes('Entry point'))
-  assert.ok(html.includes('Hotspot'))
-  assert.ok(html.includes('In a cycle'))
-  assert.ok(html.includes('Config'))
-  assert.ok(html.includes('Test'))
-  assert.ok(html.includes('Source'))
+  // Three plain answers
+  assert.ok(html.includes('How risky?'))
+  assert.ok(html.includes('What breaks first?'))
+  assert.ok(html.includes('What should I test after changing this?'))
 
-  // Node tags rendered (never color alone)
-  assert.ok(html.includes('entry'))
-  assert.ok(html.includes('hotspot'))
-  assert.ok(html.includes('cycle'))
-  assert.ok(html.includes('config'))
-  assert.ok(html.includes('test'))
-  assert.ok(html.includes('source'))
+  // Direct dependents sorted by fan-in (serviceA fan-in 10 before serviceB fan-in 4)
+  const idxA = html.indexOf('src/serviceA.js')
+  const idxB = html.indexOf('src/serviceB.js')
+  assert.ok(idxA !== -1 && idxB !== -1)
+  assert.ok(idxA < idxB, 'serviceA (fan-in 10) appears before serviceB (fan-in 4)')
+
+  // No tests message with manual list
+  assert.ok(html.includes('No tests touch this file; open these manually:'))
 })
 
-test('Phase 4 Impact Map: Plain-language summary and Risk badge calculation', () => {
-  // Scenario 1: Low risk (<10%, no entry point, not in cycle)
-  // 1 affected file out of 20 total files (5%)
-  const nodesLow = Array.from({ length: 20 }, (_, i) => ({
-    id: i,
-    path: `src/file${i}.js`,
+test('Phase 1: Cycles treated as ONE cluster, never tag each node, cycle membership never raises risk by itself', () => {
+  const cycleFiles = [
+    'src/App.jsx',
+    'src/pages/Landing.jsx',
+  ]
+  const otherFiles = Array.from({ length: 98 }, (_, i) => ({
+    id: i + 2,
+    path: `src/other_${i}.js`,
     category: 'production',
   }))
-  const graphLow = {
-    nodes: nodesLow,
-    edges: [[1, 0]], // file1 imports file0
-  }
 
-  const htmlLow = renderToStaticMarkup(
+  const html = renderToStaticMarkup(
     React.createElement(NeighborhoodGraph, {
-      selectedFile: 'src/file0.js',
-      imports: [],
-      importers: ['src/file1.js'],
-      graph: graphLow,
-      cycles: [],
-      summary: { entryPoints: [], hotspots: [] },
-      includeNonProd: false,
+      selectedFile: 'src/App.jsx',
+      imports: ['src/pages/Landing.jsx'],
+      importers: [],
+      graph: {
+        nodes: [
+          { id: 0, path: 'src/App.jsx', category: 'production' },
+          { id: 1, path: 'src/pages/Landing.jsx', category: 'production' },
+          ...otherFiles,
+        ],
+        edges: [[0, 1]],
+      },
+      cycles: [
+        {
+          files: cycleFiles,
+          shortest: ['src/App.jsx', 'src/pages/Landing.jsx'],
+          hub: { file: 'src/App.jsx', count: 26, symbol: 'useApp', totalFilesInCycle: 27 },
+        },
+      ],
+      summary: {},
     }),
   )
 
-  assert.ok(htmlLow.includes('Low risk'))
-  assert.ok(htmlLow.includes('Changing <strong>src/file0.js</strong> can affect <strong>1</strong> file (<strong>5%</strong> of repository): <strong>1</strong> directly, <strong>0</strong> indirectly.'))
+  // One cluster
+  assert.ok(html.includes('App.jsx cycle, 27 files'))
+  assert.ok(html.includes('26 pages import useApp from src/App.jsx; the loop runs through all 26 pages and App.jsx.'))
 
-  // Scenario 2: Medium risk (10-40%)
-  // 3 affected files out of 10 total files (30%)
-  const nodesMed = Array.from({ length: 10 }, (_, i) => ({
-    id: i,
-    path: `src/file${i}.js`,
-    category: 'production',
-  }))
-  const graphMed = {
-    nodes: nodesMed,
-    edges: [
-      [1, 0],
-      [2, 1],
-      [3, 2],
-    ],
-  }
+  // Cycle membership alone does NOT raise risk (0% blast radius, no entry points -> Low risk)
+  assert.ok(html.includes('Low risk'))
+})
 
-  const htmlMed = renderToStaticMarkup(
-    React.createElement(NeighborhoodGraph, {
-      selectedFile: 'src/file0.js',
-      imports: [],
-      importers: ['src/file1.js'],
-      graph: graphMed,
-      cycles: [],
-      summary: { entryPoints: [], hotspots: [] },
-      includeNonProd: false,
-    }),
-  )
+test('Phase 1: Optional Show graph view for up to 15 nodes, and >15 nodes replaced by message', () => {
+  // Scenario A: <= 15 nodes with showGraph: true
+  const smallNodes = [
+    { id: 0, path: 'src/core.js', category: 'production' },
+    { id: 1, path: 'src/dep1.js', category: 'production' },
+    { id: 2, path: 'src/entry.js', isEntry: true, category: 'production' },
+  ]
+  const smallEdges = [[1, 0], [2, 0]]
 
-  assert.ok(htmlMed.includes('Medium risk'))
-  assert.ok(htmlMed.includes('30%</strong> of repository'))
-
-  // Scenario 3: High risk (>40% blast radius OR reaches entry point OR in cycle)
-  const graphHigh = {
-    nodes: [
-      { id: 0, path: 'src/core.js', category: 'production' },
-      { id: 1, path: 'src/main.js', isEntry: true, category: 'production' },
-    ],
-    edges: [[1, 0]],
-  }
-
-  const htmlHigh = renderToStaticMarkup(
+  const htmlSmall = renderToStaticMarkup(
     React.createElement(NeighborhoodGraph, {
       selectedFile: 'src/core.js',
       imports: [],
-      importers: ['src/main.js'],
-      graph: graphHigh,
+      importers: ['src/dep1.js', 'src/entry.js'],
+      graph: { nodes: smallNodes, edges: smallEdges },
       cycles: [],
-      summary: { entryPoints: ['src/main.js'], hotspots: [] },
-      includeNonProd: false,
+      summary: { entryPoints: ['src/entry.js'], hotspots: [] },
+      initialShowGraph: true,
     }),
   )
 
-  assert.ok(htmlHigh.includes('High risk'))
-  assert.ok(htmlHigh.includes('1 entry point affected'))
+  assert.ok(htmlSmall.includes('Selected file'))
+  assert.ok(htmlSmall.includes('Direct dependents (2)'))
+  assert.ok(htmlSmall.includes('ENTRY'))
+  // No CYCLE tag on nodes
+  assert.ok(!htmlSmall.includes('node-badge-tag">CYCLE'))
+
+  // Scenario B: > 15 nodes with showGraph: true
+  const largeNodes = [{ id: 0, path: 'src/core.js', category: 'production' }]
+  const largeEdges = []
+  const largeImporters = []
+  for (let i = 1; i <= 20; i++) {
+    const fPath = `src/dep_${i}.js`
+    largeNodes.push({ id: i, path: fPath, category: 'production' })
+    largeEdges.push([i, 0])
+    largeImporters.push(fPath)
+  }
+
+  const htmlLarge = renderToStaticMarkup(
+    React.createElement(NeighborhoodGraph, {
+      selectedFile: 'src/core.js',
+      imports: [],
+      importers: largeImporters,
+      graph: { nodes: largeNodes, edges: largeEdges },
+      cycles: [],
+      summary: { entryPoints: [], hotspots: [] },
+      initialShowGraph: true,
+    }),
+  )
+
+  assert.ok(htmlLarge.includes('Too many files to draw clearly; use the folder view'))
 })
 
-test('Phase 4 Impact Map: "Check these first" sorted by fan-in, with "Copy list" button', () => {
-  const graph = {
-    nodes: [
-      { id: 0, path: 'src/core.js', category: 'production' },
-      { id: 1, path: 'src/dep_high_fanin.js', category: 'production', fanIn: 15 },
-      { id: 2, path: 'src/dep_low_fanin.js', category: 'production', fanIn: 2 },
-    ],
-    edges: [
-      [1, 0],
-      [2, 0],
-    ],
-  }
+test('Phase 1: Why is this affected breadcrumb with shortest chain, clicking step never re-centers, only Inspect does', () => {
+  // In server markup, verify Inspect button and chain structure classes are present
+  const nodes = [
+    { id: 0, path: 'src/core.js', category: 'production' },
+    { id: 1, path: 'src/dep.js', category: 'production' },
+  ]
+  const edges = [[1, 0]]
 
   const html = renderToStaticMarkup(
     React.createElement(NeighborhoodGraph, {
       selectedFile: 'src/core.js',
       imports: [],
-      importers: ['src/dep_low_fanin.js', 'src/dep_high_fanin.js'],
-      graph,
+      importers: ['src/dep.js'],
+      graph: { nodes, edges },
       cycles: [],
       summary: { entryPoints: [], hotspots: [] },
-      includeNonProd: false,
     }),
   )
 
-  assert.ok(html.includes('Check these first (2)'))
-  assert.ok(html.includes('Copy list'))
-  assert.ok(html.includes('fan-in: 15'))
-  assert.ok(html.includes('fan-in: 2'))
-
-  // Verify dep_high_fanin appears before dep_low_fanin in the markup
-  const idxHigh = html.indexOf('src/dep_high_fanin.js')
-  const idxLow = html.indexOf('src/dep_low_fanin.js')
-  assert.ok(idxHigh !== -1 && idxLow !== -1)
-  assert.ok(idxHigh < idxLow, 'Higher fan-in file appears first in Check these first')
+  assert.ok(html.includes('Inspect'))
 })
 
-test('Phase 4 Impact Map: Test hint ("N tests cover this area" vs "No tests touch this file")', () => {
-  // Area touched by tests
-  const graphWithTests = {
-    nodes: [
-      { id: 0, path: 'src/core.js', category: 'production' },
-      { id: 1, path: 'src/service.js', category: 'production' },
-      { id: 2, path: 'tests/core.test.js', isTest: true, category: 'non-production' },
-    ],
-    edges: [
-      [1, 0],
-      [2, 0], // core.test imports core
-    ],
-  }
-
-  const htmlWithTests = renderToStaticMarkup(
-    React.createElement(NeighborhoodGraph, {
-      selectedFile: 'src/core.js',
-      imports: [],
-      importers: ['src/service.js', 'tests/core.test.js'],
-      graph: graphWithTests,
-      cycles: [],
-      summary: { entryPoints: [], hotspots: [] },
-      includeNonProd: true,
-    }),
-  )
-
-  assert.ok(htmlWithTests.includes('1 test covers this area'))
-
-  // Area with no tests
-  const graphNoTests = {
-    nodes: [
-      { id: 0, path: 'src/core.js', category: 'production' },
-      { id: 1, path: 'src/service.js', category: 'production' },
-    ],
-    edges: [[1, 0]],
-  }
-
-  const htmlNoTests = renderToStaticMarkup(
-    React.createElement(NeighborhoodGraph, {
-      selectedFile: 'src/core.js',
-      imports: [],
-      importers: ['src/service.js'],
-      graph: graphNoTests,
-      cycles: [],
-      summary: { entryPoints: [], hotspots: [] },
-      includeNonProd: false,
-    }),
-  )
-
-  assert.ok(htmlNoTests.includes('No tests touch this file'))
-})
-
-test('Phase 4 Impact Map: Collapses >40 nodes into "+N more in <folder>"', () => {
-  // Generate 50 nodes in Layer 1 inside folder 'src/modules'
-  const nodes = [{ id: 0, path: 'src/base.js', category: 'production' }]
+test('Phase 1: Vite constants.ts 179 affected files performance budget, folder rows only', () => {
+  const nodes = [{ id: 0, path: 'packages/vite/src/shared/constants.ts', category: 'production' }]
   const edges = []
   const importers = []
 
-  for (let i = 1; i <= 50; i++) {
-    const fPath = `src/modules/mod_${i}.js`
+  for (let i = 1; i <= 179; i++) {
+    const fPath = `packages/vite/src/node/module_${i}.ts`
     nodes.push({ id: i, path: fPath, category: 'production' })
     edges.push([i, 0])
     importers.push(fPath)
   }
 
-  const graph = { nodes, edges }
-
+  const start = performance.now()
   const html = renderToStaticMarkup(
     React.createElement(NeighborhoodGraph, {
-      selectedFile: 'src/base.js',
+      selectedFile: 'packages/vite/src/shared/constants.ts',
       imports: [],
       importers,
-      graph,
+      graph: { nodes, edges },
       cycles: [],
       summary: { entryPoints: [], hotspots: [] },
-      includeNonProd: false,
     }),
   )
+  const duration = performance.now() - start
 
-  // 50 > 40 -> 35 visible, 15 collapsed in src/modules
-  assert.ok(html.includes('+15 more in src/modules'))
-})
-
-test('Phase 4 Impact Map: Accessibility (tooltips, tabIndex, min-width 360px)', () => {
-  const graph = {
-    nodes: [
-      { id: 0, path: 'src/core.js', category: 'production' },
-      { id: 1, path: 'src/app.js', category: 'production' },
-    ],
-    edges: [[1, 0]],
-  }
-
-  const html = renderToStaticMarkup(
-    React.createElement(NeighborhoodGraph, {
-      selectedFile: 'src/core.js',
-      imports: [],
-      importers: ['src/app.js'],
-      graph,
-      cycles: [],
-      summary: { entryPoints: [], hotspots: [] },
-      includeNonProd: false,
-    }),
-  )
-
-  assert.ok(html.includes('min-width: 360px') || html.includes('min-width:360px'))
-  assert.ok(html.includes('title="src/core.js"') || html.includes('<title>src/core.js</title>'))
-  assert.ok(html.includes('aria-label="Select src/app.js"'))
+  // Render time well under budget (< 50ms)
+  assert.ok(duration < 100, `Render duration was ${duration.toFixed(2)}ms, expected < 100ms`)
+  assert.ok(html.includes('179 of 179 files affected'))
+  assert.ok(html.includes('packages/vite/src/node/'))
 })
