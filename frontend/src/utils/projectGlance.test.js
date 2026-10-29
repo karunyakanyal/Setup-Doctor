@@ -6,6 +6,7 @@ import {
   getWhatToDoNext,
   generateProjectStory,
   calculateRiskiestFiles,
+  getProjectRiskHeadline,
 } from './projectGlance.js'
 
 test('formatStackInPlainWords: formats stack in natural words', () => {
@@ -692,10 +693,78 @@ test('Phase 2: calculateRiskiestFiles ranks by formula and produces human-readab
 
   assert.equal(riskiest.length, 3)
   assert.equal(riskiest[0].path, 'src/App.jsx')
-  // App.jsx formula score check:
-  // (26 * 3) + (26 * 2) + 25 (cycle) + 20 (no tests) + Math.min(15, Math.floor(8000 / 2048)) = 78 + 52 + 25 + 20 + 3 = 178
-  assert.equal(riskiest[0].score, 178)
+  // App.jsx formula check (absolute unscaled score in 40-70 range, never 100):
+  // reachScore (up to 15) + fanInScore (min(40, 26 * 1.5) = 39) + cycleBonus (10) = 64
+  assert.ok(riskiest[0].score >= 40 && riskiest[0].score <= 70)
+  assert.equal(riskiest[0].score, 64)
   assert.ok(riskiest[0].reason.includes('imported by 26 files'))
   assert.ok(riskiest[0].reason.includes('in a cycle'))
-  assert.ok(riskiest[0].reason.includes('no tests'))
+  assert.equal(riskiest[2].path, 'src/utils/clean.js')
+  assert.equal(riskiest[2].reason, 'Low risk: no dependents')
+  assert.equal(riskiest[2].score, 0)
+})
+
+test('Phase 2: getProjectRiskHeadline generates headline naming top file and risk count', () => {
+  const riskiest = [
+    { path: 'src/App.jsx', score: 60, fanIn: 26, reason: 'imported by 26 files, 26 affected' },
+    { path: 'src/pages/Landing.jsx', score: 20, fanIn: 2, reason: 'imported by 2 files' },
+  ]
+  const headline = getProjectRiskHeadline(riskiest)
+  assert.equal(headline, '1 file carries most of the risk. Start with App.jsx.')
+})
+
+test('Skinveda shape: 2 files carry most of the risk and start with App.jsx', () => {
+  const skinRiskiest = [
+    { path: 'src/App.jsx', score: 59, fanIn: 27 },
+    { path: 'src/components/ui.jsx', score: 50, fanIn: 29 },
+    { path: 'src/data/skincare.js', score: 26, fanIn: 10 },
+    { path: 'src/components/skin.jsx', score: 24, fanIn: 10 },
+    { path: 'src/components/AuthLayout.jsx', score: 24, fanIn: 3 },
+  ]
+  assert.ok(skinRiskiest[0].score >= 40 && skinRiskiest[0].score <= 70)
+  const headline = getProjectRiskHeadline(skinRiskiest)
+  assert.equal(headline, '2 files carry most of the risk. Start with App.jsx.')
+})
+
+test('Vite shape: absolute unscaled scores in 40-70 range and spread risk headline', () => {
+  const viteRiskiest = [
+    { path: 'packages/vite/src/node/utils.ts', score: 58, fanIn: 69 },
+    { path: 'packages/vite/src/node/config.ts', score: 58, fanIn: 39 },
+    { path: 'packages/vite/src/node/server/index.ts', score: 50, fanIn: 21 },
+    { path: 'packages/vite/src/shared/utils.ts', score: 49, fanIn: 56 },
+    { path: 'packages/vite/src/node/plugin.ts', score: 48, fanIn: 36 },
+  ]
+  // Top hub scores are calibrated in 40 to 70 range, never 100
+  for (const f of viteRiskiest) {
+    assert.ok(f.score >= 40 && f.score <= 70)
+  }
+  const headline = getProjectRiskHeadline(viteRiskiest)
+  assert.equal(headline, 'Risk is spread across several files')
+})
+
+test('Riskiest files toggle: respects production only vs non-production edges', () => {
+  const graph = {
+    nodes: [
+      { id: 1, path: 'src/utils.ts', category: 'production', isTest: false, fanIn: 3 },
+      { id: 2, path: 'src/index.ts', category: 'production', isTest: false },
+      { id: 3, path: 'test/utils.test.ts', category: 'non-production', isTest: true },
+      { id: 4, path: 'fixture/data.ts', category: 'non-production', isTest: false },
+    ],
+    edges: [
+      [2, 1], // prod -> prod
+      [3, 1], // test -> prod
+      [4, 1], // non-prod fixture -> prod
+    ],
+  }
+
+  // Production only by default
+  const prodOnly = calculateRiskiestFiles({ graph, includeNonProd: false })
+  assert.equal(prodOnly.length, 2)
+  assert.equal(prodOnly[0].path, 'src/utils.ts')
+  assert.equal(prodOnly[0].fanIn, 1)
+
+  // Including non-prod
+  const allFiles = calculateRiskiestFiles({ graph, includeNonProd: true })
+  const utilsAll = allFiles.find((f) => f.path === 'src/utils.ts')
+  assert.equal(utilsAll.fanIn, 3)
 })

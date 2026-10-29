@@ -28,13 +28,22 @@ export default function RiskiestFilesCard({
       </div>
 
       <p className="card-subtitle">
-        Scored by incoming fan-in (weight 3), downstream impact (weight 2), cycle membership (+25), lack of test coverage (+20), and file size.
+        Scored by incoming fan-in and downstream impact, with a small cycle cluster bonus. Config and leaf files are Low risk.
       </p>
 
       <div className="riskiest-files-list">
         {riskiestFiles.map((file, idx) => (
           <div key={file.path} className="riskiest-file-row">
             <span className="risk-rank-badge font-mono">#{idx + 1}</span>
+            <div className="risk-score-col">
+              <span className="risk-score-value font-mono">{file.score}/100</span>
+              <div className="risk-score-bar-track" aria-hidden="true">
+                <div
+                  className="risk-score-bar-fill"
+                  style={{ width: `${file.score}%` }}
+                />
+              </div>
+            </div>
             <div className="risk-file-info">
               <strong className="risk-file-path font-mono" title={file.path}>
                 {file.path}

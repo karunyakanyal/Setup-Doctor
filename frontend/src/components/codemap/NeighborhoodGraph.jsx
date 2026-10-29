@@ -27,6 +27,8 @@ export default function NeighborhoodGraph({
   summary = null,
   includeNonProd = false,
   onSelectFile,
+  onBack,
+  canGoBack = false,
   initialShowGraph = false,
 }) {
   const [selectedTarget, setSelectedTarget] = useState(null)
@@ -201,6 +203,7 @@ export default function NeighborhoodGraph({
       layers: { layer1, layer2, layer3Plus },
       predecessors: preds,
       allAffected: affected,
+      distances,
     }
   }, [selectedFile, graph?.nodes, graph?.edges, idToNode, importers, includeNonProd])
 
@@ -217,6 +220,23 @@ export default function NeighborhoodGraph({
     list.sort((a, b) => (fanInMap.get(b) || 0) - (fanInMap.get(a) || 0))
     return list
   }, [layers.layer1, fanInMap])
+
+  // All files that could break (direct + indirect) ranked by fan-in and hop distance
+  const filesThatCouldBreak = useMemo(() => {
+    const list = []
+    const distMap = layers.distances || new Map()
+    for (const file of (allAffected || [])) {
+      const d = distMap.get(file) || (layers.layer1.includes(file) ? 1 : 2)
+      list.push({
+        path: file,
+        depth: d,
+        fanIn: fanInMap.get(file) || 0,
+      })
+    }
+    // Sort direct first (depth 1), then by fan-in descending, then path
+    list.sort((a, b) => a.depth - b.depth || b.fanIn - a.fanIn || a.path.localeCompare(b.path))
+    return list
+  }, [layers.distances, layers.layer1, allAffected, fanInMap])
 
   // Cycle dominance check: if >50% of visible nodes are in cycles
   const { cycleDominantNote } = useMemo(() => {
@@ -531,18 +551,52 @@ export default function NeighborhoodGraph({
       aria-label="Impact Map and connections"
     >
       <div className="impact-map-header">
-        <h4 className="codemap-subheading">File Neighborhood Graph: Impact Map</h4>
+        <div className="impact-header-title-group">
+          <p className="eyebrow">Inspecting file</p>
+          <div className="active-file-title-wrap">
+            <h4
+              id="inspecting-file-heading"
+              tabIndex={-1}
+              className="codemap-subheading font-mono"
+            >
+              File Neighborhood Graph: Impact Map — {selectedFile || 'Select a file'}
+            </h4>
+          </div>
+        </div>
         <div className="impact-header-actions">
-          <button
-            type="button"
-            className="btn-toggle-graph-view"
-            onClick={() => setShowGraph((prev) => !prev)}
-            aria-label={showGraph ? 'Switch to folder view' : 'Switch to graph view'}
-          >
-            {showGraph ? 'Show folder view' : 'Show graph'}
-          </button>
+          {canGoBack && onBack && (
+            <button
+              type="button"
+              className="btn-inspect-back"
+              onClick={onBack}
+              aria-label="Back to previously inspected file"
+            >
+              ← Back
+            </button>
+          )}
+          {showGraph && (
+            <button
+              type="button"
+              className="btn-toggle-graph-view"
+              onClick={() => setShowGraph((prev) => !prev)}
+              aria-label="Switch to folder view"
+            >
+              Show folder view
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Main Impact Sentence */}
+      {selectedFile && (
+        <div className="impact-main-sentence-card">
+          <p className="impact-sentence-text">
+            Changing <strong className="font-mono">{selectedFile}</strong> can break{' '}
+            <strong>{layers.layer1.length}</strong> {layers.layer1.length === 1 ? 'file' : 'files'} directly and{' '}
+            <strong>{layers.layer2.length + layers.layer3Plus.length}</strong> indirectly.
+          </p>
+        </div>
+      )}
 
       {/* THREE PLAIN ANSWERS */}
       <div className="impact-three-answers" aria-label="Impact assessment answers">
@@ -558,24 +612,27 @@ export default function NeighborhoodGraph({
           </div>
         </div>
 
-        {/* Answer 2: What breaks first? */}
+        {/* Answer 2: What breaks first? / Files that could break */}
         <div className="impact-answer-card answer-what-breaks">
-          <span className="answer-question">What breaks first?</span>
-          {directDependentsOrdered.length === 0 ? (
+          <span className="answer-question">What breaks first? (Files that could break)</span>
+          {filesThatCouldBreak.length === 0 ? (
             <p className="answer-note-empty">No direct dependents</p>
           ) : (
             <ul className="answer-break-list">
-              {directDependentsOrdered.slice(0, 5).map((file) => (
-                <li key={file} className="answer-break-item">
-                  <span className="break-file-text" title={file}>
-                    {formatNodeLabel(file, 20)}
+              {filesThatCouldBreak.slice(0, 5).map((item) => (
+                <li key={item.path} className="answer-break-item">
+                  <span className={`impact-pill impact-pill-${item.depth === 1 ? 'direct' : 'indirect'}`}>
+                    {item.depth === 1 ? 'Direct' : `${item.depth} hops`}
                   </span>
-                  <span className="fan-in-badge font-mono">fan-in: {fanInMap.get(file) || 0}</span>
+                  <span className="break-file-text font-mono" title={item.path}>
+                    {item.path}
+                  </span>
+                  <span className="fan-in-badge font-mono">fan-in: {item.fanIn}</span>
                   <button
                     type="button"
                     className="btn-inspect-mini"
-                    onClick={() => onSelectFile && onSelectFile(file)}
-                    aria-label={`Inspect ${file}`}
+                    onClick={() => onSelectFile && onSelectFile(item.path)}
+                    aria-label={`Inspect ${item.path}`}
                   >
                     Inspect
                   </button>
@@ -587,10 +644,10 @@ export default function NeighborhoodGraph({
 
         {/* Answer 3: What should I test after changing this? */}
         <div className="impact-answer-card answer-what-to-test">
-          <span className="answer-question">What should I test after changing this?</span>
+          <span className="answer-question">What should I test after changing this? (Tests to run)</span>
           {coveredTestsList.length > 0 ? (
             <div className="answer-tests-content">
-              <p className="answer-test-hint">🧪 {testHint}</p>
+              <p className="answer-test-hint">🧪 Tests to run: {testHint}</p>
               {affectedEntryPoints.length > 0 && (
                 <ul className="answer-entry-points-list">
                   {affectedEntryPoints.map((ep) => (
@@ -604,7 +661,7 @@ export default function NeighborhoodGraph({
           ) : (
             <div className="answer-no-tests-content">
               <p className="answer-no-tests-warning">
-                No tests touch this file; open these manually:
+                No test covers this; check these pages manually: (No tests touch this file; open these manually:)
               </p>
               <ul className="manual-test-list">
                 {(affectedPagesAndRoutes.length > 0
@@ -627,6 +684,39 @@ export default function NeighborhoodGraph({
           )}
         </div>
       </div>
+
+      {/* Why this score expand */}
+      <details className="why-score-expand">
+        <summary className="why-score-summary">Why this score</summary>
+        <div className="why-score-content">
+          <ul className="why-score-list">
+            <li>
+              <strong>Incoming fan-in:</strong> Imported directly by {layers.layer1.length}{' '}
+              {layers.layer1.length === 1 ? 'file' : 'files'} (dominant risk factor).
+            </li>
+            <li>
+              <strong>Downstream blast radius:</strong> {allAffected.length}{' '}
+              {allAffected.length === 1 ? 'file' : 'files'} affected across{' '}
+              {folderStats.length} {folderStats.length === 1 ? 'folder' : 'folders'}.
+            </li>
+            <li>
+              <strong>Cycle cluster:</strong>{' '}
+              {activeCycleCluster ? `${activeCycleCluster.title} (+10 risk bonus)` : 'Not in a cycle loop (+0)'}
+            </li>
+            <li>
+              <strong>Test coverage:</strong>{' '}
+              {coveredTestsList.length > 0 ? `${coveredTestsList.length} test files reach this file` : 'No automated tests cover this file'}
+            </li>
+            <li>
+              <strong>Risk level:</strong>{' '}
+              <span className={`impact-risk-badge risk-${riskVerdict.tone}`}>
+                {riskVerdict.label}
+              </span>{' '}
+              — {riskVerdict.rule}
+            </li>
+          </ul>
+        </div>
+      </details>
 
       {/* CYCLE CLUSTER: Treat cycle as ONE cluster ("App.jsx cycle, 27 files") */}
       {activeCycleCluster && (
@@ -699,7 +789,10 @@ export default function NeighborhoodGraph({
                 <button
                   type="button"
                   className="codemap-link-button chain-step-btn"
-                  onClick={() => setSelectedTarget(step)}
+                  onClick={() => {
+                    setSelectedTarget(step)
+                    if (onSelectFile) onSelectFile(step)
+                  }}
                   title={step}
                   aria-label={`View ${step}`}
                 >
@@ -787,7 +880,10 @@ export default function NeighborhoodGraph({
                             <button
                               type="button"
                               className="codemap-link-button file-name-btn"
-                              onClick={() => setSelectedTarget(file)}
+                              onClick={() => {
+                                setSelectedTarget(file)
+                                if (onSelectFile) onSelectFile(file)
+                              }}
                               title={file}
                               aria-label={`Select ${file}`}
                             >
@@ -810,7 +906,10 @@ export default function NeighborhoodGraph({
                             <button
                               type="button"
                               className="codemap-link-button file-name-btn"
-                              onClick={() => setSelectedTarget(file)}
+                              onClick={() => {
+                                setSelectedTarget(file)
+                                if (onSelectFile) onSelectFile(file)
+                              }}
                               title={file}
                               aria-label={`Select ${file}`}
                             >
@@ -903,6 +1002,7 @@ export default function NeighborhoodGraph({
                       aria-label={`Select ${file}`}
                       onClick={() => {
                         setSelectedTarget(file)
+                        if (onSelectFile) onSelectFile(file)
                       }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {

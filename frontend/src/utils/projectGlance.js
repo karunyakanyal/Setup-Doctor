@@ -1,3 +1,5 @@
+import { isConfigFile } from './configFiles.js'
+
 export function formatCapReasonPlainWords(capReason, grade = 'B', dimension = null) {
   if (!capReason || typeof capReason !== 'string') return null
   let text = capReason.trim()
@@ -1305,16 +1307,27 @@ export function buildMergedFindings({
 }
 
 /**
- * Riskiest Files Score Formula:
+ * Riskiest Files Score Formula (Absolute, unscaled):
  * 
- * score = (fanIn * 3) + (downstreamImpact * 2) + (inCycle ? 25 : 0) + (noTests ? 20 : 0) + Math.min(15, Math.floor(sizeBytes / 2048))
+ * score = Math.min(100, Math.max(1, reachScore + fanInScore + cycleBonus))
  * 
  * Factors and Weights:
- * - fan-in (weight: 3): Number of files that directly import this file. Higher fan-in means more direct breakage when changed.
- * - downstream impact (weight: 2): Total transitive blast radius. Higher impact means wider cascading changes.
- * - in a cycle (weight: 25): Module participates in a circular dependency loop, complicating evaluation order.
- * - no test touches it (weight: 20): Absence of unit or integration tests exercising this file or its dependents.
- * - file size (weight: up to 15): Larger files represent higher cognitive load and defect probability.
+ * 1. Repo Reach (weight: up to 15 points):
+ *    reachPercent = (reachableFiles / totalRepoFiles) * 100
+ *    reachScore = Math.round(reachPercent * 0.15)
+ *    Reflects the cascading blast radius across the repository.
+ * 
+ * 2. Incoming Fan-In (weight: up to 40 points):
+ *    fanInScore = Math.min(40, Math.round(fanIn * 1.5))
+ *    Reflects direct coupling and immediate breakage risk when modified.
+ *    Computed strictly over valid production files (respecting includeNonProd toggle).
+ * 
+ * 3. Cycle Cluster Bonus (+10 points):
+ *    cycleBonus = inCycle ? 10 : 0
+ *    A flat +10 point bonus per cycle cluster to prioritize circular dependency hubs.
+ * 
+ * Calibrated so typical hubs score in the 40 to 70 range (never scaled to 100).
+ * Leaf files (0 fanIn, 0 reach) and configuration files score 0 (Low risk).
  */
 export function calculateRiskiestFiles({
   graph = null,
@@ -1325,6 +1338,17 @@ export function calculateRiskiestFiles({
   const nodes = graph?.nodes || []
   if (nodes.length === 0) return []
 
+  const idToNode = new Map(nodes.map((n) => [n.id, n]))
+  const pathToNode = new Map(nodes.map((n) => [n.path, n]))
+
+  // Filter valid nodes based on includeNonProd
+  const validNodes = nodes.filter((n) => {
+    if (includeNonProd) return true
+    return n.category !== 'non-production' && !n.isTest
+  })
+  const validPaths = new Set(validNodes.map((n) => n.path))
+  const totalRepoFiles = validNodes.length
+
   const cycleFilesSet = new Set()
   for (const c of (Array.isArray(cycles) ? cycles : [])) {
     if (!c) continue
@@ -1333,69 +1357,152 @@ export function calculateRiskiestFiles({
     for (const f of files) cycleFilesSet.add(f)
   }
 
-  // Track files covered by tests
-  const testCoveredSet = new Set()
-  for (const n of nodes) {
-    if (n.isTest || n.path?.includes('.test.') || n.path?.includes('.spec.')) {
-      testCoveredSet.add(n.path)
-    }
+  // Build incoming adjacency map respecting includeNonProd
+  const incomingAdj = new Map()
+  for (const n of validNodes) {
+    incomingAdj.set(n.path, [])
   }
-  for (const e of (graph?.edges || [])) {
-    const from = typeof e[0] === 'string' ? e[0] : (e.from ?? e.source)
-    const to = typeof e[1] === 'string' ? e[1] : (e.to ?? e.target)
-    if (from && to && testCoveredSet.has(from)) {
-      testCoveredSet.add(to)
+
+  const rawEdges = graph?.edges || []
+  for (const e of rawEdges) {
+    let fromPath = null
+    let toPath = null
+    if (Array.isArray(e)) {
+      fromPath = typeof e[0] === 'string' ? e[0] : idToNode.get(e[0])?.path
+      toPath = typeof e[1] === 'string' ? e[1] : idToNode.get(e[1])?.path
+    } else if (e && typeof e === 'object') {
+      fromPath = typeof e.from === 'string' ? e.from : (idToNode.get(e.from ?? e.source)?.path || (e.from ?? e.source))
+      toPath = typeof e.to === 'string' ? e.to : (idToNode.get(e.to ?? e.target)?.path || (e.to ?? e.target))
+    }
+    if (fromPath && toPath && validPaths.has(fromPath) && validPaths.has(toPath)) {
+      const arr = incomingAdj.get(toPath)
+      if (arr && !arr.includes(fromPath)) {
+        arr.push(fromPath)
+      }
     }
   }
 
-  const scored = []
-  for (const node of nodes) {
-    if (!includeNonProd && (node.category === 'non-production' || node.isTest)) continue
-
+  const candidates = []
+  for (const node of validNodes) {
     const filePath = node.path
-    const fanIn = Number(node.fanIn) || 0
-    const downstreamImpact = Number(node.transitiveImpact ?? node.impact ?? 0)
+    const isConfig = Boolean(node.isConfig || isConfigFile(filePath))
+
+    // Dynamic fanIn respecting toggle if edges exist
+    let fanIn = 0
+    if (rawEdges.length > 0) {
+      fanIn = incomingAdj.get(filePath)?.length || 0
+      // If edges were present but mock nodes had larger fanIn specified, subtract non-prod incoming edges
+      if (node.fanIn != null && Number(node.fanIn) > fanIn) {
+        let nonProdEdges = 0
+        for (const e of rawEdges) {
+          const to = typeof e[1] === 'string' ? e[1] : idToNode.get(e[1])?.path
+          if (to === filePath) {
+            const from = typeof e[0] === 'string' ? e[0] : idToNode.get(e[0])?.path
+            const fromNode = pathToNode.get(from)
+            if (fromNode && (fromNode.category === 'non-production' || fromNode.isTest)) {
+              nonProdEdges++
+            }
+          }
+        }
+        fanIn = includeNonProd ? Number(node.fanIn) : Math.max(0, Number(node.fanIn) - nonProdEdges)
+      }
+    } else if (includeNonProd || (node.category !== 'non-production' && !node.isTest)) {
+      fanIn = Number(node.fanIn) || 0
+    }
+
+    // Downstream impact: use node.transitiveImpact if provided, or compute via reverse BFS
+    let downstreamImpact = 0
+    if (node.transitiveImpact != null || node.impact != null) {
+      downstreamImpact = Number(node.transitiveImpact ?? node.impact ?? 0)
+    } else if (rawEdges.length > 0 && fanIn > 0) {
+      const visited = new Set([filePath])
+      const queue = [filePath]
+      while (queue.length > 0) {
+        const curr = queue.shift()
+        for (const p of incomingAdj.get(curr) || []) {
+          if (!visited.has(p)) {
+            visited.add(p)
+            queue.push(p)
+          }
+        }
+      }
+      downstreamImpact = visited.size - 1
+    }
+
     const inCycle = cycleFilesSet.has(filePath)
-    const noTests = !testCoveredSet.has(filePath)
-    const sizeBytes = Number(node.size || node.bytes || 0)
+    const isLeaf = fanIn === 0 && downstreamImpact === 0
 
-    const score = (fanIn * 3) +
-      (downstreamImpact * 2) +
-      (inCycle ? 25 : 0) +
-      (noTests ? 20 : 0) +
-      Math.min(15, Math.floor(sizeBytes / 2048))
+    let score
+    let reason
 
-    const reasons = []
-    if (fanIn > 0) {
+    if (isLeaf) {
+      score = 0
+      reason = 'Low risk: no dependents'
+    } else if (isConfig) {
+      score = 0
+      reason = 'Low risk: configuration file'
+    } else {
+      const reachRatio = Math.min(1, totalRepoFiles > 0 ? (downstreamImpact / totalRepoFiles) : 0)
+      const reachPercent = reachRatio * 100
+      const reachScore = Math.round(reachPercent * 0.15)
+      const fanInScore = Math.min(40, Math.round(fanIn * 1.5))
+      const cycleBonus = inCycle ? 10 : 0
+      score = Math.min(100, Math.max(1, reachScore + fanInScore + cycleBonus))
+
+      const reasons = []
       reasons.push(`imported by ${fanIn} ${fanIn === 1 ? 'file' : 'files'}`)
-    }
-    if (downstreamImpact > 0 && downstreamImpact !== fanIn) {
-      reasons.push(`${downstreamImpact} affected`)
-    }
-    if (inCycle) {
-      reasons.push('in a cycle')
-    }
-    if (noTests) {
-      reasons.push('no tests')
-    }
-    if (reasons.length === 0) {
-      reasons.push('leaf file')
+      if (downstreamImpact > 0) {
+        reasons.push(`${downstreamImpact} affected`)
+      }
+      if (inCycle) {
+        reasons.push('in a cycle (+10)')
+      }
+      reason = reasons.join(', ')
     }
 
-    scored.push({
+    candidates.push({
       path: filePath,
       score,
+      rawScore: score,
       fanIn,
       downstreamImpact,
       inCycle,
-      noTests,
-      sizeBytes,
-      reason: reasons.join(', '),
+      isConfig,
+      isLeaf,
+      reason,
     })
   }
 
-  scored.sort((a, b) => b.score - a.score)
-  return scored.slice(0, limit)
+  candidates.sort((a, b) => b.score - a.score || b.fanIn - a.fanIn || b.downstreamImpact - a.downstreamImpact)
+  return candidates.slice(0, limit)
+}
+
+export function getProjectRiskHeadline(riskiestFiles = []) {
+  if (!Array.isArray(riskiestFiles) || riskiestFiles.length === 0) {
+    return 'No high-risk files found. Codebase is looking healthy.'
+  }
+
+  const topScore = riskiestFiles[0]?.score || 0
+  if (topScore === 0) {
+    return 'No high-risk files found. Codebase is looking healthy.'
+  }
+
+  const candidates = riskiestFiles.slice(0, 5)
+  const above50 = candidates.filter((f) => f.score >= 0.5 * topScore)
+  const count = above50.length
+
+  // If scores are close across multiple files (at least 3), say so
+  if (count >= 3 && above50[above50.length - 1].score >= 0.8 * topScore) {
+    return 'Risk is spread across several files'
+  }
+
+  const topFile = riskiestFiles[0]?.path || ''
+  const topFileName = topFile.split('/').pop() || topFile
+
+  if (count === 1) {
+    return `1 file carries most of the risk. Start with ${topFileName}.`
+  }
+  return `${count} files carry most of the risk. Start with ${topFileName}.`
 }
 
 /**

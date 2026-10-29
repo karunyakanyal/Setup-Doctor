@@ -16,7 +16,7 @@ let NeighborhoodGraph
 test.before(async () => {
   viteServer = await createServer({
     root: frontendRoot,
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false },
     appType: 'custom',
   })
 

@@ -6821,3 +6821,125 @@ summary:focus-visible,
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ==========================================================================
+   FIRST SCREEN RISK IMPACT & INSPECT STYLES
+   ========================================================================== */
+
+.dashboard-risk-headline-card {
+  background: linear-gradient(135deg, #f8fafc 0%, #edf2f7 100%);
+  border: 1px solid #cbd5e1;
+  border-left: 5px solid #2563eb;
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.dashboard-risk-headline {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+
+.risk-score-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 90px;
+  flex-shrink: 0;
+}
+
+.risk-score-value {
+  font-size: 11px;
+  font-weight: 700;
+  color: #475569;
+}
+
+.risk-score-bar-track {
+  width: 100%;
+  height: 6px;
+  background: #e2e8f0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.risk-score-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.risk-bar-high {
+  background: #dc2626;
+}
+
+.risk-bar-medium {
+  background: #ea580c;
+}
+
+.risk-bar-low {
+  background: #16a34a;
+}
+
+.btn-inspect-back {
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  color: #1e293b;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+}
+
+.btn-inspect-back:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+  border-color: #94a3b8;
+}
+
+.why-score-expand {
+  margin: 16px 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 12px 16px;
+}
+
+.why-score-summary {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2563eb;
+  cursor: pointer;
+}
+
+.why-score-summary:hover {
+  text-decoration: underline;
+}
+
+.why-score-content {
+  margin-top: 10px;
+  font-size: 13px;
+  color: #334155;
+  line-height: 1.5;
+}
+
+.why-score-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.more-analysis-section {
+  margin-top: 24px;
+}
+
+.more-analysis-summary {
+  font-size: 15px;
+  font-weight: 700;
+  color: #0f172a;
+  cursor: pointer;
+}
