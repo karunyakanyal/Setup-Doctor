@@ -1,148 +1,80 @@
 # SetupDoctor
 
-> Repository diagnostics and troubleshooting knowledge vault for modern development setups.
+Paste a GitHub repository URL and see **which files are risky to change, and what breaks if you change one**, with a plain-language health grade and the evidence behind it.
 
-[![CI](https://github.com/setup-doctor/setup-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/setup-doctor/setup-doctor/actions/workflows/ci.yml)
-[![Demo](https://img.shields.io/badge/demo-live-blue.svg)](https://setup-doctor.example.com)
+![SetupDoctor overview](docs/overview.png)
 
----
+## What it does
 
-## Live Demo & Screenshots
+- **Risk first.** A headline and the top risky files, each with a 0-100 score and a one-line reason.
+- **Impact of a change.** Pick a file: see how many files it can break directly and indirectly, which ones first, folder by folder, and which tests cover it (or that none do).
+- **Dependency graph.** Cycles, orphan files, unresolved imports and entry points, counted the same way every time.
+- **One grade, one reason.** A grade (A to E) with four ratings (Security, Reliability, Maintainability, Hygiene) and findings that quote the exact file and line.
+- **Project profile.** Detected stack, API routes (Express and FastAPI), scripts and environment variables.
+- **Dependencies.** Declared but unused, used but undeclared, and known vulnerabilities (OSV).
+- **Change Impact for pull requests.** Enter a PR and get the blast radius, files that are unchanged but affected, and a copyable Markdown summary.
+- **README badge** and a **health endpoint** (`/api/health`).
 
-- **Live Demo**: [Launch SetupDoctor](https://setup-doctor.example.com) *(Demo link placeholder)*
+## What makes it different
 
-### Screenshots
+Most reviews of a repository are opinions. SetupDoctor counts: the same repository gives the same numbers every time, and every finding points to a real file and line. It was checked against large real projects (for example `vitejs/vite`, about 1,800 mapped files).
 
-<!-- Add screenshots to docs/screenshots/ -->
-| Repository Diagnostics & Health Score | Bug Vault & Smart Suggestions |
-| :---: | :---: |
-| ![Diagnostics Overview](docs/screenshots/dashboard.png) | ![Bug Vault](docs/screenshots/bug-vault.png) |
+## Quick start
 
----
+Requirements: Node.js 20+ and npm.
 
-## Features
-
-- **Repository Diagnostics with 0–100 Health Score**: Comprehensive health evaluation calculating a transparent score with prioritized findings (high, medium, low).
-- **16+ Diagnostic Rules**: Automated verification covering:
-  - Node engine specifications (`engines.node`)
-  - Duplicate dependencies across `dependencies` and `devDependencies`
-  - Valid semver version ranges and React/React-DOM version parity
-  - Lockfile presence, lockfile collision, and package manager consistency
-  - Build, dev, and test scripts in `package.json`
-  - Framework dependencies (`react`, `react-dom`, `vite`, `eslint`, `typescript`)
-  - Safety checks for `.env`, `.env.example`, and `.gitignore`
-- **Bug Vault Knowledge Base**: Catalog recurring environment issues and verified fixes organized by built-in system categories (Environment, Dependencies, Configuration, Build, Runtime, etc.) or custom categories.
-- **Search & Similar-Bug Suggestions**: Real-time full-text search across errors, causes, and solutions, plus automatic similarity matching that recommends existing fixes while composing bug reports.
-- **Export & Import**: Seamless JSON export (`setupdoctor-bug-vault-YYYY-MM-DD.json`) and import with schema normalization, integrity validation, and conflict resolution.
-
----
-
-## Tech Stack
-
-- **Frontend**: [React 19](https://react.dev/), [Vite](https://vite.dev/)
-- **Backend**: [Express 5](https://expressjs.com/), [Node.js](https://nodejs.org/) native test runner (`node:test`, `node:assert/strict`)
-- **Persistence**: Schema-versioned browser `localStorage` with automated migration, data integrity checks, and error fallbacks
-
----
-
-## How It Works
-
-1. **Analyze**: Enter any public GitHub repository (owner, repository name, branch) to fetch file trees and manifest configurations securely.
-2. **Diagnose**: SetupDoctor evaluates 16+ rules against package definitions, scripts, lockfiles, and environment files to compute a 0–100 health score.
-3. **Prioritize**: Review categorized issues with clear rationales, priority tags, and actionable recommendations.
-4. **Save to Bug Vault**: Turn recurring friction points and verified setup fixes into reusable knowledge entries with auto-categorization and instant similarity lookup.
-
----
-
-## Getting Started
-
-### Prerequisites
-
-- [Node.js](https://nodejs.org/) v20.x or v22.x
-- [npm](https://www.npmjs.com/) v10+
-
-### Installation & Setup
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/your-username/setup-doctor.git
-   cd setup-doctor
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   npm install
-   npm install --prefix Backend
-   npm install --prefix frontend
-   ```
-
-3. **Configure environment variables**:
-   Copy the backend environment template:
-   ```bash
-   cp Backend/.env.example Backend/.env
-   ```
-   Edit `Backend/.env`:
-   - `GITHUB_TOKEN`: *(Optional, recommended)* A fine-grained GitHub Personal Access Token (public repositories read-only). Adding a token increases GitHub API rate limits from 60 requests/hour to 5,000 requests/hour.
-   - `ALLOWED_ORIGINS`: *(Optional)* Comma-separated list of allowed CORS origins. Defaults to `http://localhost:5173,http://127.0.0.1:5173`.
-
-4. **Start the development servers**:
-   ```bash
-   npm run dev
-   ```
-
-5. **Open the applications**:
-   - **Frontend UI**: [http://localhost:5173](http://localhost:5173)
-   - **Backend API**: [http://localhost:5000](http://localhost:5000)
-
----
-
-## Scripts
-
-| Command | Description |
-| --- | --- |
-| `npm run dev` | Runs Backend (`nodemon`) and frontend (`vite`) concurrently |
-| `npm test` | Runs the full test suite across Backend and frontend (`node:test`) |
-| `npm run lint` | Runs ESLint across the frontend codebase |
-| `npm run build` | Builds the frontend production bundle (`npm --prefix frontend run build`) |
-
----
-
-## Project Structure
-
-```text
-Setup-Doctor/
-├── .github/
-│   └── workflows/
-│       └── ci.yml             # GitHub Actions CI workflow (lint, test, build)
-├── Backend/
-│   ├── src/
-│   │   ├── rules.js           # Diagnostic rules engine & health scoring
-│   │   ├── server.js          # Express 5 server & GitHub API proxy
-│   │   └── server.test.js     # Native Node.js backend integration tests
-│   ├── .env.example           # Backend environment template
-│   └── package.json
-├── frontend/
-│   ├── src/
-│   │   ├── components/        # Header, Sidebar, StatCard, AnalysisModal, etc.
-│   │   ├── utils/             # Storage, transfer, categorization & similarity
-│   │   ├── App.jsx            # Main application & Bug Vault view
-│   │   └── main.jsx           # React root entry point
-│   ├── vite.config.js         # Vite configuration with /api backend proxy
-│   └── package.json
-├── package.json               # Root monorepo orchestration scripts
-└── README.md                  # Project documentation
+```bash
+git clone https://github.com/karunyakanyal/Setup-Doctor.git
+cd Setup-Doctor
+npm install
+npm --prefix Backend install
+npm --prefix frontend install
+npm run dev
 ```
 
----
+Open http://localhost:5173. The backend runs on port 5000.
 
-## Roadmap
+### Optional: higher GitHub limits
 
-- [ ] **DevContext Module**: Local machine environment detection (Node, npm, OS, path bindings) to diagnose local workstation setups alongside repositories.
-- [ ] **Backend Caching**: In-memory and persistent caching layer for GitHub file trees and dependency payloads to optimize repeat analyses.
-- [ ] **React Router**: Full declarative routing for deep-linking into individual analyses, diagnostic reports, and Bug Vault entries.
+Without a token GitHub allows about 60 requests per hour. With a token, about 5,000.
 
----
+1. Create a fine-grained GitHub token with read-only access to public repositories.
+2. Create `Backend/.env`:
+   ```
+   GITHUB_TOKEN=your_token_here
+   ```
+3. Restart the backend. Open `/api/health`: `githubTokenConfigured` should be `true`.
+
+Never commit `.env`. The token is never logged or returned by the API.
+
+### Other settings
+
+| Variable | Purpose |
+|---|---|
+| `GITHUB_TOKEN` | Higher GitHub rate limit |
+| `ALLOWED_ORIGINS` | Comma-separated origins allowed by CORS |
+| `PUBLIC_BASE_URL` | Public URL of the backend, used in the README badge |
+
+## How to use it
+
+1. Paste a repository URL (for example `https://github.com/owner/repo`) and press Analyze.
+2. Read the headline and the top risky files.
+3. Press **Inspect** on a file to see what a change can break.
+4. Open **More analysis** (or switch to **Detailed**) for setup checks, dependencies, the code map and the inventory.
+
+## Limits
+
+- It reads `import`, `export` and `require` statements. It cannot see imports built at runtime or packages referenced only in config strings. The app shows a "How reliable is this?" note with the exact coverage of each scan.
+- Python and other non-JavaScript files are listed but not mapped into the graph yet.
+- Very large repositories are scanned up to a size limit and marked as truncated.
+
+## Tests
+
+```bash
+npm test
+npm run lint
+```
 
 ## License
 
-ISC License.
+MIT (add a `LICENSE` file).
