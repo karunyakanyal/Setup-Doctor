@@ -4,6 +4,9 @@ import {
   formatStackInPlainWords,
   getHealthVerdict,
   getWhatToDoNext,
+  generateProjectStory,
+  calculateRiskiestFiles,
+  getProjectRiskHeadline,
 } from './projectGlance.js'
 
 test('formatStackInPlainWords: formats stack in natural words', () => {
@@ -576,4 +579,192 @@ test('Phase 1: Verdict mapping (A=Looking healthy, B/C=A few things to fix, D/E=
   assert.equal(verdictD.label, 'Needs attention')
   assert.equal(verdictD.icon, '✖')
   assert.equal(verdictD.tone, 'attention')
+})
+
+
+test('Phase 2: generateProjectStory with Skinveda shape produces 3 concrete sentences', () => {
+  const story = generateProjectStory({
+    framework: null,
+    stack: ['node', 'react', 'vite'],
+    language: 'JavaScript',
+    byLanguage: { jsx: 31, python: 15, javascript: 14 },
+    profile: {
+      stacks: ['node', 'react', 'vite', 'python', 'fastapi'],
+      routes: Array.from({ length: 28 }, (_, i) => ({ method: 'GET', path: `/api/route${i}` })),
+    },
+    deepScanData: {
+      coverage: { graphFiles: 46 },
+      summary: {
+        cycles: [
+          {
+            hub: {
+              file: 'src/App.jsx',
+              symbol: 'useApp',
+              count: 26,
+              suggestedFile: 'src/context/AppContext.jsx',
+              totalFilesInCycle: 27,
+            },
+          },
+        ],
+      },
+    },
+    diagnostics: [],
+  })
+
+  // Sentence 1: stack and routes
+  assert.ok(story.sentence1.includes('React app built with Vite, written in JavaScript (JSX), with a Python (FastAPI) backend'))
+  assert.ok(story.sentence1.includes('exposing 28 API routes'))
+
+  // Sentence 2: biggest structural risk
+  assert.ok(story.sentence2.includes('26 pages import useApp from src/App.jsx; the loop runs through all 26 pages and App.jsx'))
+
+  // Sentence 3: what to do first
+  assert.ok(story.sentence3.includes('move useApp from src/App.jsx to src/context/AppContext.jsx'))
+})
+
+test('Phase 2: generateProjectStory with vite shape produces 3 concrete sentences', () => {
+  const story = generateProjectStory({
+    framework: 'Vite',
+    stack: ['vite', 'TypeScript'],
+    language: 'TypeScript',
+    monorepo: true,
+    byLanguage: { typescript: 1700, javascript: 81 },
+    deepScanData: {
+      coverage: { graphFiles: 1781 },
+      summary: {
+        entryPoints: Array.from({ length: 17 }, (_, i) => `packages/pkg_${i}/index.ts`),
+        cycles: [
+          {
+            shortest: ['packages/vite/src/node/optimizer/scan.ts', 'packages/vite/src/node/plugins/esbuild.ts'],
+          },
+          {
+            shortest: ['packages/vite/src/node/server/moduleGraph.ts', 'packages/vite/src/node/plugins/importAnalysis.ts'],
+          },
+        ],
+      },
+    },
+    diagnostics: [],
+  })
+
+  assert.ok(story.sentence1.includes('TypeScript monorepo using Vite, with 17 library entry points'))
+  assert.ok(story.sentence2.includes('2 runtime circular dependency loops between packages/vite/src/node/optimizer/scan.ts and packages/vite/src/node/plugins/esbuild.ts'))
+  assert.ok(story.sentence3.includes('refactor packages/vite/src/node/optimizer/scan.ts to break the circular dependency loop with packages/vite/src/node/plugins/esbuild.ts'))
+})
+
+test('Phase 2: calculateRiskiestFiles ranks by formula and produces human-readable reasons', () => {
+  const graph = {
+    nodes: [
+      {
+        path: 'src/App.jsx',
+        fanIn: 26,
+        transitiveImpact: 26,
+        size: 8000,
+      },
+      {
+        path: 'src/pages/Landing.jsx',
+        fanIn: 1,
+        transitiveImpact: 1,
+        size: 3000,
+      },
+      {
+        path: 'src/utils/clean.js',
+        fanIn: 0,
+        transitiveImpact: 0,
+        size: 500,
+      },
+    ],
+    edges: [
+      ['src/pages/Landing.jsx', 'src/App.jsx'],
+    ],
+  }
+
+  const cycles = [
+    {
+      files: ['src/App.jsx', 'src/pages/Landing.jsx'],
+      shortest: ['src/App.jsx', 'src/pages/Landing.jsx'],
+    },
+  ]
+
+  const riskiest = calculateRiskiestFiles({
+    graph,
+    cycles,
+    limit: 5,
+  })
+
+  assert.equal(riskiest.length, 3)
+  assert.equal(riskiest[0].path, 'src/App.jsx')
+  // App.jsx formula check (absolute unscaled score in 40-70 range, never 100):
+  // reachScore (up to 15) + fanInScore (min(40, 26 * 1.5) = 39) + cycleBonus (10) = 64
+  assert.ok(riskiest[0].score >= 40 && riskiest[0].score <= 70)
+  assert.equal(riskiest[0].score, 64)
+  assert.ok(riskiest[0].reason.includes('imported by 26 files'))
+  assert.ok(riskiest[0].reason.includes('in a cycle'))
+  assert.equal(riskiest[2].path, 'src/utils/clean.js')
+  assert.equal(riskiest[2].reason, 'Low risk: no dependents')
+  assert.equal(riskiest[2].score, 0)
+})
+
+test('Phase 2: getProjectRiskHeadline generates headline naming top file and risk count', () => {
+  const riskiest = [
+    { path: 'src/App.jsx', score: 60, fanIn: 26, reason: 'imported by 26 files, 26 affected' },
+    { path: 'src/pages/Landing.jsx', score: 20, fanIn: 2, reason: 'imported by 2 files' },
+  ]
+  const headline = getProjectRiskHeadline(riskiest)
+  assert.equal(headline, '1 file carries most of the risk. Start with App.jsx.')
+})
+
+test('Skinveda shape: 2 files carry most of the risk and start with App.jsx', () => {
+  const skinRiskiest = [
+    { path: 'src/App.jsx', score: 59, fanIn: 27 },
+    { path: 'src/components/ui.jsx', score: 50, fanIn: 29 },
+    { path: 'src/data/skincare.js', score: 26, fanIn: 10 },
+    { path: 'src/components/skin.jsx', score: 24, fanIn: 10 },
+    { path: 'src/components/AuthLayout.jsx', score: 24, fanIn: 3 },
+  ]
+  assert.ok(skinRiskiest[0].score >= 40 && skinRiskiest[0].score <= 70)
+  const headline = getProjectRiskHeadline(skinRiskiest)
+  assert.equal(headline, '2 files carry most of the risk. Start with App.jsx.')
+})
+
+test('Vite shape: absolute unscaled scores in 40-70 range and spread risk headline', () => {
+  const viteRiskiest = [
+    { path: 'packages/vite/src/node/utils.ts', score: 58, fanIn: 69 },
+    { path: 'packages/vite/src/node/config.ts', score: 58, fanIn: 39 },
+    { path: 'packages/vite/src/node/server/index.ts', score: 50, fanIn: 21 },
+    { path: 'packages/vite/src/shared/utils.ts', score: 49, fanIn: 56 },
+    { path: 'packages/vite/src/node/plugin.ts', score: 48, fanIn: 36 },
+  ]
+  // Top hub scores are calibrated in 40 to 70 range, never 100
+  for (const f of viteRiskiest) {
+    assert.ok(f.score >= 40 && f.score <= 70)
+  }
+  const headline = getProjectRiskHeadline(viteRiskiest)
+  assert.equal(headline, 'Risk is spread across several files')
+})
+
+test('Riskiest files toggle: respects production only vs non-production edges', () => {
+  const graph = {
+    nodes: [
+      { id: 1, path: 'src/utils.ts', category: 'production', isTest: false, fanIn: 3 },
+      { id: 2, path: 'src/index.ts', category: 'production', isTest: false },
+      { id: 3, path: 'test/utils.test.ts', category: 'non-production', isTest: true },
+      { id: 4, path: 'fixture/data.ts', category: 'non-production', isTest: false },
+    ],
+    edges: [
+      [2, 1], // prod -> prod
+      [3, 1], // test -> prod
+      [4, 1], // non-prod fixture -> prod
+    ],
+  }
+
+  // Production only by default
+  const prodOnly = calculateRiskiestFiles({ graph, includeNonProd: false })
+  assert.equal(prodOnly.length, 2)
+  assert.equal(prodOnly[0].path, 'src/utils.ts')
+  assert.equal(prodOnly[0].fanIn, 1)
+
+  // Including non-prod
+  const allFiles = calculateRiskiestFiles({ graph, includeNonProd: true })
+  const utilsAll = allFiles.find((f) => f.path === 'src/utils.ts')
+  assert.equal(utilsAll.fanIn, 3)
 })

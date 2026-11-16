@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import AnalyzeRepositoryModal from '../components/AnalyzeRepositoryModal'
 import RecentAnalyses from '../components/RecentAnalyses'
@@ -15,7 +15,17 @@ import DiagnosticsLoadingSkeleton from '../components/diagnostics/DiagnosticsLoa
 import DiagnosticsErrorState from '../components/diagnostics/DiagnosticsErrorState'
 import CodeMapPanel from '../components/codemap/CodeMapPanel'
 import ProjectGlanceCard from '../components/diagnostics/ProjectGlanceCard'
-import { buildMergedFindings, isCoveredTopic, formatCapReasonPlainWords } from '../utils/projectGlance.js'
+import RiskiestFilesCard from '../components/diagnostics/RiskiestFilesCard'
+import NeighborhoodGraph from '../components/codemap/NeighborhoodGraph'
+import {
+  buildMergedFindings,
+  isCoveredTopic,
+  formatCapReasonPlainWords,
+  calculateRiskiestFiles,
+  getProjectRiskHeadline,
+  getHealthVerdict,
+} from '../utils/projectGlance.js'
+import { getFileConnections } from '../utils/graphImpact.js'
 import WhatToDoNextPanel from '../components/diagnostics/WhatToDoNextPanel'
 import ProjectProfileCard from '../components/diagnostics/ProjectProfileCard'
 import DimensionRatingTiles from '../components/diagnostics/DimensionRatingTiles'
@@ -97,6 +107,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
   const [showPassed, setShowPassed] = useState(false)
   const [viewMode, setViewMode] = useState('simple') // 'simple' | 'detailed'
   const [includeNonProd, setIncludeNonProd] = useState(false)
+  const [selectedFile, setSelectedFile] = useState('')
+  const [inspectHistory, setInspectHistory] = useState([])
 
   async function runDeepScan(repositoryData) {
     if (!repositoryData?.owner || !repositoryData?.name || !repositoryData?.defaultBranch) {
@@ -191,6 +203,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     setShowPassed(false)
     setViewMode('simple')
     setIncludeNonProd(false)
+    setSelectedFile('')
+    setInspectHistory([])
 
     try {
       const response = await fetch('/api/repository/diagnose', {
@@ -417,6 +431,165 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     return getFilterCounts(diagnostics)
   }, [diagnostics])
 
+  const riskiestFiles = useMemo(() => {
+    return calculateRiskiestFiles({
+      graph: deepScanData?.graph,
+      cycles: deepScanData?.summary?.cycles,
+      includeNonProd,
+      limit: 5,
+    })
+  }, [deepScanData?.graph, deepScanData?.summary?.cycles, includeNonProd])
+
+  const riskHeadline = useMemo(() => {
+    return getProjectRiskHeadline(riskiestFiles)
+  }, [riskiestFiles])
+
+  const activeSelectedFile = useMemo(() => {
+    if (selectedFile) return selectedFile
+    if (riskiestFiles.length > 0 && riskiestFiles[0]?.path) return riskiestFiles[0].path
+    if (deepScanData?.graph?.nodes?.length > 0) return deepScanData.graph.nodes[0].path
+    return ''
+  }, [selectedFile, riskiestFiles, deepScanData])
+
+  const activeFileConnections = useMemo(() => {
+    if (!deepScanData?.graph || !activeSelectedFile) {
+      return { imports: [], importers: [] }
+    }
+    return getFileConnections(deepScanData.graph, activeSelectedFile)
+  }, [deepScanData, activeSelectedFile])
+
+  const inspectScrollRequestedRef = useRef(false)
+
+  useEffect(() => {
+    if (!inspectScrollRequestedRef.current) return
+    inspectScrollRequestedRef.current = false
+    const el = document.getElementById('inspecting-file-heading') ||
+               document.getElementById('heading-file-explorer') ||
+               document.getElementById('codemap-file-header')
+    if (el) {
+      const prefersReducedMotion =
+        typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+      el.scrollIntoView({
+        block: 'start',
+        behavior: prefersReducedMotion ? 'auto' : 'smooth',
+      })
+      el.focus?.()
+    }
+  }, [selectedFile])
+
+  const handleInspectFile = (filePath) => {
+    if (!filePath) return
+    const current = activeSelectedFile
+    if (current && current !== filePath) {
+      setInspectHistory((prev) => [...prev, current])
+    }
+    inspectScrollRequestedRef.current = true
+    setSelectedFile(filePath)
+    if (selectedFile === filePath) {
+      const prefersReducedMotion =
+        typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+      const el = document.getElementById('inspecting-file-heading') ||
+                 document.getElementById('heading-file-explorer') ||
+                 document.getElementById('codemap-file-header')
+      if (el) {
+        el.scrollIntoView({
+          block: 'start',
+          behavior: prefersReducedMotion ? 'auto' : 'smooth',
+        })
+        el.focus?.()
+      }
+      inspectScrollRequestedRef.current = false
+    }
+  }
+
+  const handleInspectBack = () => {
+    if (inspectHistory.length === 0) return
+    const prevFile = inspectHistory[inspectHistory.length - 1]
+    setInspectHistory((prev) => prev.slice(0, -1))
+    inspectScrollRequestedRef.current = true
+    setSelectedFile(prevFile)
+  }
+
+  const [isBadgeCopied, setIsBadgeCopied] = useState(false)
+
+  const codeFilesCount = useMemo(() => {
+    return (
+      deepScanData?.coverage?.graphFiles ??
+      deepScanData?.graphFiles ??
+      deepScanData?.graph?.nodes?.length ??
+      deepScanData?.coverage?.analyzedFiles ??
+      deepScanData?.inventory?.analyzedFiles ??
+      0
+    )
+  }, [deepScanData])
+
+  const glanceVerdict = useMemo(() => {
+    return getHealthVerdict({
+      health,
+      diagnostics,
+      deepScanData,
+      deepScanStatus,
+      includeNonProd,
+    })
+  }, [health, diagnostics, deepScanData, deepScanStatus, includeNonProd])
+
+  const badgeUrl = useMemo(() => {
+    if (deepScanData?.badge?.url && /^https?:\/\//i.test(deepScanData.badge.url)) return deepScanData.badge.url
+    if (deepScanData?.summary?.badge?.url && /^https?:\/\//i.test(deepScanData.summary.badge.url)) return deepScanData.summary.badge.url
+    if (repository?.owner && (repository?.name || repository?.repo)) {
+      const o = encodeURIComponent(repository.owner)
+      const r = encodeURIComponent(repository.name || repository.repo)
+      const base = (typeof window !== 'undefined' && window.location?.origin) || 'http://localhost:3000'
+      return `${base}/api/badge/${o}/${r}`
+    }
+    return null
+  }, [deepScanData, repository])
+
+  const badgeMarkdown = useMemo(() => {
+    if (deepScanData?.badge?.markdown && /^\[!\[SetupDoctor Grade\]\(https?:\/\//i.test(deepScanData.badge.markdown)) {
+      return deepScanData.badge.markdown
+    }
+    if (deepScanData?.summary?.badge?.markdown && /^\[!\[SetupDoctor Grade\]\(https?:\/\//i.test(deepScanData.summary.badge.markdown)) {
+      return deepScanData.summary.badge.markdown
+    }
+    if (badgeUrl && repository?.owner && (repository?.name || repository?.repo)) {
+      const o = encodeURIComponent(repository.owner)
+      const r = encodeURIComponent(repository.name || repository.repo)
+      return `[![SetupDoctor Grade](${badgeUrl})](https://github.com/${o}/${r})`
+    }
+    return null
+  }, [deepScanData, badgeUrl, repository])
+
+  async function handleCopyBadge() {
+    if (!badgeMarkdown) return
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(badgeMarkdown)
+        setIsBadgeCopied(true)
+        setTimeout(() => setIsBadgeCopied(false), 2000)
+        return
+      }
+    } catch {
+      // fallback
+    }
+    try {
+      const textarea = document.createElement('textarea')
+      textarea.value = badgeMarkdown
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+      setIsBadgeCopied(true)
+      setTimeout(() => setIsBadgeCopied(false), 2000)
+    } catch {
+      setIsBadgeCopied(false)
+    }
+  }
+
 
   return (
     <>
@@ -525,7 +698,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
       )}
 
       {repository && !isDiagnosticsLoading && !diagnosticsError && (
-        <section className="glance-and-actions-section" aria-label="Project overview and action plan">
+        <section className="glance-and-actions-section" aria-label="Project overview and risk impact">
           <div className="view-mode-control-bar">
             <span className="view-mode-prompt">Display density:</span>
             <div className="view-mode-toggle" role="group" aria-label="View mode">
@@ -548,6 +721,14 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
             </div>
           </div>
 
+          {/* (a) One big headline */}
+          {riskHeadline && (
+            <div className="dashboard-risk-headline-card">
+              <h2 className="dashboard-risk-headline">{riskHeadline}</h2>
+            </div>
+          )}
+
+          {/* (b) The grade with its reason */}
           <ProjectGlanceCard
             repository={repository}
             health={health}
@@ -558,79 +739,48 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
             deepScanData={deepScanData}
             deepScanStatus={deepScanStatus}
             includeNonProd={includeNonProd}
+            showFooter={false}
           />
+
+          {/* (c) Top 5 risky files with 0-100 score and bar, each with reason and working Inspect */}
+          <RiskiestFilesCard
+            graph={deepScanData?.graph}
+            cycles={deepScanData?.summary?.cycles}
+            includeNonProd={includeNonProd}
+            onInspectFile={handleInspectFile}
+          />
+
+          {/* What to do next (top 3 steps in Simple mode) */}
+          {viewMode === 'simple' && (
+            <WhatToDoNextPanel
+              diagnostics={diagnostics}
+              deepScanData={deepScanData}
+              deepScanStatus={deepScanStatus}
+              includeNonProd={includeNonProd}
+              onInspectFile={handleInspectFile}
+              maxRows={3}
+              hideExpandButton={true}
+            />
+          )}
+
+          {/* (d) The file impact panel */}
+          {activeSelectedFile && deepScanData?.graph && (
+            <section className="file-impact-section" aria-labelledby="inspecting-file-heading">
+              <NeighborhoodGraph
+                selectedFile={activeSelectedFile}
+                imports={activeFileConnections.imports}
+                importers={activeFileConnections.importers}
+                graph={deepScanData?.graph}
+                cycles={deepScanData?.summary?.cycles}
+                summary={deepScanData?.summary}
+                includeNonProd={includeNonProd}
+                onSelectFile={handleInspectFile}
+                canGoBack={inspectHistory.length > 0}
+                onBack={handleInspectBack}
+              />
+            </section>
+          )}
         </section>
-      )}
-
-      {/* Simple mode: glance card, 4 tiles, top 3 steps ("What to do next"), top 3 findings, profile card */}
-      {repository && !isDiagnosticsLoading && !diagnosticsError && viewMode === 'simple' && (
-        <>
-          {(deepScanData?.dimensions || deepScanData?.summary?.dimensions) && (
-            <DimensionRatingTiles
-              dimensions={deepScanData.dimensions || deepScanData.summary?.dimensions}
-            />
-          )}
-
-          <WhatToDoNextPanel
-            diagnostics={diagnostics}
-            deepScanData={deepScanData}
-            deepScanStatus={deepScanStatus}
-            includeNonProd={includeNonProd}
-            onInspectFile={() => {
-              setViewMode('detailed')
-              const el = document.getElementById('codemap-panel-heading') || document.getElementById('technical-details-title')
-              if (el) el.scrollIntoView({ behavior: 'smooth' })
-            }}
-          />
-
-          <FindingsGroupedBySeverity
-            findings={mergedFindings}
-            viewMode="simple"
-            onSwitchToDetailed={() => setViewMode('detailed')}
-          />
-
-          {(deepScanData?.profile || deepScanData?.summary?.profile) && (
-            <ProjectProfileCard
-              profile={deepScanData.profile || deepScanData.summary?.profile}
-              repository={repository}
-            />
-          )}
-        </>
-      )}
-
-      {/* Detailed mode: all findings once + Technical details showing only checks not already covered */}
-      {repository && !isDiagnosticsLoading && !diagnosticsError && viewMode === 'detailed' && (
-        <>
-          <WhatToDoNextPanel
-            diagnostics={diagnostics}
-            deepScanData={deepScanData}
-            deepScanStatus={deepScanStatus}
-            includeNonProd={includeNonProd}
-            onInspectFile={() => {
-              const el = document.getElementById('codemap-panel-heading') || document.getElementById('technical-details-title')
-              if (el) el.scrollIntoView({ behavior: 'smooth' })
-            }}
-          />
-
-          {(deepScanData?.profile || deepScanData?.summary?.profile) && (
-            <ProjectProfileCard
-              profile={deepScanData.profile || deepScanData.summary?.profile}
-              repository={repository}
-            />
-          )}
-
-          {(deepScanData?.dimensions || deepScanData?.summary?.dimensions) && (
-            <DimensionRatingTiles
-              dimensions={deepScanData.dimensions || deepScanData.summary?.dimensions}
-            />
-          )}
-
-          <FindingsGroupedBySeverity
-            findings={mergedFindings}
-            viewMode="detailed"
-            onSwitchToDetailed={() => setViewMode('detailed')}
-          />
-        </>
       )}
 
       {repository && diagnosticsError && (
@@ -642,7 +792,8 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
           />
         </section>
       )}
-{/* Technical details: Everything that exists today */}
+
+      {/* Everything else: under single collapsed More analysis section in Simple mode, fully visible in Detailed mode */}
       {repository && !isDiagnosticsLoading && !diagnosticsError && (
         <section className="technical-details" aria-labelledby="technical-details-title">
           <div className="section-heading technical-details-heading-wrap">
@@ -663,6 +814,78 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
 
           {viewMode === 'detailed' ? (
             <div className="technical-details-content">
+              <div className="analysis-summary-strip">
+                <div className="analysis-meta-stat">
+                  <strong className="meta-number">
+                    {deepScanStatus === 'scanning'
+                      ? 'Scanning code...'
+                      : (deepScanStatus === 'error' || (!deepScanData && deepScanStatus === 'idle'))
+                      ? '—'
+                      : codeFilesCount.toLocaleString()}
+                  </strong>
+                  <span className="meta-label">code files mapped</span>
+                </div>
+                {glanceVerdict?.summaryLine && (
+                  <div className="analysis-meta-summary">
+                    <p className="meta-summary-text">{glanceVerdict.summaryLine}</p>
+                  </div>
+                )}
+              </div>
+
+              {badgeMarkdown && (
+                <div className="analysis-badge-section">
+                  <div className="badge-preview-area">
+                    <span className="badge-label">README badge:</span>
+                    {badgeUrl && (
+                      <img
+                        src={badgeUrl}
+                        alt="SetupDoctor Grade"
+                        className="badge-preview-img"
+                        onError={(e) => { e.currentTarget.style.display = 'none' }}
+                      />
+                    )}
+                  </div>
+                  <div className="badge-copy-area">
+                    <code className="badge-markdown-code font-mono">{badgeMarkdown}</code>
+                    <button
+                      type="button"
+                      className={`badge-copy-btn ${isBadgeCopied ? 'copied' : ''}`}
+                      onClick={handleCopyBadge}
+                      aria-label="Copy badge Markdown to clipboard"
+                    >
+                      {isBadgeCopied ? '✓ Copied' : 'Copy snippet'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {(deepScanData?.dimensions || deepScanData?.summary?.dimensions) && (
+                <DimensionRatingTiles
+                  dimensions={deepScanData.dimensions || deepScanData.summary?.dimensions}
+                />
+              )}
+
+              <WhatToDoNextPanel
+                diagnostics={diagnostics}
+                deepScanData={deepScanData}
+                deepScanStatus={deepScanStatus}
+                includeNonProd={includeNonProd}
+                onInspectFile={handleInspectFile}
+              />
+
+              <FindingsGroupedBySeverity
+                findings={mergedFindings}
+                viewMode="detailed"
+                onSwitchToDetailed={() => setViewMode('detailed')}
+              />
+
+              {(deepScanData?.profile || deepScanData?.summary?.profile) && (
+                <ProjectProfileCard
+                  profile={deepScanData.profile || deepScanData.summary?.profile}
+                  repository={repository}
+                />
+              )}
+
               {health && (
                 <DiagnosticsHealthSummary
                   health={health}
@@ -735,6 +958,10 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                 includeNonProd={includeNonProd}
                 onToggleIncludeNonProd={setIncludeNonProd}
                 onRerun={() => runDeepScan(repository)}
+                selectedFile={activeSelectedFile}
+                onInspectFile={handleInspectFile}
+                canGoBack={inspectHistory.length > 0}
+                onBack={handleInspectBack}
               />
 
               <section className="technology-stack" aria-labelledby="technology-stack-title">
@@ -766,15 +993,90 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
           ) : (
             <details className="technical-details-accordion">
               <summary className="technical-details-summary">
-                <strong>Show technical details</strong> (Health summary, score breakdown, all diagnostic checks, code map, and tech stack)
+                <strong>More analysis</strong> (Setup findings, action plan, project profile, dimensions, code map tables, and technical details)
               </summary>
               <div className="technical-details-content">
+              <div className="analysis-summary-strip">
+                <div className="analysis-meta-stat">
+                  <strong className="meta-number">
+                    {deepScanStatus === 'scanning'
+                      ? 'Scanning code...'
+                      : (deepScanStatus === 'error' || (!deepScanData && deepScanStatus === 'idle'))
+                      ? '—'
+                      : codeFilesCount.toLocaleString()}
+                  </strong>
+                  <span className="meta-label">code files mapped</span>
+                </div>
+                {glanceVerdict?.summaryLine && (
+                  <div className="analysis-meta-summary">
+                    <p className="meta-summary-text">{glanceVerdict.summaryLine}</p>
+                  </div>
+                )}
+              </div>
+
+              {badgeMarkdown && (
+                <div className="analysis-badge-section">
+                  <div className="badge-preview-area">
+                    <span className="badge-label">README badge:</span>
+                    {badgeUrl && (
+                      <img
+                        src={badgeUrl}
+                        alt="SetupDoctor Grade"
+                        className="badge-preview-img"
+                        onError={(e) => { e.currentTarget.style.display = 'none' }}
+                      />
+                    )}
+                  </div>
+                  <div className="badge-copy-area">
+                    <code className="badge-markdown-code font-mono">{badgeMarkdown}</code>
+                    <button
+                      type="button"
+                      className={`badge-copy-btn ${isBadgeCopied ? 'copied' : ''}`}
+                      onClick={handleCopyBadge}
+                      aria-label="Copy badge Markdown to clipboard"
+                    >
+                      {isBadgeCopied ? '✓ Copied' : 'Copy snippet'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+                {(deepScanData?.dimensions || deepScanData?.summary?.dimensions) && (
+                  <DimensionRatingTiles
+                    dimensions={deepScanData.dimensions || deepScanData.summary?.dimensions}
+                  />
+                )}
+
+                <WhatToDoNextPanel
+                  diagnostics={diagnostics}
+                  deepScanData={deepScanData}
+                  deepScanStatus={deepScanStatus}
+                  includeNonProd={includeNonProd}
+                  onInspectFile={handleInspectFile}
+                />
+
+                <FindingsGroupedBySeverity
+                  findings={mergedFindings}
+                  viewMode="simple"
+                  onSwitchToDetailed={() => setViewMode('detailed')}
+                />
+
+                {(deepScanData?.profile || deepScanData?.summary?.profile) && (
+                  <ProjectProfileCard
+                    profile={deepScanData.profile || deepScanData.summary?.profile}
+                    repository={repository}
+                  />
+                )}
+
                 {health && (
                   <DiagnosticsHealthSummary
                     health={health}
                     framework={framework}
                     monorepo={monorepo}
                     diagnostics={diagnostics}
+                    overallGrade={overallGrade}
+                    overallScore={overallScore}
+                    capReason={overallCapReason}
                   />
                 )}
 
@@ -838,6 +1140,10 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                   includeNonProd={includeNonProd}
                   onToggleIncludeNonProd={setIncludeNonProd}
                   onRerun={() => runDeepScan(repository)}
+                  selectedFile={activeSelectedFile}
+                  onInspectFile={handleInspectFile}
+                  canGoBack={inspectHistory.length > 0}
+                  onBack={handleInspectBack}
                 />
 
                 <section className="technology-stack" aria-labelledby="technology-stack-title-acc">

@@ -116,12 +116,21 @@ export default function CodeMapPanel({
   includeNonProd: controlledIncludeNonProd,
   onToggleIncludeNonProd,
   initialExpandedReasons = {},
+  selectedFile: controlledSelectedFile,
+  onInspectFile,
+  canGoBack = false,
+  onBack,
 }) {
   const isScanning = status === 'scanning'
   const isError = status === 'error' && Boolean(error)
   const hasData = Boolean(data && data.graph && data.inventory)
 
-  const [selectedFile, setSelectedFile] = useState('')
+  const [localSelectedFile, setLocalSelectedFile] = useState('')
+  const selectedFile = controlledSelectedFile !== undefined ? (controlledSelectedFile || '') : localSelectedFile
+  const setSelectedFile = (val) => {
+    if (onInspectFile) onInspectFile(val)
+    else setLocalSelectedFile(val)
+  }
   const [searchQuery, setSearchQuery] = useState('')
   const [showUnresolvedPanel, setShowUnresolvedPanel] = useState(initialShowUnresolvedPanel)
   const [localIncludeNonProd, setLocalIncludeNonProd] = useState(initialIncludeNonProd)
@@ -169,9 +178,12 @@ export default function CodeMapPanel({
 
   const handleInspectFile = (filePath) => {
     setSelectedFile(filePath)
-    const el = document.getElementById('heading-file-explorer')
+    const el = document.getElementById('inspecting-file-heading') ||
+               document.getElementById('heading-file-explorer') ||
+               document.getElementById('codemap-file-header')
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      el.focus?.()
     }
   }
 
@@ -332,15 +344,36 @@ export default function CodeMapPanel({
       if (configFiles.includes(item.path)) return false
       if (!includeNonProd) {
         const node = graph.nodes?.find((n) => n.path === item.path)
-        if (node?.category === 'non-production') return false
+        if (node?.category === 'non-production' || node?.isTest) return false
       }
       return true
     }
+
+    const byFanInList = (raw.byFanIn || []).filter(filterFn).map((item) => {
+      if (graph.edges?.length && graph.nodes?.length) {
+        const targetNode = graph.nodes.find((n) => n.path === item.path)
+        if (targetNode) {
+          const matchingEdges = graph.edges.filter((e) => {
+            const toId = Array.isArray(e) ? e[1] : (e.to ?? e.target)
+            if (toId !== targetNode.id && toId !== targetNode.path) return false
+            if (includeNonProd) return true
+            const fromId = Array.isArray(e) ? e[0] : (e.from ?? e.source)
+            const fromNode = graph.nodes.find((n) => n.id === fromId || n.path === fromId)
+            return fromNode && fromNode.category !== 'non-production' && !fromNode.isTest
+          })
+          return { ...item, fanIn: matchingEdges.length }
+        }
+      }
+      return item
+    })
+
+    byFanInList.sort((a, b) => b.fanIn - a.fanIn)
+
     return {
-      byFanIn: (raw.byFanIn || []).filter(filterFn),
+      byFanIn: byFanInList,
       byTransitiveImpact: (raw.byTransitiveImpact || []).filter(filterFn),
     }
-  }, [summary.hotspots, configFiles, includeNonProd, graph.nodes])
+  }, [summary.hotspots, configFiles, includeNonProd, graph.nodes, graph.edges])
 
   // Unsupported list for approximate analysis box
   const unsupportedList = useMemo(() => {
@@ -1158,7 +1191,7 @@ export default function CodeMapPanel({
                               <button
                                 type="button"
                                 className="codemap-link-button"
-                                onClick={() => setSelectedFile(filePath)}
+                                onClick={() => handleInspectFile(filePath)}
                                 aria-label={`Inspect ${filePath}`}
                               >
                                 {filePath}
@@ -1213,7 +1246,7 @@ export default function CodeMapPanel({
                                 <button
                                   type="button"
                                   className="codemap-link-button"
-                                  onClick={() => setSelectedFile(filePath)}
+                                  onClick={() => handleInspectFile(filePath)}
                                   aria-label={`Inspect ${filePath}`}
                                 >
                                   {filePath}
@@ -2051,7 +2084,9 @@ export default function CodeMapPanel({
                       cycles={cycles}
                       summary={summary}
                       includeNonProd={includeNonProd}
-                      onSelectFile={(path) => setSelectedFile(path)}
+                      onSelectFile={handleInspectFile}
+                      canGoBack={canGoBack}
+                      onBack={onBack}
                     />
                   </>
                 ) : (
