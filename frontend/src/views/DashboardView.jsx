@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import AnalyzeRepositoryModal from '../components/AnalyzeRepositoryModal'
 import RecentAnalyses from '../components/RecentAnalyses'
@@ -23,6 +23,7 @@ import {
   formatCapReasonPlainWords,
   calculateRiskiestFiles,
   getProjectRiskHeadline,
+  getHealthVerdict,
 } from '../utils/projectGlance.js'
 import { getFileConnections } from '../utils/graphImpact.js'
 import WhatToDoNextPanel from '../components/diagnostics/WhatToDoNextPanel'
@@ -457,38 +458,136 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
     return getFileConnections(deepScanData.graph, activeSelectedFile)
   }, [deepScanData, activeSelectedFile])
 
+  const inspectScrollRequestedRef = useRef(false)
+
+  useEffect(() => {
+    if (!inspectScrollRequestedRef.current) return
+    inspectScrollRequestedRef.current = false
+    const el = document.getElementById('inspecting-file-heading') ||
+               document.getElementById('heading-file-explorer') ||
+               document.getElementById('codemap-file-header')
+    if (el) {
+      const prefersReducedMotion =
+        typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+      el.scrollIntoView({
+        block: 'start',
+        behavior: prefersReducedMotion ? 'auto' : 'smooth',
+      })
+      el.focus?.()
+    }
+  }, [selectedFile])
+
   const handleInspectFile = (filePath) => {
     if (!filePath) return
     const current = activeSelectedFile
     if (current && current !== filePath) {
       setInspectHistory((prev) => [...prev, current])
     }
+    inspectScrollRequestedRef.current = true
     setSelectedFile(filePath)
-    setTimeout(() => {
+    if (selectedFile === filePath) {
+      const prefersReducedMotion =
+        typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
       const el = document.getElementById('inspecting-file-heading') ||
                  document.getElementById('heading-file-explorer') ||
                  document.getElementById('codemap-file-header')
       if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+        el.scrollIntoView({
+          block: 'start',
+          behavior: prefersReducedMotion ? 'auto' : 'smooth',
+        })
         el.focus?.()
       }
-    }, 0)
+      inspectScrollRequestedRef.current = false
+    }
   }
 
   const handleInspectBack = () => {
     if (inspectHistory.length === 0) return
     const prevFile = inspectHistory[inspectHistory.length - 1]
     setInspectHistory((prev) => prev.slice(0, -1))
+    inspectScrollRequestedRef.current = true
     setSelectedFile(prevFile)
-    setTimeout(() => {
-      const el = document.getElementById('inspecting-file-heading') ||
-                 document.getElementById('heading-file-explorer') ||
-                 document.getElementById('codemap-file-header')
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-        el.focus?.()
+  }
+
+  const [isBadgeCopied, setIsBadgeCopied] = useState(false)
+
+  const codeFilesCount = useMemo(() => {
+    return (
+      deepScanData?.coverage?.graphFiles ??
+      deepScanData?.graphFiles ??
+      deepScanData?.graph?.nodes?.length ??
+      deepScanData?.coverage?.analyzedFiles ??
+      deepScanData?.inventory?.analyzedFiles ??
+      0
+    )
+  }, [deepScanData])
+
+  const glanceVerdict = useMemo(() => {
+    return getHealthVerdict({
+      health,
+      diagnostics,
+      deepScanData,
+      deepScanStatus,
+      includeNonProd,
+    })
+  }, [health, diagnostics, deepScanData, deepScanStatus, includeNonProd])
+
+  const badgeUrl = useMemo(() => {
+    if (deepScanData?.badge?.url && /^https?:\/\//i.test(deepScanData.badge.url)) return deepScanData.badge.url
+    if (deepScanData?.summary?.badge?.url && /^https?:\/\//i.test(deepScanData.summary.badge.url)) return deepScanData.summary.badge.url
+    if (repository?.owner && (repository?.name || repository?.repo)) {
+      const o = encodeURIComponent(repository.owner)
+      const r = encodeURIComponent(repository.name || repository.repo)
+      const base = (typeof window !== 'undefined' && window.location?.origin) || 'http://localhost:3000'
+      return `${base}/api/badge/${o}/${r}`
+    }
+    return null
+  }, [deepScanData, repository])
+
+  const badgeMarkdown = useMemo(() => {
+    if (deepScanData?.badge?.markdown && /^\[!\[SetupDoctor Grade\]\(https?:\/\//i.test(deepScanData.badge.markdown)) {
+      return deepScanData.badge.markdown
+    }
+    if (deepScanData?.summary?.badge?.markdown && /^\[!\[SetupDoctor Grade\]\(https?:\/\//i.test(deepScanData.summary.badge.markdown)) {
+      return deepScanData.summary.badge.markdown
+    }
+    if (badgeUrl && repository?.owner && (repository?.name || repository?.repo)) {
+      const o = encodeURIComponent(repository.owner)
+      const r = encodeURIComponent(repository.name || repository.repo)
+      return `[![SetupDoctor Grade](${badgeUrl})](https://github.com/${o}/${r})`
+    }
+    return null
+  }, [deepScanData, badgeUrl, repository])
+
+  async function handleCopyBadge() {
+    if (!badgeMarkdown) return
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(badgeMarkdown)
+        setIsBadgeCopied(true)
+        setTimeout(() => setIsBadgeCopied(false), 2000)
+        return
       }
-    }, 0)
+    } catch {
+      // fallback
+    }
+    try {
+      const textarea = document.createElement('textarea')
+      textarea.value = badgeMarkdown
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+      setIsBadgeCopied(true)
+      setTimeout(() => setIsBadgeCopied(false), 2000)
+    } catch {
+      setIsBadgeCopied(false)
+    }
   }
 
 
@@ -640,6 +739,7 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
             deepScanData={deepScanData}
             deepScanStatus={deepScanStatus}
             includeNonProd={includeNonProd}
+            showFooter={false}
           />
 
           {/* (c) Top 5 risky files with 0-100 score and bar, each with reason and working Inspect */}
@@ -649,6 +749,19 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
             includeNonProd={includeNonProd}
             onInspectFile={handleInspectFile}
           />
+
+          {/* What to do next (top 3 steps in Simple mode) */}
+          {viewMode === 'simple' && (
+            <WhatToDoNextPanel
+              diagnostics={diagnostics}
+              deepScanData={deepScanData}
+              deepScanStatus={deepScanStatus}
+              includeNonProd={includeNonProd}
+              onInspectFile={handleInspectFile}
+              maxRows={3}
+              hideExpandButton={true}
+            />
+          )}
 
           {/* (d) The file impact panel */}
           {activeSelectedFile && deepScanData?.graph && (
@@ -701,6 +814,51 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
 
           {viewMode === 'detailed' ? (
             <div className="technical-details-content">
+              <div className="analysis-summary-strip">
+                <div className="analysis-meta-stat">
+                  <strong className="meta-number">
+                    {deepScanStatus === 'scanning'
+                      ? 'Scanning code...'
+                      : (deepScanStatus === 'error' || (!deepScanData && deepScanStatus === 'idle'))
+                      ? '—'
+                      : codeFilesCount.toLocaleString()}
+                  </strong>
+                  <span className="meta-label">code files mapped</span>
+                </div>
+                {glanceVerdict?.summaryLine && (
+                  <div className="analysis-meta-summary">
+                    <p className="meta-summary-text">{glanceVerdict.summaryLine}</p>
+                  </div>
+                )}
+              </div>
+
+              {badgeMarkdown && (
+                <div className="analysis-badge-section">
+                  <div className="badge-preview-area">
+                    <span className="badge-label">README badge:</span>
+                    {badgeUrl && (
+                      <img
+                        src={badgeUrl}
+                        alt="SetupDoctor Grade"
+                        className="badge-preview-img"
+                        onError={(e) => { e.currentTarget.style.display = 'none' }}
+                      />
+                    )}
+                  </div>
+                  <div className="badge-copy-area">
+                    <code className="badge-markdown-code font-mono">{badgeMarkdown}</code>
+                    <button
+                      type="button"
+                      className={`badge-copy-btn ${isBadgeCopied ? 'copied' : ''}`}
+                      onClick={handleCopyBadge}
+                      aria-label="Copy badge Markdown to clipboard"
+                    >
+                      {isBadgeCopied ? '✓ Copied' : 'Copy snippet'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {(deepScanData?.dimensions || deepScanData?.summary?.dimensions) && (
                 <DimensionRatingTiles
                   dimensions={deepScanData.dimensions || deepScanData.summary?.dimensions}
@@ -838,6 +996,51 @@ function DashboardView({ user = { name: 'Developer', initials: 'D' } }) {
                 <strong>More analysis</strong> (Setup findings, action plan, project profile, dimensions, code map tables, and technical details)
               </summary>
               <div className="technical-details-content">
+              <div className="analysis-summary-strip">
+                <div className="analysis-meta-stat">
+                  <strong className="meta-number">
+                    {deepScanStatus === 'scanning'
+                      ? 'Scanning code...'
+                      : (deepScanStatus === 'error' || (!deepScanData && deepScanStatus === 'idle'))
+                      ? '—'
+                      : codeFilesCount.toLocaleString()}
+                  </strong>
+                  <span className="meta-label">code files mapped</span>
+                </div>
+                {glanceVerdict?.summaryLine && (
+                  <div className="analysis-meta-summary">
+                    <p className="meta-summary-text">{glanceVerdict.summaryLine}</p>
+                  </div>
+                )}
+              </div>
+
+              {badgeMarkdown && (
+                <div className="analysis-badge-section">
+                  <div className="badge-preview-area">
+                    <span className="badge-label">README badge:</span>
+                    {badgeUrl && (
+                      <img
+                        src={badgeUrl}
+                        alt="SetupDoctor Grade"
+                        className="badge-preview-img"
+                        onError={(e) => { e.currentTarget.style.display = 'none' }}
+                      />
+                    )}
+                  </div>
+                  <div className="badge-copy-area">
+                    <code className="badge-markdown-code font-mono">{badgeMarkdown}</code>
+                    <button
+                      type="button"
+                      className={`badge-copy-btn ${isBadgeCopied ? 'copied' : ''}`}
+                      onClick={handleCopyBadge}
+                      aria-label="Copy badge Markdown to clipboard"
+                    >
+                      {isBadgeCopied ? '✓ Copied' : 'Copy snippet'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
                 {(deepScanData?.dimensions || deepScanData?.summary?.dimensions) && (
                   <DimensionRatingTiles
                     dimensions={deepScanData.dimensions || deepScanData.summary?.dimensions}

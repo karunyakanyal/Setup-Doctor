@@ -7,6 +7,8 @@ export default function WhatToDoNextPanel({
   deepScanStatus = 'idle',
   includeNonProd = false,
   onInspectFile = null,
+  maxRows = null,
+  hideExpandButton = false,
 }) {
   const [expanded, setExpanded] = useState(false)
   const [copiedId, setCopiedId] = useState(null)
@@ -20,8 +22,9 @@ export default function WhatToDoNextPanel({
     })
   }, [diagnostics, deepScanData, deepScanStatus, includeNonProd])
 
-  const displayedSteps = expanded ? steps : steps.slice(0, 3)
-  const hasMore = steps.length > 3
+  const limit = maxRows || (expanded ? steps.length : 3)
+  const displayedSteps = steps.slice(0, limit)
+  const hasMore = !hideExpandButton && !maxRows && steps.length > 3
 
   async function handleCopy(id, text) {
     try {

@@ -4,3 +4,5 @@ node_modules/
 !.env.example
 dist/
 docs/qa-screenshots/
+# Ignore temporary cloned repositories
+test-clone/

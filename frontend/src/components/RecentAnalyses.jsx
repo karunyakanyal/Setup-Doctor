@@ -13,12 +13,18 @@ function RecentAnalyses({ history, onSelectAnalysis }) {
       <div className="analysis-table-wrap">
         <table className="analysis-table">
           <thead>
-            <tr><th>Repository</th><th>Status</th><th>Analyzed</th><th aria-label="Actions" /></tr>
+            <tr><th>Repository</th><th>Grade</th><th>Analyzed</th><th aria-label="Actions" /></tr>
           </thead>
           <tbody>
             {analyses.length ? analyses.map((analysis) => {
-              const issueCount = (analysis.summary?.warning || 0) + (analysis.summary?.error || 0)
-              const status = analysis.health?.status || 'Unknown'
+              const savedGrade =
+                analysis.codeMapSummary?.grade ||
+                analysis.codeMapSummary?.dimensions?.overallGrade ||
+                analysis.dimensions?.overallGrade ||
+                analysis.health?.grade ||
+                analysis.grade ||
+                null
+              const gradeDisplay = savedGrade ? String(savedGrade).toUpperCase() : '-'
               const repositoryName = analysis.repository?.name || analysis.repository?.fullName || 'Unknown repository'
               const repositoryBranch = analysis.repository?.defaultBranch || 'Unknown branch'
               const initials = repositoryName.slice(0, 2).toUpperCase()
@@ -32,7 +38,11 @@ function RecentAnalyses({ history, onSelectAnalysis }) {
                     <div><strong>{repositoryName}</strong><span>{repositoryBranch}</span></div>
                   </div>
                 </td>
-                <td><span className={`status ${status === 'Healthy' ? 'healthy' : 'issues'}`}><span />{status === 'Healthy' ? status : `${issueCount} issue${issueCount === 1 ? '' : 's'} found`}</span></td>
+                <td>
+                  <span className={`status grade-badge grade-${gradeDisplay.toLowerCase()}`}>
+                    {gradeDisplay}
+                  </span>
+                </td>
                 <td className="time-cell">{analyzedAt}</td>
                 <td><button className="row-action" type="button" aria-label={`Open ${repositoryName}`} onClick={() => onSelectAnalysis(analysis)}>&#8594;</button></td>
               </tr>

@@ -11,6 +11,7 @@ export default function ProjectGlanceCard({
   deepScanData = null,
   deepScanStatus = 'idle',
   includeNonProd = false,
+  showFooter = true,
 }) {
   const [isBadgeCopied, setIsBadgeCopied] = useState(false)
 
@@ -169,48 +170,52 @@ export default function ProjectGlanceCard({
         </p>
       </div>
 
-      <div className="glance-card-footer">
-        <div className="glance-meta-item">
-          <strong className="meta-number">
-            {deepScanStatus === 'scanning'
-              ? 'Scanning code...'
-              : (deepScanStatus === 'error' || (!deepScanData && deepScanStatus === 'idle'))
-              ? '—'
-              : codeFilesCount.toLocaleString()}
-          </strong>
-          <span className="meta-label">code files mapped</span>
-        </div>
+      {showFooter && (
+        <>
+          <div className="glance-card-footer">
+            <div className="glance-meta-item">
+              <strong className="meta-number">
+                {deepScanStatus === 'scanning'
+                  ? 'Scanning code...'
+                  : (deepScanStatus === 'error' || (!deepScanData && deepScanStatus === 'idle'))
+                  ? '—'
+                  : codeFilesCount.toLocaleString()}
+              </strong>
+              <span className="meta-label">code files mapped</span>
+            </div>
 
-        <div className="glance-verdict-reason">
-          <p className="glance-why-sentence">{verdict.summaryLine || verdict.whySentence}</p>
-        </div>
-      </div>
+            <div className="glance-verdict-reason">
+              <p className="glance-why-sentence">{verdict.summaryLine || verdict.whySentence}</p>
+            </div>
+          </div>
 
-      {badgeMarkdown && (
-        <div className="glance-badge-section">
-          <div className="badge-preview-area">
-            <span className="badge-label">README badge:</span>
-            {badgeUrl && (
-              <img
-                src={badgeUrl}
-                alt="SetupDoctor Grade"
-                className="badge-preview-img"
-                onError={(e) => { e.currentTarget.style.display = 'none' }}
-              />
-            )}
-          </div>
-          <div className="badge-copy-area">
-            <code className="badge-markdown-code font-mono">{badgeMarkdown}</code>
-            <button
-              type="button"
-              className={`badge-copy-btn ${isBadgeCopied ? 'copied' : ''}`}
-              onClick={handleCopyBadge}
-              aria-label="Copy badge Markdown to clipboard"
-            >
-              {isBadgeCopied ? '✓ Copied' : 'Copy snippet'}
-            </button>
-          </div>
-        </div>
+          {badgeMarkdown && (
+            <div className="glance-badge-section">
+              <div className="badge-preview-area">
+                <span className="badge-label">README badge:</span>
+                {badgeUrl && (
+                  <img
+                    src={badgeUrl}
+                    alt="SetupDoctor Grade"
+                    className="badge-preview-img"
+                    onError={(e) => { e.currentTarget.style.display = 'none' }}
+                  />
+                )}
+              </div>
+              <div className="badge-copy-area">
+                <code className="badge-markdown-code font-mono">{badgeMarkdown}</code>
+                <button
+                  type="button"
+                  className={`badge-copy-btn ${isBadgeCopied ? 'copied' : ''}`}
+                  onClick={handleCopyBadge}
+                  aria-label="Copy badge Markdown to clipboard"
+                >
+                  {isBadgeCopied ? '✓ Copied' : 'Copy snippet'}
+                </button>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </section>
   )

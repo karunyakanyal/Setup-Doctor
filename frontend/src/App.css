@@ -6943,3 +6943,248 @@ summary:focus-visible,
   color: #0f172a;
   cursor: pointer;
 }
+
+/* 1-Level Neighbourhood Graph */
+.neighborhood-graph-wrap {
+  width: 100%;
+  margin: 14px 0;
+}
+
+.neighborhood-desktop-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.neighborhood-mobile-stack {
+  display: none;
+}
+
+@media (max-width: 700px) {
+  .neighborhood-desktop-svg {
+    display: none !important;
+  }
+  .neighborhood-mobile-stack {
+    display: flex !important;
+    flex-direction: column;
+    gap: 14px;
+    padding: 12px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+  }
+}
+
+.mobile-col-heading {
+  font-size: 13px;
+  font-weight: 700;
+  color: #475569;
+  margin: 0 0 8px 0;
+}
+
+.mobile-node-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mobile-node-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.mobile-node-btn:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+
+.mobile-node-btn.btn-more {
+  background: #f1f5f9;
+  border: 1px dashed #94a3b8;
+  color: #2563eb;
+  font-weight: 600;
+  justify-content: center;
+}
+
+.mobile-node-btn.btn-less {
+  background: #f8fafc;
+  color: #64748b;
+  justify-content: center;
+}
+
+.mobile-node-center {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: #eff6ff;
+  border: 2px solid #2563eb;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.neighborhood-tiny-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 10px;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.legend-tag {
+  font-weight: 600;
+}
+
+.legend-tag.tag-entry {
+  color: #059669;
+}
+
+.legend-tag.tag-hotspot {
+  color: #dc2626;
+}
+
+.legend-tag.tag-config {
+  color: #d97706;
+}
+
+.legend-tag.tag-test {
+  color: #7c3aed;
+}
+
+/* Collapsed Details Accordion inside Inspecting Panel */
+.inspecting-details-accordion {
+  margin-top: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.inspecting-details-summary {
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+}
+
+.inspecting-details-summary:hover {
+  color: #2563eb;
+}
+
+.inspecting-details-content {
+  padding: 14px;
+  border-top: 1px solid #e2e8f0;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Analysis Summary Strip & Badge in More analysis */
+.analysis-summary-strip {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.analysis-meta-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.analysis-meta-stat .meta-number {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.analysis-meta-stat .meta-label {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.analysis-meta-summary {
+  font-size: 13px;
+  color: #334155;
+}
+
+.analysis-badge-section {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.badge-preview-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.badge-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.badge-copy-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 200px;
+}
+
+.badge-markdown-code {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 12px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge-copy-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.badge-copy-btn.copied {
+  color: #166534;
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
